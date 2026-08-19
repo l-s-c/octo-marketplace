@@ -144,7 +144,7 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 
 		pluginSvc := pluginsvc.New(pluginRepo, store)
 		pluginSvc.SetArtifactLimits(int64(storageCfg.MaxMB) << 20)
-		pluginhandler.New(pluginSvc, pluginhandler.NewRepositoryCategories(pluginRepo)).Register(v1)
+		pluginhandler.New(pluginSvc, pluginsvc.NewCategories(pluginRepo)).Register(v1)
 
 		catSvc := categorysvc.New(catRepo, skRepo)
 		skSvc := skillsvc.New(skRepo, catRepo, store, generateID)

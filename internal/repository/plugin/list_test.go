@@ -15,7 +15,7 @@ func TestListReturnsTotalAndAppliesConfirmedFilters(t *testing.T) {
 	scope := Scope{CallerUID: "caller", SpaceID: "space"}
 	args := []driver.Value{"home", "space", "caller", model.PluginTypeSkill, "cat", "100%_done!", "%100!%!_done!!%"}
 	mock.ExpectQuery(`SELECT COUNT\(DISTINCT p.plugin_id\).*JOIN plugin_placements.*pp.placement_code=\?.*p.status=1.*JSON_CONTAINS.*p.plugin_name LIKE \? ESCAPE '!'`).WithArgs(args...).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(7))
-	mock.ExpectQuery(`SELECT .*JOIN plugin_placements.*p.status=1.*ORDER BY pp.sort_order ASC,p.plugin_id ASC LIMIT \? OFFSET \?`).WithArgs(append(args, 20, 0)...).WillReturnRows(sqlmock.NewRows(pluginTestColumns()))
+	mock.ExpectQuery(`SELECT .*JOIN plugin_placements.*p.status=1.*GROUP BY p.plugin_id ORDER BY MIN\(pp.sort_order\) ASC,p.plugin_id ASC LIMIT \? OFFSET \?`).WithArgs(append(args, 20, 0)...).WillReturnRows(sqlmock.NewRows(pluginTestColumns()))
 	items, total, err := New(db).List(context.Background(), scope, ListFilter{PlacementCode: "home", Type: model.PluginTypeSkill, CategoryID: "cat", Tag: "100%_done!", Keyword: "100%_done!", Sort: "placement"})
 	if err != nil {
 		t.Fatal(err)

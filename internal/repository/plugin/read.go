@@ -50,7 +50,13 @@ func (r *Repo) List(ctx context.Context, scope Scope, f ListFilter) ([]model.Plu
 		limit = 100
 	}
 	queryArgs := append(append([]any(nil), args...), limit, max(f.Offset, 0))
-	q := `SELECT ` + pluginColumns + from + where + listOrder(f) + ` LIMIT ? OFFSET ?`
+	// The placement join can yield one row per (placement_code, category) pair
+	// for the same plugin; collapse to one row so the page matches the total.
+	group := ``
+	if f.PlacementCode != "" {
+		group = ` GROUP BY p.plugin_id`
+	}
+	q := `SELECT ` + pluginColumns + from + where + group + listOrder(f) + ` LIMIT ? OFFSET ?`
 	rows, err := r.db.QueryContext(ctx, q, queryArgs...)
 	if err != nil {
 		return nil, 0, err
@@ -114,7 +120,7 @@ func listOrder(f ListFilter) string {
 		return ` ORDER BY p.plugin_name ASC,p.plugin_id ASC`
 	case "placement":
 		if f.PlacementCode != "" {
-			return ` ORDER BY pp.sort_order ASC,p.plugin_id ASC`
+			return ` ORDER BY MIN(pp.sort_order) ASC,p.plugin_id ASC`
 		}
 	}
 	return ` ORDER BY p.created_at DESC,p.plugin_id DESC`

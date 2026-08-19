@@ -173,6 +173,10 @@ func (r *Repo) Publish(ctx context.Context, scope Scope, p PublishParams) (*mode
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO plugin_placements (placement_id,placement_code,plugin_id,category_id,visible,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`, id, x.PlacementCode, p.PluginID, x.CategoryID, x.Visible, x.SortOrder, now, now)
 		if err != nil {
+			var me *mysql.MySQLError
+			if errors.As(err, &me) && me.Number == 1062 {
+				return nil, ErrConflict
+			}
 			return nil, err
 		}
 	}

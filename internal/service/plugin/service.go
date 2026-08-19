@@ -217,6 +217,9 @@ func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, re
 		return nil, err
 	}
 	p.CreatedAt, p.CurrentVersionID = old.CreatedAt, old.CurrentVersionID
+	// Creation provenance is immutable; keep the original creator identity.
+	p.CreatorName, p.CreatedByType = old.CreatorName, old.CreatedByType
+	p.CreatedByBotUID, p.CreatedByBotName = old.CreatedByBotUID, old.CreatedByBotName
 	for i := range rels {
 		rels[i].SourcePluginID = pluginID
 	}

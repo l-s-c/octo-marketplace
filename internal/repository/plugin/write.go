@@ -68,13 +68,12 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) error {
 	if err = lockRelationTargets(ctx, tx, scope, p.Type, m.Relations); err != nil {
 		return err
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,creator_name=?,created_by_type=?,created_by_bot_uid=?,created_by_bot_name=?,manifest_json=?,plugin_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
-WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.Visibility, p.CreatorName, p.CreatedByType, p.CreatedByBotUID, p.CreatedByBotName, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.Status, now, p.ID, scope.CallerUID, scope.SpaceID)
+	// getOwnedForUpdate already proved existence under lock; RowsAffected reports
+	// changed rows, so a byte-identical resubmit must not surface as not found.
+	_, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,manifest_json=?,plugin_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
+WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.Visibility, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.Status, now, p.ID, scope.CallerUID, scope.SpaceID)
 	if err != nil {
 		return wrapped("update", err)
-	}
-	if err = mustAffect(res); err != nil {
-		return err
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE plugin_relations r JOIN plugins p ON p.plugin_id=r.source_plugin_id
 SET r.deleted_at=?,r.updated_at=? WHERE r.source_plugin_id=? AND p.owner_uid=? AND p.space_id=? AND p.deleted_at IS NULL AND r.deleted_at IS NULL`, now, now, p.ID, scope.CallerUID, scope.SpaceID)
@@ -129,7 +128,7 @@ WHERE source_plugin_id=? AND deleted_at IS NULL`, now, now, pluginID)
 func rejectLiveIncomingRelations(ctx context.Context, tx *sql.Tx, pluginID string) error {
 	rows, err := tx.QueryContext(ctx, `SELECT r.relation_id FROM plugin_relations r
 JOIN plugins source ON source.plugin_id=r.source_plugin_id
-WHERE r.target_plugin_id=? AND r.deleted_at IS NULL
+WHERE r.target_plugin_id=? AND r.status=1 AND r.deleted_at IS NULL
 AND source.deleted_at IS NULL AND source.status=1
 ORDER BY r.relation_id FOR UPDATE`, pluginID)
 	if err != nil {

@@ -2,6 +2,7 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,7 +42,7 @@ type Service interface {
 }
 
 // CategoryService is separate because category listing is a read-only operation
-// not currently exported by the concurrently finalized Plugin service.
+// served by the read-side category service rather than the full Plugin service.
 type CategoryService interface {
 	ListCategories(context.Context, pluginsvc.Caller, string, model.PluginType) ([]model.PluginCategory, error)
 }
@@ -270,6 +271,7 @@ func (h *Handler) List(c *gin.Context) {
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 409 {object} apiresponse.Error "CONFLICT"
+// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /plugins [post]
 func (h *Handler) Create(c *gin.Context) {
@@ -336,6 +338,7 @@ func (h *Handler) Get(c *gin.Context) {
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 409 {object} apiresponse.Error "CONFLICT"
+// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /plugins/{plugin_id} [patch]
 func (h *Handler) Update(c *gin.Context) {
@@ -484,6 +487,7 @@ func (h *Handler) ListVersions(c *gin.Context) {
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 409 {object} apiresponse.Error "CONFLICT"
+// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /plugins/{plugin_id}/publish [post]
 func (h *Handler) Publish(c *gin.Context) {
@@ -524,6 +528,7 @@ func (h *Handler) Publish(c *gin.Context) {
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 409 {object} apiresponse.Error "CONFLICT"
+// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /plugins/{plugin_id}/duplicate [post]
 func (h *Handler) Duplicate(c *gin.Context) {
@@ -686,8 +691,12 @@ func (h *Handler) ListCategories(c *gin.Context) {
 		return
 	}
 	placement, typ := strings.TrimSpace(c.Query("placement_code")), model.PluginType(c.Query("type"))
-	if placement == "" || typ == "" {
+	if placement == "" {
 		validation(c, "placement_code")
+		return
+	}
+	if typ == "" {
+		validation(c, "type")
 		return
 	}
 	if h.categories == nil {
@@ -803,8 +812,10 @@ func rawJSON(value any) json.RawMessage {
 }
 
 func normalizedObjectRaw(raw json.RawMessage) json.RawMessage {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var out map[string]any
-	if json.Unmarshal(raw, &out) != nil || out == nil {
+	if dec.Decode(&out) != nil || out == nil {
 		return json.RawMessage(`{}`)
 	}
 	return rawJSON(out)
