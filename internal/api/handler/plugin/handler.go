@@ -244,7 +244,16 @@ func (h *Handler) List(c *gin.Context) {
 		validation(c, "pagination")
 		return
 	}
-	items, total, err := h.svc.List(c.Request.Context(), caller, pluginsvc.ListParams{PlacementCode: c.Query("placement_code"), Type: model.PluginType(c.Query("type")), CategoryID: c.Query("category_id"), Tag: c.Query("tag"), Keyword: c.Query("keyword"), Mine: c.Query("mine") == "true", Sort: c.Query("sort"), Limit: pageSize, Offset: (page - 1) * pageSize})
+	mine := false
+	if raw, present := c.GetQuery("mine"); present {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			validation(c, "mine")
+			return
+		}
+		mine = parsed
+	}
+	items, total, err := h.svc.List(c.Request.Context(), caller, pluginsvc.ListParams{PlacementCode: c.Query("placement_code"), Type: model.PluginType(c.Query("type")), CategoryID: c.Query("category_id"), Tag: c.Query("tag"), Keyword: c.Query("keyword"), Mine: mine, Sort: c.Query("sort"), Limit: pageSize, Offset: (page - 1) * pageSize})
 	if err != nil {
 		writeServiceError(c, err, "plugin.list")
 		return
@@ -391,7 +400,7 @@ func (h *Handler) Delete(c *gin.Context) {
 
 // ListAuditLogs godoc
 // @Summary List plugin audit logs
-// @Description List append-only audit records for a visible Plugin using offset pagination.
+// @Description List append-only audit records for a caller-owned Plugin in the current Space using offset pagination.
 // @Tags plugin
 // @ID plugin.audit_log.list
 // @Accept json

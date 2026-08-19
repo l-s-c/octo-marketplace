@@ -11,7 +11,7 @@ import (
 )
 
 // ListFilter restricts a scoped Plugin listing. Sort accepts newest (default),
-// oldest, name, or placement; unknown values safely use newest.
+// oldest, name, or placement; callers validate unsupported values.
 type ListFilter struct {
 	PlacementCode string
 	Type          model.PluginType

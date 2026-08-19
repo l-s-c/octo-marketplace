@@ -6347,8 +6347,8 @@ paths:
       - plugin
   /plugins/{plugin_id}/audit_logs:
     get:
-      description: List append-only audit records for a visible Plugin using offset
-        pagination.
+      description: List append-only audit records for a caller-owned Plugin in the
+        current Space using offset pagination.
       operationId: plugin.audit_log.list
       parameters:
       - description: Plugin ID

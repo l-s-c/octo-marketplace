@@ -111,6 +111,15 @@ func TestCreateValidatesAndCanonicalizes(t *testing.T) {
 	}
 }
 
+func TestListRejectsUnsupportedSort(t *testing.T) {
+	svc := fixedService(&fakeStore{})
+	for _, params := range []ListParams{{Sort: "surprise"}, {Sort: "placement"}} {
+		if _, _, err := svc.List(context.Background(), testCaller, params); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("List(%#v) error = %v, want ErrInvalidRequest", params, err)
+		}
+	}
+}
+
 func TestCreateRejectsInvalidFieldsAndJSONShapes(t *testing.T) {
 	tests := []struct {
 		name   string

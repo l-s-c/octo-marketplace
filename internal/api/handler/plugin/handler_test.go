@@ -232,6 +232,15 @@ func TestHistoryListsUseExactRepositoryTotals(t *testing.T) {
 	}
 }
 
+func TestListRejectsMalformedMine(t *testing.T) {
+	f := &fakeService{}
+	rec := httptest.NewRecorder()
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins?mine=definitely", nil))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"field":"mine"`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestListUsesOffsetEnvelope(t *testing.T) {
 	f := &fakeService{list: []model.Plugin{{ID: "p1", Name: "One"}}}
 	rec := httptest.NewRecorder()

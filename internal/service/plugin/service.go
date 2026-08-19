@@ -156,6 +156,12 @@ func (s *Service) List(ctx context.Context, caller Caller, p ListParams) ([]mode
 	if p.Type != "" && !validPluginType(p.Type) {
 		return nil, 0, ErrInvalidRequest
 	}
+	if p.Sort != "" && p.Sort != "newest" && p.Sort != "oldest" && p.Sort != "name" && p.Sort != "placement" {
+		return nil, 0, ErrInvalidRequest
+	}
+	if p.Sort == "placement" && strings.TrimSpace(p.PlacementCode) == "" {
+		return nil, 0, ErrInvalidRequest
+	}
 	if p.Limit < 0 || p.Limit > maxListLimit || p.Offset < 0 {
 		return nil, 0, ErrInvalidRequest
 	}
