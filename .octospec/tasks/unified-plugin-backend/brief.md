@@ -30,6 +30,11 @@ compatibility after cutover.
 - Team members and embedded Expert/Member Skills are ordinary Plugin rows;
   composition is represented by `plugin_relations`.
 - Published Plugin versions are immutable and audit records are append-only.
+- The confirmed audit schema stores one action snapshot pair, not separate
+  before/after JSON documents: create, update, publish, duplicate, and import
+  store the resulting state; delete stores the last state before deletion.
+  `before_hash` and `after_hash` describe the transition and do not imply that
+  two JSON snapshot pairs exist in the row.
 - Point placement is represented by `placement_code`, not separate scene/slot
   columns. Category and Plugin placement records carry visibility and order.
 - Connector package/version/audit data must not persist or log secret values.
