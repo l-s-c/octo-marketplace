@@ -32,6 +32,48 @@ func TestGetVersionUsesVisiblePluginScope(t *testing.T) {
 	}
 }
 
+func TestListVersionsReturnsExactScopedTotalForEmptyPage(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	now := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
+	mock.ExpectQuery(`SELECT .* FROM plugins p.*p.plugin_id=\?.*p.status=1.*p.space_id = \?.*p.owner_uid = \?`).
+		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID).
+		WillReturnRows(ownedPluginRow("plugin-id", scope, now))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugin_versions v JOIN plugins p ON p.plugin_id=v.plugin_id WHERE v.plugin_id=\? AND p.status=1.*p.space_id = \?.*p.owner_uid = \?`).
+		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(42))
+	mock.ExpectQuery(`SELECT v.version_id.*WHERE v.plugin_id=\? AND p.status=1.*p.space_id = \?.*p.owner_uid = \?.*LIMIT \? OFFSET \?`).
+		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID, 20, 40).
+		WillReturnRows(sqlmock.NewRows([]string{"version_id", "plugin_id", "version", "manifest_json", "plugin_json", "manifest_hash", "plugin_hash", "relations_json", "changelog", "created_by", "created_at"}))
+
+	items, total, err := r.ListVersions(context.Background(), scope, "plugin-id", 20, 40)
+	if err != nil || len(items) != 0 || total != 42 {
+		t.Fatalf("items=%#v total=%d err=%v", items, total, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListVersionsCrossSpaceReturnsNotFoundBeforeCount(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	mock.ExpectQuery(`SELECT .* FROM plugins p.*p.plugin_id=\?.*p.status=1.*p.space_id = \?.*p.owner_uid = \?`).
+		WithArgs("foreign", scope.SpaceID, scope.CallerUID).
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()))
+
+	_, _, err := New(db).ListVersions(context.Background(), scope, "foreign", 20, 0)
+	if err != ErrNotFound {
+		t.Fatalf("err=%v, want ErrNotFound", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPublishSnapshotsLockedStateAndRelationsAndReturnsStoredVersion(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
@@ -67,6 +109,37 @@ func TestPublishSnapshotsLockedStateAndRelationsAndReturnsStoredVersion(t *testi
 	var relations []model.PluginRelation
 	if err := json.Unmarshal(version.Relations, &relations); err != nil || len(relations) != 1 || relations[0].TargetPluginID != "target-id" {
 		t.Fatalf("relations=%s err=%v", version.Relations, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublishLocksAndValidatesPlacementCategory(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	r.id = func() string { return "version-id" }
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	category := "cat-1"
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\?.*FOR UPDATE`).
+		WithArgs("plugin-id", scope.CallerUID, scope.SpaceID).
+		WillReturnRows(ownedPluginRow("plugin-id", scope, now))
+	mock.ExpectQuery(`SELECT r.relation_id.*FOR UPDATE`).
+		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID).
+		WillReturnRows(relationRows("plugin-id", "target-id"))
+	mock.ExpectQuery(`SELECT c.category_id FROM plugin_categories c.*JOIN plugin_category_placements cp ON cp.category_id=c.category_id.*JSON_CONTAINS.*cp.placement_code=\?.*cp.plugin_type=\?.*cp.visible=1.*FOR UPDATE`).
+		WithArgs(category, model.PluginTypeExpert, "home", model.PluginTypeExpert).
+		WillReturnRows(sqlmock.NewRows([]string{"category_id"}))
+	mock.ExpectRollback()
+
+	_, err := r.Publish(context.Background(), scope, PublishParams{PluginID: "plugin-id", Version: "1.0.0", CreatedBy: "caller", Placements: []model.PluginPlacement{{PlacementCode: "home", CategoryID: &category}}})
+	if err != ErrInvalidPlacement {
+		t.Fatalf("Publish error = %v, want ErrInvalidPlacement", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

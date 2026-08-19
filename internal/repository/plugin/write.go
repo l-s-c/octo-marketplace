@@ -90,7 +90,9 @@ SET r.deleted_at=?,r.updated_at=? WHERE r.source_plugin_id=? AND p.owner_uid=? A
 	return tx.Commit()
 }
 
-// Delete soft-deletes an owned Plugin, invalidates its relation edges, and appends audit.
+// Delete soft-deletes an owned Plugin, invalidates its outgoing relation edges,
+// and appends an audit event. A live Plugin cannot be deleted while another
+// live, active Plugin has a live, active incoming relation to it.
 func (r *Repo) Delete(ctx context.Context, scope Scope, pluginID, operatorID, operatorName, requestID string, remark *string) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -101,6 +103,9 @@ func (r *Repo) Delete(ctx context.Context, scope Scope, pluginID, operatorID, op
 	if err != nil {
 		return err
 	}
+	if err = rejectLiveIncomingRelations(ctx, tx, pluginID); err != nil {
+		return err
+	}
 	now := r.now()
 	res, err := tx.ExecContext(ctx, `UPDATE plugins SET deleted_at=?,updated_at=? WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, now, now, pluginID, scope.CallerUID, scope.SpaceID)
 	if err != nil {
@@ -109,8 +114,8 @@ func (r *Repo) Delete(ctx context.Context, scope Scope, pluginID, operatorID, op
 	if err = mustAffect(res); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE plugin_relations r JOIN plugins p ON p.plugin_id=? SET r.deleted_at=?,r.updated_at=?
-WHERE (r.source_plugin_id=? OR r.target_plugin_id=?) AND p.owner_uid=? AND p.space_id=? AND p.deleted_at=? AND r.deleted_at IS NULL`, pluginID, now, now, pluginID, pluginID, scope.CallerUID, scope.SpaceID, now)
+	_, err = tx.ExecContext(ctx, `UPDATE plugin_relations SET deleted_at=?,updated_at=?
+WHERE source_plugin_id=? AND deleted_at IS NULL`, now, now, pluginID)
 	if err != nil {
 		return err
 	}
@@ -119,6 +124,22 @@ WHERE (r.source_plugin_id=? OR r.target_plugin_id=?) AND p.owner_uid=? AND p.spa
 		return err
 	}
 	return tx.Commit()
+}
+
+func rejectLiveIncomingRelations(ctx context.Context, tx *sql.Tx, pluginID string) error {
+	rows, err := tx.QueryContext(ctx, `SELECT r.relation_id FROM plugin_relations r
+JOIN plugins source ON source.plugin_id=r.source_plugin_id
+WHERE r.target_plugin_id=? AND r.deleted_at IS NULL
+AND source.deleted_at IS NULL AND source.status=1
+ORDER BY r.relation_id FOR UPDATE`, pluginID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return ErrConflict
+	}
+	return rows.Err()
 }
 
 func getOwnedForUpdate(ctx context.Context, tx *sql.Tx, scope Scope, id string) (*model.Plugin, error) {

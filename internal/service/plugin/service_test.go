@@ -21,6 +21,10 @@ type fakeStore struct {
 	publishParams pluginrepo.PublishParams
 	duplicate     model.Plugin
 	duplicateMeta pluginrepo.Mutation
+	audits        []model.PluginAuditLog
+	auditTotal    int64
+	versions      []model.PluginVersion
+	versionTotal  int64
 	err           error
 }
 
@@ -53,11 +57,11 @@ func (f *fakeStore) Delete(_ context.Context, s pluginrepo.Scope, _, _, _, _ str
 	f.deleteScope = s
 	return f.err
 }
-func (f *fakeStore) ListAudits(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginAuditLog, error) {
-	return nil, f.err
+func (f *fakeStore) ListAudits(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginAuditLog, int64, error) {
+	return f.audits, f.auditTotal, f.err
 }
-func (f *fakeStore) ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, error) {
-	return nil, f.err
+func (f *fakeStore) ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, int64, error) {
+	return f.versions, f.versionTotal, f.err
 }
 func (f *fakeStore) GetVersion(_ context.Context, _ pluginrepo.Scope, pluginID, version string) (*model.PluginVersion, error) {
 	if f.err != nil {
@@ -209,6 +213,31 @@ func TestRelationSourceTargetValidation(t *testing.T) {
 	}
 }
 
+func TestHistoryListsPropagateExactTotalsAndNotFound(t *testing.T) {
+	f := &fakeStore{
+		audits:       []model.PluginAuditLog{{ID: "audit-1"}},
+		auditTotal:   37,
+		versions:     []model.PluginVersion{{ID: "version-1"}},
+		versionTotal: 42,
+	}
+	svc := fixedService(f)
+	audits, auditTotal, err := svc.ListAuditLogs(context.Background(), testCaller, "plugin-1", 20, 20)
+	if err != nil || len(audits) != 1 || auditTotal != 37 {
+		t.Fatalf("audits=%#v total=%d err=%v", audits, auditTotal, err)
+	}
+	versions, versionTotal, err := svc.ListVersions(context.Background(), testCaller, "plugin-1", 20, 40)
+	if err != nil || len(versions) != 1 || versionTotal != 42 {
+		t.Fatalf("versions=%#v total=%d err=%v", versions, versionTotal, err)
+	}
+	f.err = pluginrepo.ErrNotFound
+	if _, _, err := svc.ListAuditLogs(context.Background(), testCaller, "foreign", 20, 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("audit not found err=%v", err)
+	}
+	if _, _, err := svc.ListVersions(context.Background(), testCaller, "foreign", 20, 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("version not found err=%v", err)
+	}
+}
+
 func TestPublishUsesRepositoryContractAndReturnedVersionID(t *testing.T) {
 	f := &fakeStore{plugins: map[string]*model.Plugin{
 		"plugin-1": {ID: "plugin-1", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p"},
@@ -219,6 +248,20 @@ func TestPublishUsesRepositoryContractAndReturnedVersionID(t *testing.T) {
 	}
 	if version.ID != "version-new" || string(version.Manifest) != `{"stored":true}` || f.publishParams.PluginID != "plugin-1" || f.publishParams.CreatedBy != testCaller.UID || len(f.publishParams.Placements) != 1 {
 		t.Fatalf("version=%#v params=%#v", version, f.publishParams)
+	}
+}
+
+func TestRepositoryConflictsAndInvalidPlacementsMapToServiceErrors(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{
+		"plugin-1": {ID: "plugin-1", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},
+	}}
+	f.err = pluginrepo.ErrConflict
+	if err := fixedService(f).Delete(context.Background(), testCaller, "plugin-1"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Delete conflict = %v, want ErrConflict", err)
+	}
+	f.err = pluginrepo.ErrInvalidPlacement
+	if _, err := fixedService(f).Publish(context.Background(), testCaller, "plugin-1", PublishRequest{Version: "1.0.0"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Publish invalid placement = %v, want ErrInvalidRequest", err)
 	}
 }
 

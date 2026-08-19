@@ -43,8 +43,8 @@ type Store interface {
 	Create(context.Context, pluginrepo.Scope, pluginrepo.Mutation) error
 	Update(context.Context, pluginrepo.Scope, pluginrepo.Mutation) error
 	Delete(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
-	ListAudits(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginAuditLog, error)
-	ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, error)
+	ListAudits(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginAuditLog, int64, error)
+	ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, int64, error)
 	GetVersion(context.Context, pluginrepo.Scope, string, string) (*model.PluginVersion, error)
 	Publish(context.Context, pluginrepo.Scope, pluginrepo.PublishParams) (*model.PluginVersion, error)
 	DuplicateGraph(context.Context, pluginrepo.Scope, string, model.Plugin, pluginrepo.Mutation) error
@@ -242,20 +242,20 @@ func (s *Service) Delete(ctx context.Context, caller Caller, pluginID string) er
 	return mapStoreError(s.repo.Delete(ctx, scope(caller), pluginID, audit.OperatorID, audit.OperatorName, audit.RequestID, audit.Remark))
 }
 
-func (s *Service) ListAuditLogs(ctx context.Context, caller Caller, pluginID string, limit, offset int) ([]model.PluginAuditLog, error) {
+func (s *Service) ListAuditLogs(ctx context.Context, caller Caller, pluginID string, limit, offset int) ([]model.PluginAuditLog, int64, error) {
 	if validateReadPage(caller, pluginID, limit, offset) != nil {
-		return nil, ErrInvalidRequest
+		return nil, 0, ErrInvalidRequest
 	}
-	v, err := s.repo.ListAudits(ctx, scope(caller), pluginID, limit, offset)
-	return v, mapStoreError(err)
+	items, total, err := s.repo.ListAudits(ctx, scope(caller), pluginID, limit, offset)
+	return items, total, mapStoreError(err)
 }
 
-func (s *Service) ListVersions(ctx context.Context, caller Caller, pluginID string, limit, offset int) ([]model.PluginVersion, error) {
+func (s *Service) ListVersions(ctx context.Context, caller Caller, pluginID string, limit, offset int) ([]model.PluginVersion, int64, error) {
 	if validateReadPage(caller, pluginID, limit, offset) != nil {
-		return nil, ErrInvalidRequest
+		return nil, 0, ErrInvalidRequest
 	}
-	v, err := s.repo.ListVersions(ctx, scope(caller), pluginID, limit, offset)
-	return v, mapStoreError(err)
+	items, total, err := s.repo.ListVersions(ctx, scope(caller), pluginID, limit, offset)
+	return items, total, mapStoreError(err)
 }
 
 func (s *Service) Publish(ctx context.Context, caller Caller, pluginID string, req PublishRequest) (*model.PluginVersion, error) {
@@ -450,7 +450,7 @@ func mapStoreError(err error) error {
 		return ErrNotFound
 	case errors.Is(err, pluginrepo.ErrConflict):
 		return ErrConflict
-	case errors.Is(err, pluginrepo.ErrInvalidRelation):
+	case errors.Is(err, pluginrepo.ErrInvalidRelation), errors.Is(err, pluginrepo.ErrInvalidPlacement):
 		return ErrInvalidRequest
 	case errors.Is(err, pluginrepo.ErrUnsafeConnectorData):
 		return ErrSecretValue

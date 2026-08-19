@@ -30,8 +30,8 @@ type Service interface {
 	Create(context.Context, pluginsvc.Caller, pluginsvc.WriteRequest) (*pluginsvc.Detail, error)
 	Update(context.Context, pluginsvc.Caller, string, pluginsvc.WriteRequest) (*pluginsvc.Detail, error)
 	Delete(context.Context, pluginsvc.Caller, string) error
-	ListAuditLogs(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginAuditLog, error)
-	ListVersions(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginVersion, error)
+	ListAuditLogs(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginAuditLog, int64, error)
+	ListVersions(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginVersion, int64, error)
 	Publish(context.Context, pluginsvc.Caller, string, pluginsvc.PublishRequest) (*model.PluginVersion, error)
 	Duplicate(context.Context, pluginsvc.Caller, string, string) (*model.Plugin, error)
 	InitAttachmentUpload(context.Context, pluginsvc.Caller, string, string, int64) (*pluginsvc.AttachmentUpload, error)
@@ -84,11 +84,11 @@ type relationRequest struct {
 
 type writeRequest struct {
 	Name       string                 `json:"name"`
-	Type       model.PluginType       `json:"type" enums:"expert,expert_team,skill,connector"`
+	Type       model.PluginType       `json:"type"`
 	CategoryID *string                `json:"category_id,omitempty"`
 	Tags       []string               `json:"tags"`
 	Publisher  string                 `json:"publisher,omitempty"`
-	Visibility model.PluginVisibility `json:"visibility" enums:"public,space,private,system"`
+	Visibility model.PluginVisibility `json:"visibility"`
 	Manifest   map[string]any         `json:"manifest"`
 	Package    map[string]any         `json:"package"`
 	Relations  []relationRequest      `json:"relations,omitempty"`
@@ -415,7 +415,7 @@ func (h *Handler) ListAuditLogs(c *gin.Context) {
 		validation(c, "pagination")
 		return
 	}
-	items, err := h.svc.ListAuditLogs(c.Request.Context(), caller, c.Param("plugin_id"), size, (page-1)*size)
+	items, total, err := h.svc.ListAuditLogs(c.Request.Context(), caller, c.Param("plugin_id"), size, (page-1)*size)
 	if err != nil {
 		writeServiceError(c, err, "plugin.audit_log.list")
 		return
@@ -424,7 +424,7 @@ func (h *Handler) ListAuditLogs(c *gin.Context) {
 	for i, x := range items {
 		out[i] = auditDTO(x)
 	}
-	apiresponse.Offset(c, out, (page-1)*size+len(out), page, size)
+	apiresponse.Offset(c, out, int(total), page, size)
 }
 
 // ListVersions godoc
@@ -456,7 +456,7 @@ func (h *Handler) ListVersions(c *gin.Context) {
 		validation(c, "pagination")
 		return
 	}
-	items, err := h.svc.ListVersions(c.Request.Context(), caller, c.Param("plugin_id"), size, (page-1)*size)
+	items, total, err := h.svc.ListVersions(c.Request.Context(), caller, c.Param("plugin_id"), size, (page-1)*size)
 	if err != nil {
 		writeServiceError(c, err, "plugin.version.list")
 		return
@@ -465,7 +465,7 @@ func (h *Handler) ListVersions(c *gin.Context) {
 	for i, x := range items {
 		out[i] = versionDTO(x)
 	}
-	apiresponse.Offset(c, out, (page-1)*size+len(out), page, size)
+	apiresponse.Offset(c, out, int(total), page, size)
 }
 
 // Publish godoc

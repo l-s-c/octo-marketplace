@@ -20,15 +20,19 @@ import (
 )
 
 type fakeService struct {
-	caller     pluginsvc.Caller
-	write      pluginsvc.WriteRequest
-	list       []model.Plugin
-	detail     *pluginsvc.Detail
-	err        error
-	upload     *pluginsvc.AttachmentUpload
-	download   *pluginsvc.AttachmentDownload
-	archive    *pluginsvc.Archive
-	archiveZip []byte
+	caller       pluginsvc.Caller
+	write        pluginsvc.WriteRequest
+	list         []model.Plugin
+	detail       *pluginsvc.Detail
+	err          error
+	upload       *pluginsvc.AttachmentUpload
+	download     *pluginsvc.AttachmentDownload
+	archive      *pluginsvc.Archive
+	archiveZip   []byte
+	audits       []model.PluginAuditLog
+	auditTotal   int64
+	versions     []model.PluginVersion
+	versionTotal int64
 }
 
 func (f *fakeService) List(_ context.Context, c pluginsvc.Caller, _ pluginsvc.ListParams) ([]model.Plugin, int64, error) {
@@ -51,11 +55,11 @@ func (f *fakeService) Delete(_ context.Context, c pluginsvc.Caller, _ string) er
 	f.caller = c
 	return f.err
 }
-func (f *fakeService) ListAuditLogs(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginAuditLog, error) {
-	return nil, f.err
+func (f *fakeService) ListAuditLogs(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginAuditLog, int64, error) {
+	return f.audits, f.auditTotal, f.err
 }
-func (f *fakeService) ListVersions(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginVersion, error) {
-	return nil, f.err
+func (f *fakeService) ListVersions(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginVersion, int64, error) {
+	return f.versions, f.versionTotal, f.err
 }
 func (f *fakeService) Publish(context.Context, pluginsvc.Caller, string, pluginsvc.PublishRequest) (*model.PluginVersion, error) {
 	return &model.PluginVersion{}, f.err
@@ -190,6 +194,41 @@ func TestArchivePreflightErrorsRemainSanitizedJSON(t *testing.T) {
 	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins/p1/archive", nil))
 	if rec.Code != http.StatusInternalServerError || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") || strings.Contains(rec.Body.String(), "/secret/key") {
 		t.Fatalf("status=%d headers=%#v body=%s", rec.Code, rec.Header(), rec.Body.String())
+	}
+}
+
+func TestHistoryListsUseExactRepositoryTotals(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		fake *fakeService
+	}{
+		{name: "audits", url: "/api/v1/plugins/p1/audit_logs?page=2&page_size=10", fake: &fakeService{audits: []model.PluginAuditLog{{ID: "a1"}}, auditTotal: 37}},
+		{name: "versions", url: "/api/v1/plugins/p1/versions?page=3&page_size=10", fake: &fakeService{versions: []model.PluginVersion{{ID: "v1", Relations: json.RawMessage(`[]`)}}, versionTotal: 42}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			testEngine(tt.fake).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tt.url, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			var body struct {
+				Pagination struct {
+					Total int `json:"total"`
+				} `json:"pagination"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			want := 37
+			if tt.name == "versions" {
+				want = 42
+			}
+			if body.Pagination.Total != want {
+				t.Fatalf("pagination.total=%d want=%d body=%s", body.Pagination.Total, want, rec.Body.String())
+			}
+		})
 	}
 }
 

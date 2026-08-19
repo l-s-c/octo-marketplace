@@ -757,10 +757,6 @@ components:
       - expert_team
       - skill
       - connector
-      - expert
-      - expert_team
-      - skill
-      - connector
       type: string
       x-enum-varnames:
       - PluginTypeExpert
@@ -769,10 +765,6 @@ components:
       - PluginTypeConnector
     github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginVisibility:
       enum:
-      - public
-      - space
-      - private
-      - system
       - public
       - space
       - private

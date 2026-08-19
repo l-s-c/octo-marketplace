@@ -26,7 +26,7 @@ type ListFilter struct {
 
 func (r *Repo) Get(ctx context.Context, scope Scope, pluginID string) (*model.Plugin, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+pluginColumns+` FROM plugins p
-WHERE p.plugin_id=? AND p.deleted_at IS NULL AND `+visibilitySQL, pluginID, scope.SpaceID, scope.CallerUID)
+WHERE p.plugin_id=? AND p.status=1 AND p.deleted_at IS NULL AND `+visibilitySQL, pluginID, scope.SpaceID, scope.CallerUID)
 	p, err := scanPlugin(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -77,7 +77,7 @@ func buildListQuery(scope Scope, f ListFilter) (string, string, []any) {
 		from += ` JOIN plugin_placements pp ON pp.plugin_id=p.plugin_id AND pp.placement_code=? AND pp.visible=1`
 		args = append(args, f.PlacementCode)
 	}
-	where := ` WHERE p.deleted_at IS NULL AND ` + visibilitySQL
+	where := ` WHERE p.status=1 AND p.deleted_at IS NULL AND ` + visibilitySQL
 	args = append(args, scope.SpaceID, scope.CallerUID)
 	if f.Type != "" {
 		where += ` AND p.plugin_type=?`
@@ -134,7 +134,7 @@ func (r *Repo) GetWithRelations(ctx context.Context, scope Scope, pluginID strin
 	rows, err := r.db.QueryContext(ctx, `SELECT r.relation_id,r.source_plugin_id,r.target_plugin_id,r.relation_type,r.sort_order,
  r.relation_json,r.status,r.created_by,r.created_at,r.updated_at,r.deleted_at
 FROM plugin_relations r JOIN plugins p ON p.plugin_id=r.target_plugin_id
-WHERE r.source_plugin_id=? AND r.deleted_at IS NULL AND p.deleted_at IS NULL AND `+visibilitySQL+`
+WHERE r.source_plugin_id=? AND r.status=1 AND r.deleted_at IS NULL AND p.status=1 AND p.deleted_at IS NULL AND `+visibilitySQL+`
 ORDER BY r.sort_order,r.relation_id`, pluginID, scope.SpaceID, scope.CallerUID)
 	if err != nil {
 		return nil, nil, err
