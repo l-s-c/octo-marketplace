@@ -100,6 +100,24 @@ func TestBuildExpertAndSquadGraph(t *testing.T) {
 	}
 }
 
+func TestPlanHashMatchesVerifyProjection(t *testing.T) {
+	p := plan{
+		cats:      []catRow{{id: "cat", name: "Category", types: `["skill"]`}},
+		plugins:   []plugRow{{id: "plugin", phash: "plugin-hash"}},
+		relations: []relRow{{id: "relation", source: "plugin", target: "target", typ: "expert_skill", order: 2, data: `{"b":2,"a":1}`}},
+		versions:  []verRow{{id: "version", phash: "version-hash", relations: `[{"target_plugin_id":"target"}]`}},
+	}
+	lines := []string{
+		`c:cat:Category:["skill"]`,
+		`p:plugin:plugin-hash`,
+		`r:relation:plugin:target:expert_skill:2:{"a":1,"b":2}`,
+		`v:version:version-hash:[{"target_plugin_id":"target"}]`,
+	}
+	if got, want := p.hash(), digestLines(lines); got != want {
+		t.Fatalf("plan hash %q want verify projection %q", got, want)
+	}
+}
+
 func TestApplyRowExactExisting(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

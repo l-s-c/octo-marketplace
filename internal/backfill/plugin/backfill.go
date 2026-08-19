@@ -728,16 +728,16 @@ func setVersionRelations(p *plan) {
 func (p plan) hash() string {
 	var l []string
 	for _, x := range p.cats {
-		l = append(l, fmt.Sprintf("c:%#v", x))
+		l = append(l, "c:"+x.id+":"+x.name+":"+compact(x.types))
 	}
 	for _, x := range p.plugins {
-		l = append(l, fmt.Sprintf("p:%#v", x), fmt.Sprintf("a:%s:%s:%s:%s:%s:%s", DeterministicID("audit", x.id), x.id, x.owner, x.creator, x.phash, x.created.UTC().Format(time.RFC3339Nano)))
+		l = append(l, "p:"+x.id+":"+x.phash)
 	}
 	for _, x := range p.relations {
-		l = append(l, fmt.Sprintf("r:%#v", x))
+		l = append(l, fmt.Sprintf("r:%s:%s:%s:%s:%d:%s", x.id, x.source, x.target, x.typ, x.order, compact(x.data)))
 	}
 	for _, x := range p.versions {
-		l = append(l, fmt.Sprintf("v:%#v", x))
+		l = append(l, "v:"+x.id+":"+x.phash+":"+compact(x.relations))
 	}
 	return digestLines(l)
 }
