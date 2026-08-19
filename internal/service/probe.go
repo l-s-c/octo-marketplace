@@ -299,15 +299,25 @@ func newProbeHTTPClient(allowPrivate bool, resolver ipResolver) *http.Client {
 			if len(via) >= 10 {
 				return errors.New("too many redirects")
 			}
-			// Every redirect hop re-runs the same literal-IP/scheme/credential
-			// gate; the resolve-time gate above then fires on the new host when
-			// the redirected request dials.
+			// Every redirect hop re-runs the SSRF gate. Caller-supplied MCP
+			// credentials must never cross an origin boundary: net/http otherwise
+			// retains arbitrary custom headers such as X-API-Key on redirect.
 			if _, apiErr := validateProbeURL(req.URL.String(), allowPrivate); apiErr != nil {
 				return errProbeTargetBlocked
+			}
+			if len(via) > 0 && !sameProbeOrigin(via[len(via)-1].URL, req.URL) {
+				return errors.New("cross-origin redirects are not allowed")
 			}
 			return nil
 		},
 	}
+}
+
+func sameProbeOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
 }
 
 func isUnsafeProbeIP(ip net.IP) bool {
