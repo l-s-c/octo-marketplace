@@ -1,9 +1,12 @@
 package plugin
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPluginIDPreservesOnlyGloballyUnique(t *testing.T) {
@@ -35,8 +38,50 @@ func TestSanitizeConnectorJSONBlanksEnvAndHeaders(t *testing.T) {
 }
 
 func TestSanitizeConnectorJSONRejectsSecretShapedValue(t *testing.T) {
-	if _, err := SanitizeConnectorJSON([]byte(`{"nested":{"api_key":"actual"}}`)); err == nil {
-		t.Fatal("expected rejection")
+	for _, raw := range []string{
+		`{"nested":{"api_key":"actual"}}`,
+		`{"token":{"nested":"actual"}}`,
+		`{"ok":true} {"second":true}`,
+		`[]`,
+		`{"mcpServers":[]}`,
+	} {
+		if _, err := SanitizeConnectorJSON([]byte(raw)); err == nil {
+			t.Fatalf("expected rejection for %s", raw)
+		}
+	}
+}
+
+func TestSanitizeConnectorJSONAllowsEmptyAndPlaceholder(t *testing.T) {
+	got, err := SanitizeConnectorJSON([]byte(`{"api_key":"__OCTO_SECRET_PLACEHOLDER__"}`))
+	if err != nil || string(got) != `{"api_key":""}` {
+		t.Fatalf("got %s, %v", got, err)
+	}
+	got, err = SanitizeConnectorJSON(nil)
+	if err != nil || string(got) != `{}` {
+		t.Fatalf("empty got %s, %v", got, err)
+	}
+}
+
+func TestValidateGraphLimits(t *testing.T) {
+	now := time.Unix(1, 0)
+	edge := func(a, b string) relRow {
+		return relation(a, b, "expert_skill", 0, map[string]any{}, "owner", now, now, sql.NullTime{})
+	}
+	if err := validateGraph([]relRow{edge("a", "b"), edge("b", "a")}, 16, 500); err == nil {
+		t.Fatal("cycle accepted")
+	}
+	var deep []relRow
+	for i := 0; i < 16; i++ {
+		deep = append(deep, edge(fmt.Sprint(i), fmt.Sprint(i+1)))
+	}
+	if err := validateGraph(deep, 16, 500); err == nil {
+		t.Fatal("depth 17 accepted")
+	}
+	if err := validateGraph([]relRow{edge("a", "b"), edge("a", "c")}, 16, 2); err == nil {
+		t.Fatal("node cap ignored")
+	}
+	if err := validateGraph([]relRow{edge("a", "b"), edge("b", "c")}, 3, 3); err != nil {
+		t.Fatalf("valid graph rejected: %v", err)
 	}
 }
 

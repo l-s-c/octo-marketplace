@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 )
@@ -49,16 +50,41 @@ func secretShaped(key string) bool {
 // writes: env/header values are blanked, and any non-empty value beneath a
 // secret-shaped key rejects the source record. It never returns secret values.
 func SanitizeConnectorJSON(raw []byte) ([]byte, error) {
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		raw = []byte(`{}`)
+	}
 	var value any
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.UseNumber()
 	if err := dec.Decode(&value); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
+	if err := ensureJSONEOF(dec); err != nil {
+		return nil, err
+	}
+	root, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("connector config must be an object")
+	}
+	if servers, present := root["mcpServers"]; present {
+		if _, ok := servers.(map[string]any); !ok {
+			return nil, fmt.Errorf("/mcpServers must be an object")
+		}
+	}
 	if err := sanitizeNode(value, ""); err != nil {
 		return nil, err
 	}
 	return json.Marshal(value)
+}
+
+func ensureJSONEOF(dec *json.Decoder) error {
+	var extra any
+	if err := dec.Decode(&extra); err == io.EOF {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("invalid trailing JSON: %w", err)
+	}
+	return fmt.Errorf("multiple JSON values are not allowed")
 }
 
 func sanitizeNode(value any, path string) error {
@@ -80,7 +106,13 @@ func sanitizeNode(value any, path string) error {
 				continue
 			}
 			if secretShaped(key) {
-				if text, ok := child.(string); ok && text != "" && text != secretPlaceholder {
+				switch typed := child.(type) {
+				case nil:
+				case string:
+					if typed != "" && typed != secretPlaceholder {
+						return fmt.Errorf("secret-shaped value rejected at %s", childPath)
+					}
+				default:
 					return fmt.Errorf("secret-shaped value rejected at %s", childPath)
 				}
 				node[key] = ""
