@@ -72,12 +72,15 @@ func (s *Service) WithRuntime(idGen func() string, now func() time.Time) *Servic
 }
 
 type ListParams struct {
-	Type       model.PluginType
-	CategoryID string
-	Keyword    string
-	Mine       bool
-	Limit      int
-	Offset     int
+	PlacementCode string
+	Type          model.PluginType
+	CategoryID    string
+	Tag           string
+	Keyword       string
+	Mine          bool
+	Sort          string
+	Limit         int
+	Offset        int
 }
 
 type Detail struct {
@@ -129,7 +132,7 @@ func (s *Service) List(ctx context.Context, caller Caller, p ListParams) ([]mode
 	if p.Limit < 0 || p.Limit > maxListLimit || p.Offset < 0 {
 		return nil, 0, ErrInvalidRequest
 	}
-	items, total, err := s.repo.List(ctx, scope(caller), pluginrepo.ListFilter{Type: p.Type, CategoryID: strings.TrimSpace(p.CategoryID), Keyword: strings.TrimSpace(p.Keyword), Mine: p.Mine, Limit: p.Limit, Offset: p.Offset})
+	items, total, err := s.repo.List(ctx, scope(caller), pluginrepo.ListFilter{PlacementCode: strings.TrimSpace(p.PlacementCode), Type: p.Type, CategoryID: strings.TrimSpace(p.CategoryID), Tag: strings.TrimSpace(p.Tag), Keyword: strings.TrimSpace(p.Keyword), Mine: p.Mine, Sort: strings.TrimSpace(p.Sort), Limit: p.Limit, Offset: p.Offset})
 	return items, total, mapStoreError(err)
 }
 

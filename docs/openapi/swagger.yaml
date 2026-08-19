@@ -5801,6 +5801,11 @@ paths:
         pagination.
       operationId: plugin.list
       parameters:
+      - description: Marketplace placement code
+        in: query
+        name: placement_code
+        schema:
+          type: string
       - description: Plugin type
         in: query
         name: type
@@ -5816,6 +5821,11 @@ paths:
         name: category_id
         schema:
           type: string
+      - description: Exact tag
+        in: query
+        name: tag
+        schema:
+          type: string
       - description: Name search keyword
         in: query
         name: keyword
@@ -5826,6 +5836,16 @@ paths:
         name: mine
         schema:
           type: boolean
+      - description: Sort order
+        in: query
+        name: sort
+        schema:
+          enum:
+          - newest
+          - oldest
+          - name
+          - placement
+          type: string
       - description: Page number, default 1
         in: query
         name: page

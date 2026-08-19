@@ -194,10 +194,13 @@ type categoryResponse struct {
 // @Accept json
 // @Produce json
 // @Security Bearer
+// @Param placement_code query string false "Marketplace placement code"
 // @Param type query string false "Plugin type" Enums(expert,expert_team,skill,connector)
 // @Param category_id query string false "Category ID"
+// @Param tag query string false "Exact tag"
 // @Param keyword query string false "Name search keyword"
 // @Param mine query bool false "Restrict to Plugins owned by the caller"
+// @Param sort query string false "Sort order" Enums(newest,oldest,name,placement)
 // @Param page query int false "Page number, default 1"
 // @Param page_size query int false "Page size, default 20, max 100"
 // @Success 200 {object} apiresponse.OffsetList[pluginResponse]
@@ -218,7 +221,7 @@ func (h *Handler) List(c *gin.Context) {
 		validation(c, "pagination")
 		return
 	}
-	items, total, err := h.svc.List(c.Request.Context(), caller, pluginsvc.ListParams{Type: model.PluginType(c.Query("type")), CategoryID: c.Query("category_id"), Keyword: c.Query("keyword"), Mine: c.Query("mine") == "true", Limit: pageSize, Offset: (page - 1) * pageSize})
+	items, total, err := h.svc.List(c.Request.Context(), caller, pluginsvc.ListParams{PlacementCode: c.Query("placement_code"), Type: model.PluginType(c.Query("type")), CategoryID: c.Query("category_id"), Tag: c.Query("tag"), Keyword: c.Query("keyword"), Mine: c.Query("mine") == "true", Sort: c.Query("sort"), Limit: pageSize, Offset: (page - 1) * pageSize})
 	if err != nil {
 		writeServiceError(c, err, "plugin.list")
 		return
