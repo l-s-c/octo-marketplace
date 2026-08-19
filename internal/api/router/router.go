@@ -12,6 +12,7 @@ import (
 	categoryhandler "github.com/Mininglamp-OSS/octo-marketplace/internal/api/handler/category"
 	experthandler "github.com/Mininglamp-OSS/octo-marketplace/internal/api/handler/expert"
 	metricshandler "github.com/Mininglamp-OSS/octo-marketplace/internal/api/handler/metrics"
+	pluginhandler "github.com/Mininglamp-OSS/octo-marketplace/internal/api/handler/plugin"
 	skillhandler "github.com/Mininglamp-OSS/octo-marketplace/internal/api/handler/skill"
 	uploadhandler "github.com/Mininglamp-OSS/octo-marketplace/internal/api/handler/upload"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/auth"
@@ -21,11 +22,13 @@ import (
 	metricsredis "github.com/Mininglamp-OSS/octo-marketplace/internal/redis"
 	categoryrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/category"
 	expertrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/expert"
+	pluginrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/plugin"
 	skillrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/skill"
 	categorysvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/category"
 	expertsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/expert"
 	metricssvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/metrics"
 	parsesvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/parse"
+	pluginsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/plugin"
 	skillsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/skill"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/storage"
 	"github.com/gin-gonic/gin"
@@ -108,6 +111,9 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 	if ok {
 		catRepo := categoryrepo.New(db)
 		skRepo := skillrepo.New(db)
+		pluginRepo := pluginrepo.New(db)
+		pluginSvc := pluginsvc.New(pluginRepo)
+		pluginhandler.New(pluginSvc, pluginhandler.NewRepositoryCategories(pluginRepo)).Register(v1)
 
 		var store storage.Storage
 		var localStorage *storage.LocalStorage
@@ -224,6 +230,8 @@ func registerMCP(r *gin.Engine, authenticator *marketmiddleware.Authenticator, m
 	rg.GET("/mine", mcp.ListMine)
 	rg.POST("/_probe", mcp.Probe)
 	rg.POST("/probe", deprecatedRoute("/api/v1/mcps/_probe"), mcp.Probe)
+	connectors := r.Group("/api/v1/connectors", authenticator.Handler())
+	connectors.POST("/_probe", mcp.ConnectorProbe)
 	rg.GET("/:mcp_id", mcp.Get)
 	rg.PATCH("/:mcp_id", mcp.Patch)
 	rg.DELETE("/:mcp_id", mcp.Delete)

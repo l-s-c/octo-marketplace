@@ -12,17 +12,20 @@ import (
 )
 
 type fakeStore struct {
-	plugins     map[string]*model.Plugin
-	create      *model.Plugin
-	createRels  []model.PluginRelation
-	createAudit model.PluginAuditLog
-	update      *model.Plugin
-	deleteScope pluginrepo.Scope
-	err         error
+	plugins       map[string]*model.Plugin
+	create        *model.Plugin
+	createRels    []model.PluginRelation
+	createAudit   model.PluginAuditLog
+	update        *model.Plugin
+	deleteScope   pluginrepo.Scope
+	publishParams pluginrepo.PublishParams
+	duplicate     model.Plugin
+	duplicateMeta pluginrepo.Mutation
+	err           error
 }
 
-func (f *fakeStore) List(context.Context, pluginrepo.Scope, pluginrepo.ListFilter) ([]model.Plugin, error) {
-	return nil, f.err
+func (f *fakeStore) List(context.Context, pluginrepo.Scope, pluginrepo.ListFilter) ([]model.Plugin, int64, error) {
+	return nil, 0, f.err
 }
 func (f *fakeStore) GetWithRelations(_ context.Context, _ pluginrepo.Scope, id string) (*model.Plugin, []model.PluginRelation, error) {
 	if f.err != nil {
@@ -35,28 +38,33 @@ func (f *fakeStore) GetWithRelations(_ context.Context, _ pluginrepo.Scope, id s
 	copy := *p
 	return &copy, nil, nil
 }
-func (f *fakeStore) Create(_ context.Context, _ pluginrepo.Scope, p *model.Plugin, rels []model.PluginRelation, audit model.PluginAuditLog) error {
-	f.create, f.createRels, f.createAudit = p, rels, audit
+func (f *fakeStore) Create(_ context.Context, _ pluginrepo.Scope, m pluginrepo.Mutation) error {
+	p := m.Plugin
+	f.create, f.createRels = &p, m.Relations
+	f.createAudit = model.PluginAuditLog{OperatorID: m.OperatorID, OperatorName: m.OperatorName, RequestID: m.RequestID, Remark: m.Remark}
 	return f.err
 }
-func (f *fakeStore) Update(_ context.Context, _ pluginrepo.Scope, p *model.Plugin, _ []model.PluginRelation, _ model.PluginAuditLog) error {
-	f.update = p
+func (f *fakeStore) Update(_ context.Context, _ pluginrepo.Scope, m pluginrepo.Mutation) error {
+	p := m.Plugin
+	f.update = &p
 	return f.err
 }
-func (f *fakeStore) Delete(_ context.Context, s pluginrepo.Scope, _ string, _ model.PluginAuditLog, _ time.Time) error {
+func (f *fakeStore) Delete(_ context.Context, s pluginrepo.Scope, _, _, _, _ string, _ *string) error {
 	f.deleteScope = s
 	return f.err
 }
-func (f *fakeStore) ListAuditLogs(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginAuditLog, error) {
+func (f *fakeStore) ListAudits(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginAuditLog, error) {
 	return nil, f.err
 }
 func (f *fakeStore) ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, error) {
 	return nil, f.err
 }
-func (f *fakeStore) Publish(context.Context, pluginrepo.Scope, model.PluginVersion, []model.PluginPlacement, model.PluginAuditLog) error {
-	return f.err
+func (f *fakeStore) Publish(_ context.Context, _ pluginrepo.Scope, p pluginrepo.PublishParams) (string, error) {
+	f.publishParams = p
+	return "version-new", f.err
 }
-func (f *fakeStore) DuplicateGraph(context.Context, pluginrepo.Scope, string, *model.Plugin, model.PluginAuditLog) error {
+func (f *fakeStore) DuplicateGraph(_ context.Context, _ pluginrepo.Scope, _ string, p model.Plugin, m pluginrepo.Mutation) error {
+	f.duplicate, f.duplicateMeta = p, m
 	return f.err
 }
 
@@ -183,5 +191,34 @@ func TestRelationSourceTargetValidation(t *testing.T) {
 	r.Type = model.PluginTypeConnector
 	if _, err := fixedService(f).Create(context.Background(), testCaller, r); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("invalid source err = %v", err)
+	}
+}
+
+func TestPublishUsesRepositoryContractAndReturnedVersionID(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{
+		"plugin-1": {ID: "plugin-1", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p"},
+	}}
+	version, err := fixedService(f).Publish(context.Background(), testCaller, "plugin-1", PublishRequest{Version: "1.0.0", Placements: []PlacementRequest{{PlacementCode: "home", Visible: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version.ID != "version-new" || f.publishParams.PluginID != "plugin-1" || f.publishParams.CreatedBy != testCaller.UID || len(f.publishParams.Placements) != 1 {
+		t.Fatalf("version=%#v params=%#v", version, f.publishParams)
+	}
+}
+
+func TestDuplicatePassesIndependentRootAndAuditMetadata(t *testing.T) {
+	source := &model.Plugin{ID: "source", Name: "Source", Type: model.PluginTypeExpert, OwnerUID: "another", Visibility: model.PluginVisibilityPublic, Manifest: json.RawMessage(`{"a":1}`), Package: json.RawMessage(`{"b":2}`), Tags: json.RawMessage(`["x"]`), PluginHash: "sha256:p"}
+	f := &fakeStore{plugins: map[string]*model.Plugin{"source": source}}
+	copy, err := fixedService(f).Duplicate(context.Background(), testCaller, "source", "Copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copy.ID != "plugin-new" || f.duplicate.ID != copy.ID || f.duplicateMeta.OperatorID != testCaller.UID {
+		t.Fatalf("copy=%#v duplicate=%#v metadata=%#v", copy, f.duplicate, f.duplicateMeta)
+	}
+	f.duplicate.Manifest[0] = '['
+	if source.Manifest[0] == '[' {
+		t.Fatal("duplicate manifest aliases source manifest")
 	}
 }

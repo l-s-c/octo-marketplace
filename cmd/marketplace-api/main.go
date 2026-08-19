@@ -45,6 +45,8 @@ import (
 // @tag.description Administrative Skill catalog
 // @tag.name mcp
 // @tag.description MCP server catalog
+// @tag.name plugin
+// @tag.description Unified Plugin catalog, versions, audit history, categories, and Connector probes
 // @tag.name admin_mcp
 // @tag.description Administrative MCP catalog
 // @tag.name session

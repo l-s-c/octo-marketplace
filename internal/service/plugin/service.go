@@ -36,16 +36,18 @@ type Caller struct {
 // Store is the transactional persistence boundary required by Service.
 // Implementations must apply Scope to every tenant-owned lookup and mutation.
 type Store interface {
-	List(context.Context, pluginrepo.Scope, pluginrepo.ListFilter) ([]model.Plugin, error)
+	List(context.Context, pluginrepo.Scope, pluginrepo.ListFilter) ([]model.Plugin, int64, error)
 	GetWithRelations(context.Context, pluginrepo.Scope, string) (*model.Plugin, []model.PluginRelation, error)
-	Create(context.Context, pluginrepo.Scope, *model.Plugin, []model.PluginRelation, model.PluginAuditLog) error
-	Update(context.Context, pluginrepo.Scope, *model.Plugin, []model.PluginRelation, model.PluginAuditLog) error
-	Delete(context.Context, pluginrepo.Scope, string, model.PluginAuditLog, time.Time) error
-	ListAuditLogs(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginAuditLog, error)
+	Create(context.Context, pluginrepo.Scope, pluginrepo.Mutation) error
+	Update(context.Context, pluginrepo.Scope, pluginrepo.Mutation) error
+	Delete(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
+	ListAudits(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginAuditLog, error)
 	ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, error)
-	Publish(context.Context, pluginrepo.Scope, model.PluginVersion, []model.PluginPlacement, model.PluginAuditLog) error
-	DuplicateGraph(context.Context, pluginrepo.Scope, string, *model.Plugin, model.PluginAuditLog) error
+	Publish(context.Context, pluginrepo.Scope, pluginrepo.PublishParams) (string, error)
+	DuplicateGraph(context.Context, pluginrepo.Scope, string, model.Plugin, pluginrepo.Mutation) error
 }
+
+var _ Store = (*pluginrepo.Repo)(nil)
 
 type Service struct {
 	repo Store
@@ -127,7 +129,7 @@ func (s *Service) List(ctx context.Context, caller Caller, p ListParams) ([]mode
 	if p.Limit < 0 || p.Limit > maxListLimit || p.Offset < 0 {
 		return nil, ErrInvalidRequest
 	}
-	items, err := s.repo.List(ctx, scope(caller), pluginrepo.ListFilter{Type: p.Type, CategoryID: strings.TrimSpace(p.CategoryID), Keyword: strings.TrimSpace(p.Keyword), Mine: p.Mine, Limit: p.Limit, Offset: p.Offset})
+	items, _, err := s.repo.List(ctx, scope(caller), pluginrepo.ListFilter{Type: p.Type, CategoryID: strings.TrimSpace(p.CategoryID), Keyword: strings.TrimSpace(p.Keyword), Mine: p.Mine, Limit: p.Limit, Offset: p.Offset})
 	return items, mapStoreError(err)
 }
 
@@ -156,7 +158,7 @@ func (s *Service) Create(ctx context.Context, caller Caller, req WriteRequest) (
 		rels[i].SourcePluginID = p.ID
 	}
 	audit := s.audit(caller, p.ID, "create", nil, p, now)
-	if err := s.repo.Create(ctx, scope(caller), p, rels, audit); err != nil {
+	if err := s.repo.Create(ctx, scope(caller), mutation(*p, rels, audit)); err != nil {
 		return nil, mapStoreError(err)
 	}
 	return &Detail{Plugin: p, Relations: rels}, nil
@@ -189,7 +191,7 @@ func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, re
 		rels[i].SourcePluginID = pluginID
 	}
 	audit := s.audit(caller, pluginID, "update", old, p, now)
-	if err := s.repo.Update(ctx, scope(caller), p, rels, audit); err != nil {
+	if err := s.repo.Update(ctx, scope(caller), mutation(*p, rels, audit)); err != nil {
 		return nil, mapStoreError(err)
 	}
 	return &Detail{Plugin: p, Relations: rels}, nil
@@ -206,15 +208,15 @@ func (s *Service) Delete(ctx context.Context, caller Caller, pluginID string) er
 	if old.OwnerUID != caller.UID || (old.SpaceID != nil && *old.SpaceID != caller.SpaceID) {
 		return ErrNotFound
 	}
-	now := s.now()
-	return mapStoreError(s.repo.Delete(ctx, scope(caller), pluginID, s.audit(caller, pluginID, "delete", old, nil, now), now))
+	audit := s.audit(caller, pluginID, "delete", old, nil, s.now())
+	return mapStoreError(s.repo.Delete(ctx, scope(caller), pluginID, audit.OperatorID, audit.OperatorName, audit.RequestID, audit.Remark))
 }
 
 func (s *Service) ListAuditLogs(ctx context.Context, caller Caller, pluginID string, limit, offset int) ([]model.PluginAuditLog, error) {
 	if validateReadPage(caller, pluginID, limit, offset) != nil {
 		return nil, ErrInvalidRequest
 	}
-	v, err := s.repo.ListAuditLogs(ctx, scope(caller), pluginID, limit, offset)
+	v, err := s.repo.ListAudits(ctx, scope(caller), pluginID, limit, offset)
 	return v, mapStoreError(err)
 }
 
@@ -247,15 +249,26 @@ func (s *Service) Publish(ctx context.Context, caller Caller, pluginID string, r
 		return nil, ErrInvalidRequest
 	}
 	now := s.now()
-	v := model.PluginVersion{ID: s.id(), PluginID: p.ID, Version: strings.TrimSpace(req.Version), Manifest: cloneJSON(p.Manifest), Package: cloneJSON(p.Package), ManifestHash: p.ManifestHash, PluginHash: p.PluginHash, Relations: relationJSON, Changelog: trimOptional(req.Changelog), CreatedBy: caller.UID, CreatedAt: now}
+	v := model.PluginVersion{PluginID: p.ID, Version: strings.TrimSpace(req.Version), Manifest: cloneJSON(p.Manifest), Package: cloneJSON(p.Package), ManifestHash: p.ManifestHash, PluginHash: p.PluginHash, Relations: relationJSON, Changelog: trimOptional(req.Changelog), CreatedBy: caller.UID, CreatedAt: now}
 	placements, err := s.buildPlacements(pluginID, req.Placements, now)
 	if err != nil {
 		return nil, err
 	}
-	audit := s.audit(caller, pluginID, "publish", p, p, now)
-	if err := s.repo.Publish(ctx, scope(caller), v, placements, audit); err != nil {
+	params := pluginrepo.PublishParams{
+		PluginID:     pluginID,
+		Version:      v.Version,
+		CreatedBy:    caller.UID,
+		OperatorName: caller.Name,
+		RequestID:    caller.RequestID,
+		Changelog:    v.Changelog,
+		Relations:    cloneJSON(v.Relations),
+		Placements:   placements,
+	}
+	versionID, err := s.repo.Publish(ctx, scope(caller), params)
+	if err != nil {
 		return nil, mapStoreError(err)
 	}
+	v.ID = versionID
 	return &v, nil
 }
 
@@ -289,7 +302,7 @@ func (s *Service) Duplicate(ctx context.Context, caller Caller, sourcePluginID, 
 	copy.CreatedAt, copy.UpdatedAt, copy.DeletedAt = now, now, nil
 	copy.Manifest, copy.Package, copy.Tags = cloneJSON(source.Manifest), cloneJSON(source.Package), cloneJSON(source.Tags)
 	audit := s.audit(caller, copy.ID, "duplicate", nil, &copy, now)
-	if err := s.repo.DuplicateGraph(ctx, scope(caller), sourcePluginID, &copy, audit); err != nil {
+	if err := s.repo.DuplicateGraph(ctx, scope(caller), sourcePluginID, copy, mutation(copy, nil, audit)); err != nil {
 		return nil, mapStoreError(err)
 	}
 	return &copy, nil
@@ -405,6 +418,17 @@ func provenance(c Caller) (string, *string, *string) {
 		return "bot", stringPtr(c.BotUID), stringPtr(c.BotName)
 	}
 	return "human", nil, nil
+}
+
+func mutation(p model.Plugin, relations []model.PluginRelation, audit model.PluginAuditLog) pluginrepo.Mutation {
+	return pluginrepo.Mutation{
+		Plugin:       p,
+		Relations:    relations,
+		OperatorID:   audit.OperatorID,
+		OperatorName: audit.OperatorName,
+		RequestID:    audit.RequestID,
+		Remark:       audit.Remark,
+	}
 }
 
 func mapStoreError(err error) error {
