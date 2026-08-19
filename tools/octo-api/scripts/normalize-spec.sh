@@ -52,6 +52,30 @@ if os.path.exists(yaml_path):
     with open(yaml_path, 'w') as f:
         f.write('\n'.join(out))
 
+    # swag applies @Produce to every response and emits `type: file`, which is
+    # not valid OpenAPI 3.1. Keep byte-stream success bodies explicit while
+    # restoring JSON error envelopes for the two approved download operations.
+    import yaml
+    with open(yaml_path) as f:
+        spec = yaml.safe_load(f)
+    streams = {
+        '/plugins/{plugin_id}/attachments/_download': 'application/octet-stream',
+        '/plugins/{plugin_id}/archive': 'application/zip',
+    }
+    for path_name, success_media in streams.items():
+        operation = spec.get('paths', {}).get(path_name, {}).get('get')
+        if not operation:
+            continue
+        for status, response in operation.get('responses', {}).items():
+            if str(status).startswith('2'):
+                response['content'] = {success_media: {'schema': {'type': 'string', 'format': 'binary'}}}
+            elif str(status).startswith(('4', '5')):
+                content = response.get('content', {})
+                media = next(iter(content.values()), {})
+                response['content'] = {'application/json': media}
+    with open(yaml_path, 'w') as f:
+        yaml.safe_dump(spec, f, sort_keys=False, allow_unicode=True)
+
 # --- swagger.json: parse + delete empty externalDocs ---
 json_path = os.path.join(out_dir, 'swagger.json')
 if os.path.exists(json_path):

@@ -48,6 +48,20 @@ FROM plugin_audit_logs a JOIN plugins p ON p.plugin_id=a.plugin_id WHERE a.plugi
 	return out, rows.Err()
 }
 
+func (r *Repo) GetVersion(ctx context.Context, scope Scope, pluginID, version string) (*model.PluginVersion, error) {
+	if _, err := r.Get(ctx, scope, pluginID); err != nil {
+		return nil, err
+	}
+	row := r.db.QueryRowContext(ctx, `SELECT v.version_id,v.plugin_id,v.version,v.manifest_json,v.plugin_json,v.manifest_hash,v.plugin_hash,v.relations_json,v.changelog,v.created_by,v.created_at
+FROM plugin_versions v JOIN plugins p ON p.plugin_id=v.plugin_id
+WHERE v.plugin_id=? AND v.version=? AND p.deleted_at IS NULL AND `+visibilitySQL, pluginID, version, scope.SpaceID, scope.CallerUID)
+	v, err := scanPluginVersion(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return v, err
+}
+
 func (r *Repo) ListVersions(ctx context.Context, scope Scope, pluginID string, limit, offset int) ([]model.PluginVersion, error) {
 	if _, err := r.Get(ctx, scope, pluginID); err != nil {
 		return nil, err
@@ -66,19 +80,27 @@ FROM plugin_versions v JOIN plugins p ON p.plugin_id=v.plugin_id WHERE v.plugin_
 	defer rows.Close()
 	var out []model.PluginVersion
 	for rows.Next() {
-		var v model.PluginVersion
-		var manifest, pkg, rels []byte
-		var changelog sql.NullString
-		if err := rows.Scan(&v.ID, &v.PluginID, &v.Version, &manifest, &pkg, &v.ManifestHash, &v.PluginHash, &rels, &changelog, &v.CreatedBy, &v.CreatedAt); err != nil {
+		v, err := scanPluginVersion(rows)
+		if err != nil {
 			return nil, err
 		}
-		v.Manifest = cloneJSON(manifest)
-		v.Package = cloneJSON(pkg)
-		v.Relations = cloneJSON(rels)
-		v.Changelog = nullString(changelog)
-		out = append(out, v)
+		out = append(out, *v)
 	}
 	return out, rows.Err()
+}
+
+func scanPluginVersion(s interface{ Scan(...any) error }) (*model.PluginVersion, error) {
+	var v model.PluginVersion
+	var manifest, pkg, rels []byte
+	var changelog sql.NullString
+	if err := s.Scan(&v.ID, &v.PluginID, &v.Version, &manifest, &pkg, &v.ManifestHash, &v.PluginHash, &rels, &changelog, &v.CreatedBy, &v.CreatedAt); err != nil {
+		return nil, err
+	}
+	v.Manifest = cloneJSON(manifest)
+	v.Package = cloneJSON(pkg)
+	v.Relations = cloneJSON(rels)
+	v.Changelog = nullString(changelog)
+	return &v, nil
 }
 
 // PublishParams describes an immutable version and its replacement placements.

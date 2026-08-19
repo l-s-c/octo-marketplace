@@ -112,8 +112,6 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 		catRepo := categoryrepo.New(db)
 		skRepo := skillrepo.New(db)
 		pluginRepo := pluginrepo.New(db)
-		pluginSvc := pluginsvc.New(pluginRepo)
-		pluginhandler.New(pluginSvc, pluginhandler.NewRepositoryCategories(pluginRepo)).Register(v1)
 
 		var store storage.Storage
 		var localStorage *storage.LocalStorage
@@ -143,6 +141,10 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 		default:
 			panic("unsupported STORAGE_DRIVER: " + storageCfg.Driver)
 		}
+
+		pluginSvc := pluginsvc.New(pluginRepo, store)
+		pluginSvc.SetArtifactLimits(int64(storageCfg.MaxMB) << 20)
+		pluginhandler.New(pluginSvc, pluginhandler.NewRepositoryCategories(pluginRepo)).Register(v1)
 
 		catSvc := categorysvc.New(catRepo, skRepo)
 		skSvc := skillsvc.New(skRepo, catRepo, store, generateID)

@@ -13,12 +13,14 @@ import (
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/id"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 	pluginrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/plugin"
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/storage"
 )
 
 var (
 	ErrNotFound       = errors.New("plugin not found")
 	ErrConflict       = errors.New("plugin conflict")
 	ErrInvalidRequest = errors.New("invalid plugin request")
+	ErrTooLarge       = errors.New("plugin artifact exceeds size limit")
 	ErrSecretValue    = errors.New("connector secret value is not allowed")
 )
 
@@ -43,6 +45,7 @@ type Store interface {
 	Delete(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
 	ListAudits(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginAuditLog, error)
 	ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, error)
+	GetVersion(context.Context, pluginrepo.Scope, string, string) (*model.PluginVersion, error)
 	Publish(context.Context, pluginrepo.Scope, pluginrepo.PublishParams) (*model.PluginVersion, error)
 	DuplicateGraph(context.Context, pluginrepo.Scope, string, model.Plugin, pluginrepo.Mutation) error
 }
@@ -50,13 +53,37 @@ type Store interface {
 var _ Store = (*pluginrepo.Repo)(nil)
 
 type Service struct {
-	repo Store
-	id   func() string
-	now  func() time.Time
+	repo               Store
+	storage            storage.Storage
+	id                 func() string
+	now                func() time.Time
+	maxAttachmentBytes int64
+	maxArchiveBytes    int64
+	maxArchiveFiles    int
 }
 
-func New(repo Store) *Service {
-	return &Service{repo: repo, id: id.New, now: func() time.Time { return time.Now().UTC() }}
+func New(repo Store, stores ...storage.Storage) *Service {
+	s := &Service{
+		repo:               repo,
+		id:                 id.New,
+		now:                func() time.Time { return time.Now().UTC() },
+		maxAttachmentBytes: defaultMaxAttachmentBytes,
+		maxArchiveBytes:    defaultMaxArchiveBytes,
+		maxArchiveFiles:    defaultMaxArchiveFiles,
+	}
+	if len(stores) > 0 {
+		s.storage = stores[0]
+	}
+	return s
+}
+
+// SetArtifactLimits applies deployment upload size to individual attachments and
+// keeps a larger but bounded aggregate archive limit.
+func (s *Service) SetArtifactLimits(maxAttachmentBytes int64) {
+	if maxAttachmentBytes > 0 {
+		s.maxAttachmentBytes = maxAttachmentBytes
+		s.maxArchiveBytes = maxAttachmentBytes * 5
+	}
 }
 
 // WithRuntime is intended for deterministic tests and process wiring that uses

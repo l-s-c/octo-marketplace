@@ -59,6 +59,12 @@ func (f *fakeStore) ListAudits(context.Context, pluginrepo.Scope, string, int, i
 func (f *fakeStore) ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, error) {
 	return nil, f.err
 }
+func (f *fakeStore) GetVersion(_ context.Context, _ pluginrepo.Scope, pluginID, version string) (*model.PluginVersion, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &model.PluginVersion{PluginID: pluginID, Version: version, Package: json.RawMessage(`{"attachments":[]}`)}, nil
+}
 func (f *fakeStore) Publish(_ context.Context, _ pluginrepo.Scope, p pluginrepo.PublishParams) (*model.PluginVersion, error) {
 	f.publishParams = p
 	return &model.PluginVersion{ID: "version-new", PluginID: p.PluginID, Version: p.Version, Manifest: json.RawMessage(`{"stored":true}`), Relations: json.RawMessage(`[]`), CreatedBy: p.CreatedBy}, f.err

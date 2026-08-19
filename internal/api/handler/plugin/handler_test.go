@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -56,6 +57,18 @@ func (f *fakeService) Publish(context.Context, pluginsvc.Caller, string, plugins
 }
 func (f *fakeService) Duplicate(context.Context, pluginsvc.Caller, string, string) (*model.Plugin, error) {
 	return &model.Plugin{}, f.err
+}
+func (f *fakeService) InitAttachmentUpload(context.Context, pluginsvc.Caller, string, string, int64) (*pluginsvc.AttachmentUpload, error) {
+	return nil, f.err
+}
+func (f *fakeService) OpenAttachment(context.Context, pluginsvc.Caller, string, string) (*pluginsvc.AttachmentDownload, error) {
+	return nil, f.err
+}
+func (f *fakeService) PrepareArchive(context.Context, pluginsvc.Caller, string, string) (*pluginsvc.Archive, error) {
+	return nil, f.err
+}
+func (f *fakeService) WriteArchive(context.Context, *pluginsvc.Archive, io.Writer) error {
+	return f.err
 }
 func (f *fakeService) ListCategories(context.Context, pluginsvc.Caller, string, model.PluginType) ([]model.PluginCategory, error) {
 	return nil, f.err

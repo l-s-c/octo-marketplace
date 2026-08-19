@@ -171,6 +171,11 @@ components:
           type: array
           uniqueItems: false
       type: object
+    github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_attachmentUploadResponse:
+      properties:
+        data:
+          $ref: '#/components/schemas/internal_api_handler_plugin.attachmentUploadResponse'
+      type: object
     github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse:
       properties:
         data:
@@ -339,12 +344,16 @@ components:
             type: string
           type: object
         env_user_supplied:
-          description: |-
-            EnvUserSupplied lists env keys whose value must be filled locally by
+          description: 'EnvUserSupplied lists env keys whose value must be filled
+            locally by
+
             each consumer (doc §5). Keys not listed here are persisted with their
+
             submitted value; keys listed here may carry any value on write (the
+
             value is stored verbatim for owner-side edit round-trip) and are
-            blanked to non-owners on read via detailForCaller (§5.3).
+
+            blanked to non-owners on read via detailForCaller (§5.3).'
           items:
             type: string
           type: array
@@ -377,11 +386,13 @@ components:
         slogan:
           type: string
         slug:
-          description: |-
-            Slug is the ASCII identifier used as the JSON key in the generated
+          description: 'Slug is the ASCII identifier used as the JSON key in the generated
+
             mcpServers snippet (mcp-v1.md §3, "服务标识"). Optional on the wire —
+
             when omitted or empty the server auto-slugifies Name. Must match
-            ^[a-z0-9-]{1,64}$ after normalization. Unique per Space among live rows.
+
+            ^[a-z0-9-]{1,64}$ after normalization. Unique per Space among live rows.'
           type: string
         tags:
           items:
@@ -677,9 +688,10 @@ components:
             type: string
           type: object
         env_user_supplied:
-          description: |-
-            See CreateRequest.EnvUserSupplied. A nil pointer leaves the persisted
-            list untouched; a non-nil pointer replaces it wholesale.
+          description: 'See CreateRequest.EnvUserSupplied. A nil pointer leaves the
+            persisted
+
+            list untouched; a non-nil pointer replaces it wholesale.'
           items:
             type: string
           type: array
@@ -710,10 +722,12 @@ components:
         slogan:
           type: string
         slug:
-          description: |-
-            Slug — same rules as CreateRequest.Slug. Nil pointer leaves the
+          description: 'Slug — same rules as CreateRequest.Slug. Nil pointer leaves
+            the
+
             existing slug untouched; a non-nil empty string is rejected as
-            slug_invalid (empty is not a valid identifier).
+
+            slug_invalid (empty is not a valid identifier).'
           type: string
         tags:
           items:
@@ -785,10 +799,12 @@ components:
             type: string
           type: object
         env_user_supplied:
-          description: |-
-            EnvUserSupplied — env keys whose value each consumer must fill locally.
+          description: 'EnvUserSupplied — env keys whose value each consumer must
+            fill locally.
+
             The frontend copy-snippet path renders these as the visible token
-            placeholder (doc §5).
+
+            placeholder (doc §5).'
           items:
             type: string
           type: array
@@ -807,11 +823,13 @@ components:
         server_name:
           type: string
         slug:
-          description: |-
-            Slug is the ASCII identifier used as the JSON key in the mcpServers
+          description: 'Slug is the ASCII identifier used as the JSON key in the mcpServers
+
             snippet. Frontend template prefers this over ServerName when generating
+
             the config; always present in responses for records created after
-            migration 03.
+
+            migration 03.'
           type: string
         transport:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.Transport'
@@ -1135,11 +1153,14 @@ components:
     github_com_Mininglamp-OSS_octo-marketplace_internal_service_parse.IconUploadResult:
       properties:
         download_url:
-          description: |-
-            DownloadURL is the persistent (non-signed) URL where the icon will be
+          description: 'DownloadURL is the persistent (non-signed) URL where the icon
+            will be
+
             reachable once the PUT completes. Callers store this on the record so
+
             that later reads never touch a signed URL. Filled by InitMcpIconUpload;
-            legacy skill InitIconUpload leaves it empty for backwards compatibility.
+
+            legacy skill InitIconUpload leaves it empty for backwards compatibility.'
           type: string
         expires_in:
           type: integer
@@ -1473,6 +1494,30 @@ components:
         resource_id:
           type: string
         resource_type:
+          type: string
+      type: object
+    internal_api_handler_plugin.attachmentUploadRequest:
+      properties:
+        content_type:
+          type: string
+        file_name:
+          type: string
+        file_size:
+          type: integer
+      type: object
+    internal_api_handler_plugin.attachmentUploadResponse:
+      properties:
+        expires_in:
+          type: integer
+        headers:
+          additionalProperties:
+            type: string
+          type: object
+        method:
+          type: string
+        object_key:
+          type: string
+        upload_url:
           type: string
       type: object
     internal_api_handler_plugin.auditLogResponse:
@@ -1975,25 +2020,25 @@ paths:
       description: List every category with usage counts, including empty ones.
       operationId: admin_expert_category.list
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-array_github_com_Mininglamp-OSS_octo-marketplace_internal_service_expert_AdminCategory'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2019,37 +2064,37 @@ paths:
         description: Category payload
         required: true
       responses:
-        "201":
+        '201':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_expert_AdminCategory'
           description: Created
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2073,37 +2118,37 @@ paths:
         schema:
           type: string
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2136,43 +2181,43 @@ paths:
         description: Category payload
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_expert_AdminCategory'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2199,25 +2244,25 @@ paths:
         schema:
           type: integer
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_TagListResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2254,25 +2299,25 @@ paths:
         schema:
           type: integer
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_model_ExpertAgentListItem'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2298,37 +2343,37 @@ paths:
         description: Create payload
         required: true
       responses:
-        "201":
+        '201':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_ExpertDetailResp'
           description: Created
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: DUPLICATE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2351,31 +2396,31 @@ paths:
         schema:
           type: string
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2398,31 +2443,31 @@ paths:
         schema:
           type: string
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_ExpertDetailResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2455,43 +2500,43 @@ paths:
         description: Patch payload
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_ExpertDetailResp'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: DUPLICATE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2520,31 +2565,31 @@ paths:
         schema:
           type: integer
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SkillContentResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2605,31 +2650,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_model_ListItem'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2655,43 +2700,43 @@ paths:
         description: System MCP server
         required: true
       responses:
-        "201":
+        '201':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_model_Detail'
           description: Created
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: DUPLICATE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2719,37 +2764,37 @@ paths:
         description: Connection to probe
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_ProbeResponse'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2777,31 +2822,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2828,31 +2873,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_model_Detail'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2885,43 +2930,43 @@ paths:
         description: MCP changes
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_model_Detail'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: DUPLICATE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2942,31 +2987,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-array_github_com_Mininglamp-OSS_octo-marketplace_internal_service_category_AdminItem'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -2993,43 +3038,43 @@ paths:
         description: Skill category
         required: true
       responses:
-        "201":
+        '201':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_category_AdminItem'
           description: Created
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3058,37 +3103,37 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3122,37 +3167,37 @@ paths:
         description: Skill category changes
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_category_AdminItem'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3204,31 +3249,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_service_skill_SkillItem'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3254,43 +3299,43 @@ paths:
         description: Skill
         required: true
       responses:
-        "201":
+        '201':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_skill_SkillItem'
           description: Created
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3318,31 +3363,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3369,31 +3414,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_skill_SkillItem'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3426,43 +3471,43 @@ paths:
         description: Skill changes
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_skill_SkillItem'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3496,33 +3541,33 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_upload_DownloadResponse'
           description: OK
-        "302":
+        '302':
           description: Redirect to artifact
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3556,43 +3601,43 @@ paths:
         description: Reupload params
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_skill_SkillItem'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3620,31 +3665,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_skill_SkillMDResponse'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3681,25 +3726,25 @@ paths:
         schema:
           type: integer
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_model_ExpertSquadListItem'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3725,37 +3770,37 @@ paths:
         description: Create payload
         required: true
       responses:
-        "201":
+        '201':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SquadDetailResp'
           description: Created
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: DUPLICATE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3778,31 +3823,31 @@ paths:
         schema:
           type: string
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3825,31 +3870,31 @@ paths:
         schema:
           type: string
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SquadDetailResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3882,43 +3927,43 @@ paths:
         description: Patch payload
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SquadDetailResp'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: DUPLICATE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -3953,31 +3998,31 @@ paths:
         schema:
           type: integer
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SkillContentResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -4005,49 +4050,49 @@ paths:
         description: Bot publish request
         required: true
       responses:
-        "201":
+        '201':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_skill_SkillItem'
           description: Created
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: INTERNAL_ERROR
-        "503":
+        '503':
           content:
             application/json:
               schema:
@@ -4075,37 +4120,37 @@ paths:
         description: Connector configuration to probe
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_ProbeResponse'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -4135,31 +4180,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_CategoryListResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -4187,37 +4232,37 @@ paths:
         description: Package file name + size
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SkillUploadInitResp'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -4261,31 +4306,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_TagListResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -4357,31 +4402,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_model_ExpertAgentListItem'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -4408,43 +4453,43 @@ paths:
         description: Expert
         required: true
       responses:
-        "201":
+        '201':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_ExpertDetailResp'
           description: Created
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: DUPLICATE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -4472,31 +4517,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -4523,31 +4568,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_ExpertDetailResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -4580,43 +4625,43 @@ paths:
         description: Expert changes
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_ExpertDetailResp'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: DUPLICATE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -4652,49 +4697,49 @@ paths:
         description: Target workspace + runtime
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_InstallExpertResp'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: INTERNAL_ERROR
-        "503":
+        '503':
           content:
             application/json:
               schema:
@@ -4723,31 +4768,31 @@ paths:
         schema:
           type: integer
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SkillDownloadResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -4776,31 +4821,31 @@ paths:
         schema:
           type: integer
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SkillContentResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -4872,31 +4917,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_model_ExpertAgentListItem'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -4931,31 +4976,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-array_github_com_Mininglamp-OSS_octo-marketplace_internal_model_CategoryFilter'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -4983,43 +5028,43 @@ paths:
         description: Icon metadata
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_parse_IconUploadResult'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "413":
+        '413':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: PAYLOAD_TOO_LARGE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -5059,25 +5104,25 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-array_github_com_Mininglamp-OSS_octo-marketplace_internal_model_TagFilter'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -5159,31 +5204,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_model_ListItem'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -5210,43 +5255,43 @@ paths:
         description: MCP server
         required: true
       responses:
-        "201":
+        '201':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_model_Detail'
           description: Created
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: DUPLICATE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -5274,37 +5319,37 @@ paths:
         description: Connection to probe
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_ProbeResponse'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -5333,31 +5378,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -5385,31 +5430,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_model_Detail'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -5442,43 +5487,43 @@ paths:
         description: MCP changes
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_model_Detail'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: DUPLICATE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -5513,43 +5558,43 @@ paths:
         description: Icon file
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_IconResult'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "413":
+        '413':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: PAYLOAD_TOO_LARGE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -5632,31 +5677,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_model_ListItem'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -5684,37 +5729,37 @@ paths:
         description: Metric event
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -5754,37 +5799,37 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-array_internal_api_handler_plugin_categoryResponse'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -5862,37 +5907,37 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_pluginResponse'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -5919,43 +5964,43 @@ paths:
         description: Plugin current state
         required: true
       responses:
-        "201":
+        '201':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
           description: Created
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -5984,43 +6029,43 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6048,37 +6093,37 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6112,43 +6157,43 @@ paths:
         description: Complete mutable Plugin state
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6157,6 +6202,143 @@ paths:
       security:
       - Bearer: []
       summary: Update plugin
+      tags:
+      - plugin
+  /plugins/{plugin_id}/archive:
+    get:
+      description: Build and stream a bounded ZIP from the current or requested immutable
+        Plugin Package.
+      operationId: plugin.archive.download
+      parameters:
+      - description: Plugin ID
+        in: path
+        name: plugin_id
+        required: true
+        schema:
+          type: string
+      - description: Immutable Plugin version
+        in: query
+        name: version
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+          description: Plugin ZIP archive
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: PAYLOAD_TOO_LARGE
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Download plugin archive
+      tags:
+      - plugin
+  /plugins/{plugin_id}/attachments/_download:
+    get:
+      description: Stream an object referenced by the visible Plugin Package after
+        enforcing its managed Space prefix.
+      operationId: plugin.attachment.download
+      parameters:
+      - description: Plugin ID
+        in: path
+        name: plugin_id
+        required: true
+        schema:
+          type: string
+      - description: Package-referenced object key
+        in: query
+        name: object_key
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+          description: Attachment bytes
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Download plugin attachment
       tags:
       - plugin
   /plugins/{plugin_id}/audit_logs:
@@ -6187,37 +6369,37 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_auditLogResponse'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6251,43 +6433,43 @@ paths:
                 summary: body
         description: Optional duplicate name
       responses:
-        "201":
+        '201':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_pluginResponse'
           description: Created
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6322,43 +6504,43 @@ paths:
         description: Version and placements
         required: true
       responses:
-        "201":
+        '201':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_versionResponse'
           description: Created
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6397,37 +6579,37 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_versionResponse'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6436,6 +6618,70 @@ paths:
       security:
       - Bearer: []
       summary: List plugin versions
+      tags:
+      - plugin
+  /plugins/attachments:
+    post:
+      description: Create a server-scoped object key and short-lived PUT target without
+        modifying a Plugin.
+      operationId: plugin.attachment.create
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/internal_api_handler_plugin.attachmentUploadRequest'
+                description: Attachment metadata
+                summary: body
+        description: Attachment metadata
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_attachmentUploadResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: PAYLOAD_TOO_LARGE
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Initialize plugin attachment upload
       tags:
       - plugin
   /session:
@@ -6448,31 +6694,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_SessionResponse'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6511,31 +6757,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-array_github_com_Mininglamp-OSS_octo-marketplace_internal_service_category_CategoryItem'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6563,43 +6809,43 @@ paths:
         description: Icon metadata
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_parse_IconUploadResult'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "413":
+        '413':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: PAYLOAD_TOO_LARGE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6627,31 +6873,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_parse_PollResult'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6679,43 +6925,43 @@ paths:
         description: Archive metadata
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_parse_InitResult'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "413":
+        '413':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: PAYLOAD_TOO_LARGE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6743,49 +6989,49 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-map_string_string'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "429":
+        '429':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: RATE_LIMITED
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6844,37 +7090,37 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.CursorList-internal_api_handler_skill_SkillResponse'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6901,43 +7147,43 @@ paths:
         description: Skill
         required: true
       responses:
-        "201":
+        '201':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_skill_SkillResponse'
           description: Created
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -6965,31 +7211,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7016,31 +7262,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_skill_SkillResponse'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7073,43 +7319,43 @@ paths:
         description: Skill changes
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_skill_SkillResponse'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7143,33 +7389,33 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_upload_DownloadResponse'
           description: OK
-        "302":
+        '302':
           description: Redirect to artifact
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7204,43 +7450,43 @@ paths:
         description: Archive metadata
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_parse_InitResult'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "413":
+        '413':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: PAYLOAD_TOO_LARGE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7269,31 +7515,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_skill_SkillMDResponse'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7321,31 +7567,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_skill_SkillVersionList'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7394,31 +7640,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.CursorList-internal_api_handler_skill_SkillResponse'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7451,31 +7697,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_skill_SkillTagList'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7547,31 +7793,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_model_ExpertSquadListItem'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7598,43 +7844,43 @@ paths:
         description: Squad
         required: true
       responses:
-        "201":
+        '201':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SquadDetailResp'
           description: Created
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: DUPLICATE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7662,31 +7908,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7713,31 +7959,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SquadDetailResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7771,43 +8017,43 @@ paths:
         description: Squad changes
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SquadDetailResp'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: DUPLICATE
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7845,49 +8091,49 @@ paths:
         description: Target workspace + runtime
         required: true
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_InstallSquadResp'
           description: OK
-        "400":
+        '400':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: VALIDATION_ERROR
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "409":
+        '409':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
-        "500":
+        '500':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: INTERNAL_ERROR
-        "503":
+        '503':
           content:
             application/json:
               schema:
@@ -7922,31 +8168,31 @@ paths:
         schema:
           type: integer
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SkillDownloadResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -7981,31 +8227,31 @@ paths:
         schema:
           type: integer
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SkillContentResp'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:
@@ -8077,31 +8323,31 @@ paths:
             schema:
               type: object
       responses:
-        "200":
+        '200':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_model_ExpertSquadListItem'
           description: OK
-        "401":
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: AUTH_REQUIRED
-        "403":
+        '403':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        "404":
+        '404':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
-        "500":
+        '500':
           content:
             application/json:
               schema:

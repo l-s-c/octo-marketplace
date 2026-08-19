@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,10 @@ type Service interface {
 	ListVersions(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginVersion, error)
 	Publish(context.Context, pluginsvc.Caller, string, pluginsvc.PublishRequest) (*model.PluginVersion, error)
 	Duplicate(context.Context, pluginsvc.Caller, string, string) (*model.Plugin, error)
+	InitAttachmentUpload(context.Context, pluginsvc.Caller, string, string, int64) (*pluginsvc.AttachmentUpload, error)
+	OpenAttachment(context.Context, pluginsvc.Caller, string, string) (*pluginsvc.AttachmentDownload, error)
+	PrepareArchive(context.Context, pluginsvc.Caller, string, string) (*pluginsvc.Archive, error)
+	WriteArchive(context.Context, *pluginsvc.Archive, io.Writer) error
 }
 
 // CategoryService is separate because category listing is a read-only operation
@@ -64,6 +69,9 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	rg.GET("/plugins/:plugin_id/versions", h.ListVersions)
 	rg.POST("/plugins/:plugin_id/publish", h.Publish)
 	rg.POST("/plugins/:plugin_id/duplicate", h.Duplicate)
+	rg.POST("/plugins/attachments", h.InitAttachmentUpload)
+	rg.GET("/plugins/:plugin_id/attachments/_download", h.DownloadAttachment)
+	rg.GET("/plugins/:plugin_id/archive", h.DownloadArchive)
 	rg.GET("/plugin_categories", h.ListCategories)
 }
 
@@ -109,6 +117,20 @@ type publishRequest struct {
 
 type duplicateRequest struct {
 	Name string `json:"name,omitempty"`
+}
+
+type attachmentUploadRequest struct {
+	FileName    string `json:"file_name"`
+	FileSize    int64  `json:"file_size"`
+	ContentType string `json:"content_type,omitempty"`
+}
+
+type attachmentUploadResponse struct {
+	ObjectKey string            `json:"object_key"`
+	UploadURL string            `json:"upload_url" swaggertype:"string,uri"`
+	Method    string            `json:"method"`
+	Headers   map[string]string `json:"headers"`
+	ExpiresIn int               `json:"expires_in"`
 }
 
 type pluginResponse struct {
@@ -522,6 +544,124 @@ func (h *Handler) Duplicate(c *gin.Context) {
 	apiresponse.Created(c, pluginDTO(v))
 }
 
+// InitAttachmentUpload godoc
+// @Summary Initialize plugin attachment upload
+// @Description Create a server-scoped object key and short-lived PUT target without modifying a Plugin.
+// @Tags plugin
+// @ID plugin.attachment.create
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param body body attachmentUploadRequest true "Attachment metadata"
+// @Success 200 {object} apiresponse.Data[attachmentUploadResponse]
+// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
+// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
+// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
+// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
+// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
+// @Router /plugins/attachments [post]
+func (h *Handler) InitAttachmentUpload(c *gin.Context) {
+	caller, ok := caller(c)
+	if !ok {
+		unauthorized(c)
+		return
+	}
+	var req attachmentUploadRequest
+	if !decode(c, &req) {
+		return
+	}
+	result, err := h.svc.InitAttachmentUpload(c.Request.Context(), caller, req.FileName, req.ContentType, req.FileSize)
+	if err != nil {
+		writeServiceError(c, err, "plugin.attachment.create")
+		return
+	}
+	headers := make(map[string]string, len(result.Headers))
+	for key, values := range result.Headers {
+		if len(values) > 0 {
+			headers[key] = values[0]
+		}
+	}
+	apiresponse.OK(c, attachmentUploadResponse{ObjectKey: result.ObjectKey, UploadURL: result.UploadURL, Method: http.MethodPut, Headers: headers, ExpiresIn: result.ExpiresIn})
+}
+
+// DownloadAttachment godoc
+// @Summary Download plugin attachment
+// @Description Stream an object referenced by the visible Plugin Package after enforcing its managed Space prefix.
+// @Tags plugin
+// @ID plugin.attachment.download
+// @Accept json
+// @Produce application/octet-stream
+// @Security Bearer
+// @Param plugin_id path string true "Plugin ID"
+// @Param object_key query string true "Package-referenced object key"
+// @Success 200 {file} binary "Attachment bytes"
+// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
+// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
+// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
+// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
+// @Router /plugins/{plugin_id}/attachments/_download [get]
+func (h *Handler) DownloadAttachment(c *gin.Context) {
+	caller, ok := caller(c)
+	if !ok {
+		unauthorized(c)
+		return
+	}
+	result, err := h.svc.OpenAttachment(c.Request.Context(), caller, c.Param("plugin_id"), c.Query("object_key"))
+	if err != nil {
+		writeServiceError(c, err, "plugin.attachment.download")
+		return
+	}
+	defer result.Body.Close()
+	c.Header("Content-Type", result.ContentType)
+	c.Header("Content-Disposition", contentDisposition(result.Path))
+	c.Header("Content-Length", strconv.FormatInt(result.Size, 10))
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Status(http.StatusOK)
+	if _, err := io.CopyN(c.Writer, result.Body, result.Size); err != nil {
+		logging.Error("plugin_attachment_stream_failed", logging.ErrorField(err))
+	}
+}
+
+// DownloadArchive godoc
+// @Summary Download plugin archive
+// @Description Build and stream a bounded ZIP from the current or requested immutable Plugin Package.
+// @Tags plugin
+// @ID plugin.archive.download
+// @Accept json
+// @Produce application/zip
+// @Security Bearer
+// @Param plugin_id path string true "Plugin ID"
+// @Param version query string false "Immutable Plugin version"
+// @Success 200 {file} binary "Plugin ZIP archive"
+// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
+// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
+// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
+// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
+// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
+// @Router /plugins/{plugin_id}/archive [get]
+func (h *Handler) DownloadArchive(c *gin.Context) {
+	caller, ok := caller(c)
+	if !ok {
+		unauthorized(c)
+		return
+	}
+	archive, err := h.svc.PrepareArchive(c.Request.Context(), caller, c.Param("plugin_id"), c.Query("version"))
+	if err != nil {
+		writeServiceError(c, err, "plugin.archive.download")
+		return
+	}
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", contentDisposition(c.Param("plugin_id")+".zip"))
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Status(http.StatusOK)
+	if err := h.svc.WriteArchive(c.Request.Context(), archive, c.Writer); err != nil {
+		logging.Error("plugin_archive_stream_failed", logging.ErrorField(err))
+	}
+}
+
 // ListCategories godoc
 // @Summary List plugin categories
 // @Description List placement-aware categories backed by Plugins visible in the current Space.
@@ -626,6 +766,8 @@ func writeServiceError(c *gin.Context, err error, operation string) {
 		validation(c, "body")
 	case errors.Is(err, pluginsvc.ErrNotFound):
 		apiresponse.Fail(c, http.StatusNotFound, errcode.NotFound, "plugin not found", map[string]any{"resource": "plugin"}, "Verify the plugin_id and try again.")
+	case errors.Is(err, pluginsvc.ErrTooLarge):
+		apiresponse.Fail(c, http.StatusRequestEntityTooLarge, errcode.FileTooLarge, "plugin artifact exceeds the size limit", nil, "Reduce the attachment size and try again.")
 	case errors.Is(err, pluginsvc.ErrConflict):
 		apiresponse.Fail(c, http.StatusConflict, errcode.Conflict, "plugin state conflicts with an existing resource", map[string]any{"conflict_reason": "state"}, "Refresh the resource and try again.")
 	default:
@@ -674,6 +816,20 @@ func stringSlice(raw json.RawMessage) []string {
 		return []string{}
 	}
 	return out
+}
+
+func contentDisposition(name string) string {
+	name = path.Base(strings.ReplaceAll(name, "\\", "/"))
+	name = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == '"' || r == '\\' {
+			return '_'
+		}
+		return r
+	}, name)
+	if name == "" || name == "." {
+		name = "download"
+	}
+	return `attachment; filename="` + name + `"`
 }
 
 func objectSlice(raw json.RawMessage) []map[string]any {
