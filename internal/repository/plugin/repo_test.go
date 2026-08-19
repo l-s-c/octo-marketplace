@@ -140,6 +140,24 @@ func TestCreateRollsBackWhenAuditAppendFails(t *testing.T) {
 	}
 }
 
+func TestGetOwnedForUpdateRejectsInactivePlugin(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	mock.ExpectBegin()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("inactive", scope.CallerUID, scope.SpaceID).
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()))
+	if _, err = getOwnedForUpdate(context.Background(), tx, scope, "inactive"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("getOwnedForUpdate error = %v, want ErrNotFound", err)
+	}
+	_ = tx.Rollback()
+}
+
 func TestDeleteRejectsLiveIncomingRelationWithoutMutatingGraph(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()

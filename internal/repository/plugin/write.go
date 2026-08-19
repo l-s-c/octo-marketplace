@@ -142,7 +142,7 @@ ORDER BY r.relation_id FOR UPDATE`, pluginID)
 }
 
 func getOwnedForUpdate(ctx context.Context, tx *sql.Tx, scope Scope, id string) (*model.Plugin, error) {
-	row := tx.QueryRowContext(ctx, `SELECT `+pluginColumns+` FROM plugins p WHERE p.plugin_id=? AND p.owner_uid=? AND p.space_id=? AND p.deleted_at IS NULL FOR UPDATE`, id, scope.CallerUID, scope.SpaceID)
+	row := tx.QueryRowContext(ctx, `SELECT `+pluginColumns+` FROM plugins p WHERE p.plugin_id=? AND p.owner_uid=? AND p.space_id=? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`, id, scope.CallerUID, scope.SpaceID)
 	p, err := scanPlugin(row)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
