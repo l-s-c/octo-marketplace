@@ -453,7 +453,7 @@ func mapStoreError(err error) error {
 		return ErrNotFound
 	case errors.Is(err, pluginrepo.ErrConflict):
 		return ErrConflict
-	case errors.Is(err, pluginrepo.ErrInvalidRelation), errors.Is(err, pluginrepo.ErrInvalidPlacement):
+	case errors.Is(err, pluginrepo.ErrInvalidRelation), errors.Is(err, pluginrepo.ErrInvalidCategory), errors.Is(err, pluginrepo.ErrInvalidPlacement):
 		return ErrInvalidRequest
 	case errors.Is(err, pluginrepo.ErrUnsafeConnectorData):
 		return ErrSecretValue

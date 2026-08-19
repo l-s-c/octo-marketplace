@@ -16,6 +16,8 @@ var (
 	ErrConflict = errors.New("plugin conflict")
 	// ErrInvalidRelation indicates a relation whose source/target types are incompatible.
 	ErrInvalidRelation = errors.New("invalid plugin relation")
+	// ErrInvalidCategory indicates a missing, inactive, or type-incompatible category.
+	ErrInvalidCategory = errors.New("invalid plugin category")
 	// ErrInvalidPlacement indicates a category not enabled for the Plugin type and placement.
 	ErrInvalidPlacement = errors.New("invalid plugin placement")
 	// ErrUnsafeConnectorData prevents copying persisted connector secret values.

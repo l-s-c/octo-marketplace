@@ -31,6 +31,9 @@ func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) error {
 	if p.ID == "" {
 		p.ID = r.id()
 	}
+	if err = lockPluginCategory(ctx, tx, p.CategoryID, p.Type); err != nil {
+		return err
+	}
 	if err = lockRelationTargets(ctx, tx, scope, p.Type, m.Relations); err != nil {
 		return err
 	}
@@ -64,6 +67,9 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) error {
 	p := m.Plugin
 	if p.Type != before.Type {
 		return ErrInvalidRelation
+	}
+	if err = lockPluginCategory(ctx, tx, p.CategoryID, p.Type); err != nil {
+		return err
 	}
 	if err = lockRelationTargets(ctx, tx, scope, p.Type, m.Relations); err != nil {
 		return err
@@ -139,6 +145,18 @@ ORDER BY r.relation_id FOR UPDATE`, pluginID)
 		return ErrConflict
 	}
 	return rows.Err()
+}
+
+func lockPluginCategory(ctx context.Context, tx *sql.Tx, categoryID *string, pluginType model.PluginType) error {
+	if categoryID == nil {
+		return nil
+	}
+	var id string
+	err := tx.QueryRowContext(ctx, `SELECT category_id FROM plugin_categories WHERE category_id=? AND status=1 AND deleted_at IS NULL AND JSON_CONTAINS(plugin_types_json,JSON_QUOTE(?),'$') FOR UPDATE`, *categoryID, pluginType).Scan(&id)
+	if err == sql.ErrNoRows {
+		return ErrInvalidCategory
+	}
+	return err
 }
 
 func getOwnedForUpdate(ctx context.Context, tx *sql.Tx, scope Scope, id string) (*model.Plugin, error) {

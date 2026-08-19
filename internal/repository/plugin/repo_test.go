@@ -82,6 +82,24 @@ func TestListAuditsScopesHistoryQueryToOwnerAndSpace(t *testing.T) {
 	}
 }
 
+func TestLockPluginCategoryRejectsMissingOrWrongType(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	mock.ExpectBegin()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	category := "category-id"
+	mock.ExpectQuery(`SELECT category_id FROM plugin_categories WHERE category_id=\? AND status=1 AND deleted_at IS NULL AND JSON_CONTAINS.*FOR UPDATE`).
+		WithArgs(category, model.PluginTypeSkill).
+		WillReturnRows(sqlmock.NewRows([]string{"category_id"}))
+	if err = lockPluginCategory(context.Background(), tx, &category, model.PluginTypeSkill); !errors.Is(err, ErrInvalidCategory) {
+		t.Fatalf("lockPluginCategory error = %v, want ErrInvalidCategory", err)
+	}
+	_ = tx.Rollback()
+}
+
 func TestCreateCommitsCurrentRelationsAndAuditTogether(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
