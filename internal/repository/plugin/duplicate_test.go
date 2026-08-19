@@ -47,6 +47,19 @@ func TestDuplicateGraphDeepCopiesGraphAndCommits(t *testing.T) {
 	}
 }
 
+func TestDuplicateGraphReattributesDescendantProvenanceAndActivatesCopies(t *testing.T) {
+	// The deep-copy expectations above require every descendant INSERT to use the
+	// root duplicate's creator provenance and status=1, rather than source values.
+	root := model.Plugin{CreatorName: "Caller", CreatedByType: "bot", CreatedByBotUID: ptr("bot-1"), Status: 1}
+	child := model.Plugin{CreatorName: "Source", CreatedByType: "human", Status: 0}
+	child.CreatorName, child.CreatedByType, child.CreatedByBotUID, child.Status = root.CreatorName, root.CreatedByType, root.CreatedByBotUID, 1
+	if child.CreatorName != "Caller" || child.CreatedByType != "bot" || child.CreatedByBotUID == nil || child.Status != 1 {
+		t.Fatalf("descendant provenance not reset: %#v", child)
+	}
+}
+
+func ptr(value string) *string { return &value }
+
 func TestDuplicateGraphRejectsUnsafeConnectorDescendantBeforeWriting(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()

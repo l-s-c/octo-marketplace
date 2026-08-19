@@ -66,6 +66,13 @@ func (r *Repo) DuplicateGraph(ctx context.Context, scope Scope, sourcePluginID s
 		copy.OwnerUID = scope.CallerUID
 		copy.SpaceID = &scope.SpaceID
 		copy.Visibility = model.PluginVisibilityPrivate
+		// Every copied node is a new resource created by the current caller. Do
+		// not preserve a source descendant's creator/bot provenance or status.
+		copy.CreatorName = duplicate.CreatorName
+		copy.CreatedByType = duplicate.CreatedByType
+		copy.CreatedByBotUID = duplicate.CreatedByBotUID
+		copy.CreatedByBotName = duplicate.CreatedByBotName
+		copy.Status = 1
 		copy.CurrentVersionID = nil
 		copy.DeletedAt = nil
 		if err := insertDuplicatePlugin(ctx, tx, copy, now); err != nil {
