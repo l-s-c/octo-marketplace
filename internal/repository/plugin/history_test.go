@@ -10,6 +10,28 @@ import (
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 )
 
+func TestGetVersionUsesVisiblePluginScope(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	now := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
+	mock.ExpectQuery(`SELECT .* FROM plugins p.*p.plugin_id=\?.*p.space_id = \?.*p.owner_uid = \?`).
+		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID).
+		WillReturnRows(ownedPluginRow("plugin-id", scope, now))
+	mock.ExpectQuery(`SELECT v.version_id.*WHERE v.plugin_id=\? AND v.version=\?.*p.space_id = \?.*p.owner_uid = \?`).
+		WithArgs("plugin-id", "1.2.3", scope.SpaceID, scope.CallerUID).
+		WillReturnRows(sqlmock.NewRows([]string{"version_id", "plugin_id", "version", "manifest_json", "plugin_json", "manifest_hash", "plugin_hash", "relations_json", "changelog", "created_by", "created_at"}).
+			AddRow("version-id", "plugin-id", "1.2.3", []byte(`{}`), []byte(`{"attachments":[]}`), "sha256:m", "sha256:p", []byte(`[]`), nil, "caller", now))
+	version, err := r.GetVersion(context.Background(), scope, "plugin-id", "1.2.3")
+	if err != nil || version.ID != "version-id" || string(version.Package) != `{"attachments":[]}` {
+		t.Fatalf("version=%#v err=%v", version, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPublishSnapshotsLockedStateAndRelationsAndReturnsStoredVersion(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()

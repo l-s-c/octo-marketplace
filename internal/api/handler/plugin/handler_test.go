@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,11 +20,15 @@ import (
 )
 
 type fakeService struct {
-	caller pluginsvc.Caller
-	write  pluginsvc.WriteRequest
-	list   []model.Plugin
-	detail *pluginsvc.Detail
-	err    error
+	caller     pluginsvc.Caller
+	write      pluginsvc.WriteRequest
+	list       []model.Plugin
+	detail     *pluginsvc.Detail
+	err        error
+	upload     *pluginsvc.AttachmentUpload
+	download   *pluginsvc.AttachmentDownload
+	archive    *pluginsvc.Archive
+	archiveZip []byte
 }
 
 func (f *fakeService) List(_ context.Context, c pluginsvc.Caller, _ pluginsvc.ListParams) ([]model.Plugin, int64, error) {
@@ -58,16 +63,22 @@ func (f *fakeService) Publish(context.Context, pluginsvc.Caller, string, plugins
 func (f *fakeService) Duplicate(context.Context, pluginsvc.Caller, string, string) (*model.Plugin, error) {
 	return &model.Plugin{}, f.err
 }
-func (f *fakeService) InitAttachmentUpload(context.Context, pluginsvc.Caller, string, string, int64) (*pluginsvc.AttachmentUpload, error) {
-	return nil, f.err
+func (f *fakeService) InitAttachmentUpload(_ context.Context, c pluginsvc.Caller, _, _ string, _ int64) (*pluginsvc.AttachmentUpload, error) {
+	f.caller = c
+	return f.upload, f.err
 }
-func (f *fakeService) OpenAttachment(context.Context, pluginsvc.Caller, string, string) (*pluginsvc.AttachmentDownload, error) {
-	return nil, f.err
+func (f *fakeService) OpenAttachment(_ context.Context, c pluginsvc.Caller, _, _ string) (*pluginsvc.AttachmentDownload, error) {
+	f.caller = c
+	return f.download, f.err
 }
-func (f *fakeService) PrepareArchive(context.Context, pluginsvc.Caller, string, string) (*pluginsvc.Archive, error) {
-	return nil, f.err
+func (f *fakeService) PrepareArchive(_ context.Context, c pluginsvc.Caller, _, _ string) (*pluginsvc.Archive, error) {
+	f.caller = c
+	return f.archive, f.err
 }
-func (f *fakeService) WriteArchive(context.Context, *pluginsvc.Archive, io.Writer) error {
+func (f *fakeService) WriteArchive(_ context.Context, _ *pluginsvc.Archive, w io.Writer) error {
+	if f.err == nil {
+		_, _ = w.Write(f.archiveZip)
+	}
 	return f.err
 }
 func (f *fakeService) ListCategories(context.Context, pluginsvc.Caller, string, model.PluginType) ([]model.PluginCategory, error) {
@@ -144,6 +155,41 @@ func TestInternalErrorIsSanitized(t *testing.T) {
 	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins/p1", nil))
 	if rec.Code != http.StatusInternalServerError || bytes.Contains(rec.Body.Bytes(), []byte("secret DSN")) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAttachmentUploadReturnsStableKeyAndPresignedTarget(t *testing.T) {
+	f := &fakeService{upload: &pluginsvc.AttachmentUpload{ObjectKey: "plugins/space-a/attachments/id.bin", UploadURL: "https://upload.invalid/signed", Headers: http.Header{"Content-Type": []string{"application/octet-stream"}}, ExpiresIn: 3600}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/attachments", strings.NewReader(`{"file_name":"x.bin","file_size":4,"content_type":"application/octet-stream"}`))
+	req.Header.Set("Content-Type", "application/json")
+	testEngine(f).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"object_key":"plugins/space-a/attachments/id.bin"`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"method":"PUT"`)) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if f.caller.UID != "user-1" || f.caller.SpaceID != "space-a" {
+		t.Fatalf("caller=%#v", f.caller)
+	}
+}
+
+func TestAttachmentDownloadStreamsSafeHeaders(t *testing.T) {
+	f := &fakeService{download: &pluginsvc.AttachmentDownload{Body: io.NopCloser(strings.NewReader("data")), Path: "dir/evil\r\nX-Test.txt", ContentType: "text/plain", Size: 4}}
+	rec := httptest.NewRecorder()
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins/p1/attachments/_download?object_key=plugins%2Fspace-a%2Fattachments%2Fid", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != "data" || rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("status=%d headers=%#v body=%q", rec.Code, rec.Header(), rec.Body.String())
+	}
+	if strings.ContainsAny(rec.Header().Get("Content-Disposition"), "\r\n") {
+		t.Fatalf("unsafe disposition=%q", rec.Header().Get("Content-Disposition"))
+	}
+}
+
+func TestArchivePreflightErrorsRemainSanitizedJSON(t *testing.T) {
+	f := &fakeService{err: errors.New("storage path /secret/key")}
+	rec := httptest.NewRecorder()
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins/p1/archive", nil))
+	if rec.Code != http.StatusInternalServerError || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") || strings.Contains(rec.Body.String(), "/secret/key") {
+		t.Fatalf("status=%d headers=%#v body=%s", rec.Code, rec.Header(), rec.Body.String())
 	}
 }
 
