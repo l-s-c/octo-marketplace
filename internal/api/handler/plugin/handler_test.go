@@ -25,9 +25,9 @@ type fakeService struct {
 	err    error
 }
 
-func (f *fakeService) List(_ context.Context, c pluginsvc.Caller, _ pluginsvc.ListParams) ([]model.Plugin, error) {
+func (f *fakeService) List(_ context.Context, c pluginsvc.Caller, _ pluginsvc.ListParams) ([]model.Plugin, int64, error) {
 	f.caller = c
-	return f.list, f.err
+	return f.list, int64(len(f.list)), f.err
 }
 func (f *fakeService) Detail(_ context.Context, c pluginsvc.Caller, _ string) (*pluginsvc.Detail, error) {
 	f.caller = c

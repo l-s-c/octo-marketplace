@@ -119,18 +119,18 @@ type PlacementRequest struct {
 
 func scope(c Caller) pluginrepo.Scope { return pluginrepo.Scope{CallerUID: c.UID, SpaceID: c.SpaceID} }
 
-func (s *Service) List(ctx context.Context, caller Caller, p ListParams) ([]model.Plugin, error) {
+func (s *Service) List(ctx context.Context, caller Caller, p ListParams) ([]model.Plugin, int64, error) {
 	if err := validateCaller(caller); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if p.Type != "" && !validPluginType(p.Type) {
-		return nil, ErrInvalidRequest
+		return nil, 0, ErrInvalidRequest
 	}
 	if p.Limit < 0 || p.Limit > maxListLimit || p.Offset < 0 {
-		return nil, ErrInvalidRequest
+		return nil, 0, ErrInvalidRequest
 	}
-	items, _, err := s.repo.List(ctx, scope(caller), pluginrepo.ListFilter{Type: p.Type, CategoryID: strings.TrimSpace(p.CategoryID), Keyword: strings.TrimSpace(p.Keyword), Mine: p.Mine, Limit: p.Limit, Offset: p.Offset})
-	return items, mapStoreError(err)
+	items, total, err := s.repo.List(ctx, scope(caller), pluginrepo.ListFilter{Type: p.Type, CategoryID: strings.TrimSpace(p.CategoryID), Keyword: strings.TrimSpace(p.Keyword), Mine: p.Mine, Limit: p.Limit, Offset: p.Offset})
+	return items, total, mapStoreError(err)
 }
 
 func (s *Service) Detail(ctx context.Context, caller Caller, pluginID string) (*Detail, error) {

@@ -24,7 +24,7 @@ const maxBodyBytes = 3 << 20
 
 // Service is the handler-facing boundary over the unified Plugin service.
 type Service interface {
-	List(context.Context, pluginsvc.Caller, pluginsvc.ListParams) ([]model.Plugin, error)
+	List(context.Context, pluginsvc.Caller, pluginsvc.ListParams) ([]model.Plugin, int64, error)
 	Detail(context.Context, pluginsvc.Caller, string) (*pluginsvc.Detail, error)
 	Create(context.Context, pluginsvc.Caller, pluginsvc.WriteRequest) (*pluginsvc.Detail, error)
 	Update(context.Context, pluginsvc.Caller, string, pluginsvc.WriteRequest) (*pluginsvc.Detail, error)
@@ -218,7 +218,7 @@ func (h *Handler) List(c *gin.Context) {
 		validation(c, "pagination")
 		return
 	}
-	items, err := h.svc.List(c.Request.Context(), caller, pluginsvc.ListParams{Type: model.PluginType(c.Query("type")), CategoryID: c.Query("category_id"), Keyword: c.Query("keyword"), Mine: c.Query("mine") == "true", Limit: pageSize, Offset: (page - 1) * pageSize})
+	items, total, err := h.svc.List(c.Request.Context(), caller, pluginsvc.ListParams{Type: model.PluginType(c.Query("type")), CategoryID: c.Query("category_id"), Keyword: c.Query("keyword"), Mine: c.Query("mine") == "true", Limit: pageSize, Offset: (page - 1) * pageSize})
 	if err != nil {
 		writeServiceError(c, err, "plugin.list")
 		return
@@ -227,11 +227,7 @@ func (h *Handler) List(c *gin.Context) {
 	for i := range items {
 		out[i] = pluginDTO(&items[i])
 	}
-	// The current service operation returns a page but no count. Preserve the
-	// standard offset envelope; the service can provide an exact total without a
-	// wire change when its concurrently finalized list result exposes one.
-	total := (page-1)*pageSize + len(out)
-	apiresponse.Offset(c, out, total, page, pageSize)
+	apiresponse.Offset(c, out, int(total), page, pageSize)
 }
 
 // Create godoc
