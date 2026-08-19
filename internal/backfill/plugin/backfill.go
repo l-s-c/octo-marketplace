@@ -573,6 +573,11 @@ func (r *Runner) mcps(ctx context.Context, counts map[string]int, p *plan) error
 		}
 		m, _ := canonical(map[string]any{"schema": "octo.legacy-backfill/v1", "source_table": "mcp_servers", "source_id": id, "slug": slug, "slogan": slogan, "legacy_category": cat, "icon": icon, "icon_version": iconV})
 		pkg, _ := canonical(map[string]any{"transport": transport, "config": cfg, "tools": tl, "usage_examples": ex, "faqs": fq, "notes": nt})
+		pkg, e = SanitizeConnectorJSON(pkg)
+		if e != nil {
+			p.issues = append(p.issues, Issue{"skip", "unsafe_connector_package", "mcp_servers", id, e.Error()})
+			continue
+		}
 		pid := PluginID("connector", id, counts[id])
 		vid := DeterministicID("connectorver", id)
 		tj, _ := canonical(tv)

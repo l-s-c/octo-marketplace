@@ -40,6 +40,9 @@ func TestSanitizeConnectorJSONBlanksEnvAndHeaders(t *testing.T) {
 func TestSanitizeConnectorJSONRejectsSecretShapedValue(t *testing.T) {
 	for _, raw := range []string{
 		`{"nested":{"api_key":"actual"}}`,
+		`{"clientSecret":"actual"}`,
+		`{"accessToken":"actual"}`,
+		`{"privateKeyValue":"actual"}`,
 		`{"token":{"nested":"actual"}}`,
 		`{"ok":true} {"second":true}`,
 		`[]`,

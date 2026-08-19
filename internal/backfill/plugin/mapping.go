@@ -37,7 +37,22 @@ func hashJSON(raw []byte) string {
 func canonical(v any) ([]byte, error) { return json.Marshal(v) }
 
 func secretShaped(key string) bool {
-	key = strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+	key = strings.TrimSpace(key)
+	var normalized strings.Builder
+	for i, r := range key {
+		if r == '-' || r == '.' || r == ' ' {
+			normalized.WriteByte('_')
+			continue
+		}
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			prev := rune(key[i-1])
+			if prev != '_' && !(prev >= 'A' && prev <= 'Z') {
+				normalized.WriteByte('_')
+			}
+		}
+		normalized.WriteRune(r)
+	}
+	key = strings.ToLower(normalized.String())
 	for _, fragment := range secretFragments {
 		if strings.Contains(key, fragment) {
 			return true
