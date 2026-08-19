@@ -123,6 +123,24 @@ func TestCreateCommitsCurrentRelationsAndAuditTogether(t *testing.T) {
 	}
 }
 
+func TestLockRelationTargetsRequiresActiveTarget(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	mock.ExpectBegin()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	mock.ExpectQuery(`SELECT p.plugin_type FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL.*FOR UPDATE`).
+		WithArgs("inactive", scope.SpaceID, scope.CallerUID).WillReturnRows(sqlmock.NewRows([]string{"plugin_type"}))
+	err = lockRelationTargets(context.Background(), tx, scope, model.PluginTypeExpert, []model.PluginRelation{{TargetPluginID: "inactive", Type: "expert_skill"}})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("lockRelationTargets error = %v, want ErrNotFound", err)
+	}
+	_ = tx.Rollback()
+}
+
 func TestCreateRejectsInvisibleRelationTargetBeforeWriting(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()

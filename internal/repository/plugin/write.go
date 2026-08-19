@@ -213,7 +213,7 @@ func lockRelationTargets(ctx context.Context, tx *sql.Tx, scope Scope, sourceTyp
 			return ErrInvalidRelation
 		}
 		seen[key] = struct{}{}
-		row := tx.QueryRowContext(ctx, `SELECT p.plugin_type FROM plugins p WHERE p.plugin_id=? AND p.deleted_at IS NULL AND `+visibilitySQL+` FOR UPDATE`, relation.TargetPluginID, scope.SpaceID, scope.CallerUID)
+		row := tx.QueryRowContext(ctx, `SELECT p.plugin_type FROM plugins p WHERE p.plugin_id=? AND p.status=1 AND p.deleted_at IS NULL AND `+visibilitySQL+` FOR UPDATE`, relation.TargetPluginID, scope.SpaceID, scope.CallerUID)
 		var targetType model.PluginType
 		if err := row.Scan(&targetType); err != nil {
 			if err == sql.ErrNoRows {
