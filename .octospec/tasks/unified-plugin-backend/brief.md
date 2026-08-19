@@ -36,6 +36,9 @@ compatibility after cutover.
 - Existing legacy routes and tables continue to operate during backend rollout;
   no long-term dual-write or compatibility layer is introduced.
 - API success and error envelopes follow the repository OpenAPI standard.
+- The REST paths and DTOs generated in `docs/openapi/swagger.yaml` are the final
+  Plugin client contract; the architecture HTML's RPC paths are not compatibility
+  requirements.
 
 ## In scope
 
@@ -58,10 +61,23 @@ compatibility after cutover.
 
 ### Plugin API
 
-- Detail, upsert, duplicate, audit list, archive, attachment upload/download.
-- Placement-aware category list and Plugin list.
-- Publish immutable version and placement configuration.
-- Delete, Connector probe, and Plugin version list.
+The generated OpenAPI and REST resource model are the authoritative new client
+contract. The earlier architecture HTML's RPC-style `/internal/plugins/detail`,
+`/upsert`, and related paths and DTO names are design inputs only and are
+superseded; no aliases or conversion DTOs are required. In particular:
+
+- Plugin CRUD uses `GET/PATCH/DELETE /plugins/{plugin_id}` and
+  `POST /plugins`.
+- Actions and history use `/plugins/{plugin_id}/duplicate`, `/publish`,
+  `/audit_logs`, `/versions`, and `/archive`.
+- Attachments use `POST /plugins/attachments` and
+  `GET /plugins/{plugin_id}/attachments/_download`.
+- Connector probing uses `POST /connectors/_probe`.
+- Placement-aware discovery uses `GET /plugins` and
+  `GET /plugin_categories`.
+- Wire fields are the OpenAPI `name`, `type`, `manifest`, and `package` fields,
+  rather than the earlier HTML's `plugin_name`, `plugin_type`, `manifest_json`,
+  and `plugin_json` spellings.
 
 ## Out of scope
 
