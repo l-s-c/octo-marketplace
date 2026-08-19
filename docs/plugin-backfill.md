@@ -15,6 +15,7 @@
 - Top-level, member, and Connector MCP configurations are strictly sanitized. Exactly one JSON object is accepted; `env` and `headers` string values are blanked; non-empty or non-string secret-shaped fields reject the entire owning graph. Secret values are never written to Plugin, version, relation, audit, hash, or report data.
 - Placements are intentionally not imported because no legacy-to-`placement_code` mapping is confirmed.
 - Skills, Experts, Expert Teams, generated member/skill snapshots, and MCP servers receive immutable version rows, `current_version_id`, and deterministic `import` audits. Existing Skill version history is retained; a deterministic snapshot is created only when no version row exists.
+- Planning validates every generated category, relation source/target, version owner, and `current_version_id` reference before writes; the command does not rely on database foreign keys.
 - Apply preflights every deterministic primary key against the complete expected row. An exact match is counted as existing; any mismatch aborts and rolls back instead of being hidden by `INSERT IGNORE`. Re-running resumes without a checkpoint table. Verify covers generated Plugins, relations, relation-bearing versions, and audits and reports missing or conflicting rows.
 
 ## Usage

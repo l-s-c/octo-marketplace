@@ -142,6 +142,9 @@ func (r *Runner) build(ctx context.Context) (plan, error) {
 	if e = r.mcps(ctx, counts, &p); e != nil {
 		return p, e
 	}
+	if e = validatePlanReferences(p); e != nil {
+		return p, fmt.Errorf("invalid generated references: %w", e)
+	}
 	if e = validateGraph(p.relations, 16, 500); e != nil {
 		return p, fmt.Errorf("invalid generated relation graph: %w", e)
 	}
@@ -575,6 +578,46 @@ func (r *Runner) mcps(ctx context.Context, counts map[string]int, p *plan) error
 		p.versions = append(p.versions, mkver(vid, pid, "legacy", "", owner, c, m, pkg))
 	}
 	return rs.Err()
+}
+
+func validatePlanReferences(p plan) error {
+	plugins := make(map[string]struct{}, len(p.plugins))
+	categories := make(map[string]struct{}, len(p.cats))
+	versions := make(map[string]string, len(p.versions))
+	for _, category := range p.cats {
+		categories[category.id] = struct{}{}
+	}
+	for _, plugin := range p.plugins {
+		if _, exists := plugins[plugin.id]; exists {
+			return fmt.Errorf("duplicate plugin id %q", plugin.id)
+		}
+		plugins[plugin.id] = struct{}{}
+		if plugin.cat != "" {
+			if _, exists := categories[plugin.cat]; !exists {
+				return fmt.Errorf("plugin %q references missing category %q", plugin.id, plugin.cat)
+			}
+		}
+	}
+	for _, relation := range p.relations {
+		if _, exists := plugins[relation.source]; !exists {
+			return fmt.Errorf("relation %q references missing source plugin %q", relation.id, relation.source)
+		}
+		if _, exists := plugins[relation.target]; !exists {
+			return fmt.Errorf("relation %q references missing target plugin %q", relation.id, relation.target)
+		}
+	}
+	for _, version := range p.versions {
+		if _, exists := plugins[version.pid]; !exists {
+			return fmt.Errorf("version %q references missing plugin %q", version.id, version.pid)
+		}
+		versions[version.id] = version.pid
+	}
+	for _, plugin := range p.plugins {
+		if versions[plugin.versionID] != plugin.id {
+			return fmt.Errorf("plugin %q references missing current version %q", plugin.id, plugin.versionID)
+		}
+	}
+	return nil
 }
 
 func validateGraph(relations []relRow, maxDepth, maxNodes int) error {

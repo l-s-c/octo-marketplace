@@ -151,6 +151,28 @@ func TestApplyRowConflictDoesNotInsert(t *testing.T) {
 	}
 }
 
+func TestValidatePlanReferencesRejectsDanglingRows(t *testing.T) {
+	now := time.Unix(1, 0).UTC()
+	base := plan{
+		cats:     []catRow{{id: "cat"}},
+		plugins:  []plugRow{{id: "plugin", cat: "cat", versionID: "version"}},
+		versions: []verRow{{id: "version", pid: "plugin", created: now}},
+	}
+	if err := validatePlanReferences(base); err != nil {
+		t.Fatalf("valid plan rejected: %v", err)
+	}
+	cases := []plan{
+		{plugins: []plugRow{{id: "plugin", cat: "missing", versionID: "version"}}, versions: []verRow{{id: "version", pid: "plugin"}}},
+		{plugins: []plugRow{{id: "plugin", versionID: "version"}}, versions: []verRow{{id: "version", pid: "plugin"}}, relations: []relRow{{id: "relation", source: "plugin", target: "missing"}}},
+		{plugins: []plugRow{{id: "plugin", versionID: "missing"}}},
+	}
+	for i, candidate := range cases {
+		if err := validatePlanReferences(candidate); err == nil {
+			t.Fatalf("case %d accepted dangling reference", i)
+		}
+	}
+}
+
 func TestApplyEmptyPlanUsesTransaction(t *testing.T) {
 	db, mock, e := sqlmock.New()
 	if e != nil {
