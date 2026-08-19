@@ -100,6 +100,16 @@ func TestBuildExpertAndSquadGraph(t *testing.T) {
 	}
 }
 
+func TestApplyCountersSurviveVerificationProjection(t *testing.T) {
+	rep := Report{Observed: Counts{Inserted: 3, Existing: 4}}
+	inserted, existing := rep.Observed.Inserted, rep.Observed.Existing
+	rep.Observed = Counts{Plugins: 7}
+	rep.Observed.Inserted, rep.Observed.Existing = inserted, existing
+	if rep.Observed.Inserted != 3 || rep.Observed.Existing != 4 || rep.Observed.Plugins != 7 {
+		t.Fatalf("apply counters lost: %#v", rep.Observed)
+	}
+}
+
 func TestPlanHashMatchesVerifyProjection(t *testing.T) {
 	p := plan{
 		cats:      []catRow{{id: "cat", name: "Category", types: `["skill"]`}},

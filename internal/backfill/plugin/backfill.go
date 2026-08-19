@@ -104,10 +104,12 @@ func (r *Runner) Run(ctx context.Context, o Options) (Report, error) {
 		}
 	}
 	if o.Mode != ModeDryRun {
+		inserted, existing := rep.Observed.Inserted, rep.Observed.Existing
 		rep.Observed, rep.ObservedHash, rep.Issues, e = r.verify(ctx, p, rep.Issues)
 		if e != nil {
 			return Report{}, e
 		}
+		rep.Observed.Inserted, rep.Observed.Existing = inserted, existing
 	}
 	rep.FinishedAt = r.now()
 	return rep, nil
