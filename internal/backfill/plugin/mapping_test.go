@@ -21,7 +21,7 @@ func TestPluginIDPreservesOnlyGloballyUnique(t *testing.T) {
 }
 
 func TestSanitizeConnectorJSONBlanksEnvAndHeaders(t *testing.T) {
-	got, err := SanitizeConnectorJSON([]byte(`{"url":"https://example.invalid","env":{"TOKEN":"actual"},"headers":{"Authorization":"Bearer actual"}}`))
+	got, err := SanitizeConnectorJSON([]byte(`{"url":"https://example.invalid","Env":{"TOKEN":"actual"},"HEADERS":{"Authorization":"Bearer actual"}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestSanitizeConnectorJSONBlanksEnvAndHeaders(t *testing.T) {
 	if err := json.Unmarshal(got, &value); err != nil {
 		t.Fatal(err)
 	}
-	if value["env"].(map[string]any)["TOKEN"] != "" || value["headers"].(map[string]any)["Authorization"] != "" {
+	if value["Env"].(map[string]any)["TOKEN"] != "" || value["HEADERS"].(map[string]any)["Authorization"] != "" {
 		t.Fatalf("secret maps were not blanked: %s", got)
 	}
 	if strings.Contains(string(got), "actual") {

@@ -107,7 +107,8 @@ func sanitizeNode(value any, path string) error {
 	case map[string]any:
 		for key, child := range node {
 			childPath := path + "/" + key
-			if key == "env" || key == "headers" {
+			normalizedKey := strings.ToLower(strings.TrimSpace(key))
+			if normalizedKey == "env" || normalizedKey == "headers" {
 				values, ok := child.(map[string]any)
 				if !ok {
 					return fmt.Errorf("%s must be an object", childPath)
