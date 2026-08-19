@@ -14,6 +14,10 @@ var (
 	ErrNotFound = errors.New("plugin not found")
 	// ErrConflict indicates an immutable version or placement uniqueness conflict.
 	ErrConflict = errors.New("plugin conflict")
+	// ErrInvalidRelation indicates a relation whose source/target types are incompatible.
+	ErrInvalidRelation = errors.New("invalid plugin relation")
+	// ErrUnsafeConnectorData prevents copying persisted connector secret values.
+	ErrUnsafeConnectorData = errors.New("unsafe connector secret data")
 )
 
 // Scope is authoritative caller context; it must never come from request data.

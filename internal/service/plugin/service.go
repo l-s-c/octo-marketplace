@@ -43,7 +43,7 @@ type Store interface {
 	Delete(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
 	ListAudits(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginAuditLog, error)
 	ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, error)
-	Publish(context.Context, pluginrepo.Scope, pluginrepo.PublishParams) (string, error)
+	Publish(context.Context, pluginrepo.Scope, pluginrepo.PublishParams) (*model.PluginVersion, error)
 	DuplicateGraph(context.Context, pluginrepo.Scope, string, model.Plugin, pluginrepo.Mutation) error
 }
 
@@ -235,44 +235,25 @@ func (s *Service) Publish(ctx context.Context, caller Caller, pluginID string, r
 	if validateCaller(caller) != nil || strings.TrimSpace(pluginID) == "" || !validVersion(req.Version) {
 		return nil, ErrInvalidRequest
 	}
-	p, rels, err := s.repo.GetWithRelations(ctx, scope(caller), pluginID)
-	if err != nil {
-		return nil, mapStoreError(err)
-	}
-	if p.OwnerUID != caller.UID || (p.SpaceID != nil && *p.SpaceID != caller.SpaceID) {
-		return nil, ErrNotFound
-	}
-	if p.Type == model.PluginTypeConnector {
-		if err := rejectConnectorSecrets(p.Manifest, p.Package); err != nil {
-			return nil, err
-		}
-	}
-	relationJSON, err := canonicalJSONValue(rels)
-	if err != nil {
-		return nil, ErrInvalidRequest
-	}
 	now := s.now()
-	v := model.PluginVersion{PluginID: p.ID, Version: strings.TrimSpace(req.Version), Manifest: cloneJSON(p.Manifest), Package: cloneJSON(p.Package), ManifestHash: p.ManifestHash, PluginHash: p.PluginHash, Relations: relationJSON, Changelog: trimOptional(req.Changelog), CreatedBy: caller.UID, CreatedAt: now}
 	placements, err := s.buildPlacements(pluginID, req.Placements, now)
 	if err != nil {
 		return nil, err
 	}
 	params := pluginrepo.PublishParams{
 		PluginID:     pluginID,
-		Version:      v.Version,
+		Version:      strings.TrimSpace(req.Version),
 		CreatedBy:    caller.UID,
 		OperatorName: caller.Name,
 		RequestID:    caller.RequestID,
-		Changelog:    v.Changelog,
-		Relations:    cloneJSON(v.Relations),
+		Changelog:    trimOptional(req.Changelog),
 		Placements:   placements,
 	}
-	versionID, err := s.repo.Publish(ctx, scope(caller), params)
+	version, err := s.repo.Publish(ctx, scope(caller), params)
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
-	v.ID = versionID
-	return &v, nil
+	return version, nil
 }
 
 func (s *Service) Duplicate(ctx context.Context, caller Caller, sourcePluginID, name string) (*model.Plugin, error) {
@@ -442,6 +423,10 @@ func mapStoreError(err error) error {
 		return ErrNotFound
 	case errors.Is(err, pluginrepo.ErrConflict):
 		return ErrConflict
+	case errors.Is(err, pluginrepo.ErrInvalidRelation):
+		return ErrInvalidRequest
+	case errors.Is(err, pluginrepo.ErrUnsafeConnectorData):
+		return ErrSecretValue
 	default:
 		return err
 	}

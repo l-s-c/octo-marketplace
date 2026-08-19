@@ -42,6 +42,43 @@ func TestGetDoesNotRetryWithoutScope(t *testing.T) {
 	}
 }
 
+func TestListAuditsRequiresOwnerInCurrentSpace(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	scope := Scope{CallerUID: "caller-a", SpaceID: "space-a"}
+
+	mock.ExpectQuery(`SELECT 1 FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.deleted_at IS NULL`).
+		WithArgs("public-plugin", scope.CallerUID, scope.SpaceID).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}))
+	_, err := New(db).ListAudits(context.Background(), scope, "public-plugin", 20, 0)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("non-owner public audit error = %v, want ErrNotFound", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListAuditsScopesHistoryQueryToOwnerAndSpace(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	scope := Scope{CallerUID: "caller-a", SpaceID: "space-a"}
+
+	mock.ExpectQuery(`SELECT 1 FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.deleted_at IS NULL`).
+		WithArgs("plugin-a", scope.CallerUID, scope.SpaceID).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(1))
+	mock.ExpectQuery(`SELECT a.audit_log_id.*FROM plugin_audit_logs a JOIN plugins p ON p.plugin_id=a.plugin_id WHERE a.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.deleted_at IS NULL`).
+		WithArgs("plugin-a", scope.CallerUID, scope.SpaceID, 20, 0).
+		WillReturnRows(sqlmock.NewRows([]string{"audit_log_id", "plugin_id", "action", "operator_id", "operator_name", "request_id", "before_hash", "after_hash", "manifest_snapshot_json", "plugin_snapshot_json", "remark", "created_at"}))
+	items, err := New(db).ListAudits(context.Background(), scope, "plugin-a", 20, 0)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("ListAudits = %#v, %v", items, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCreateCommitsCurrentRelationsAndAuditTogether(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
@@ -51,13 +88,31 @@ func TestCreateCommitsCurrentRelationsAndAuditTogether(t *testing.T) {
 	ids := []string{"relation-id", "audit-id"}
 	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
 	mock.ExpectBegin()
-	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("plugin-id", "Name", model.PluginTypeSkill, nil, "[]", "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "{}", "{}", "sha256:m", "sha256:p", nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(`SELECT p.plugin_type FROM plugins p .* FOR UPDATE`).WithArgs("target-id", "space", "caller").WillReturnRows(sqlmock.NewRows([]string{"plugin_type"}).AddRow(model.PluginTypeSkill))
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("plugin-id", "Name", model.PluginTypeExpert, nil, "[]", "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "{}", "{}", "sha256:m", "sha256:p", nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO plugin_relations`).WithArgs("relation-id", "plugin-id", "target-id", "expert_skill", 0, "{}", 1, "caller", now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-id", "plugin-id", "create", "caller", "Caller", "request-id", nil, "sha256:p", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
-	err := r.Create(context.Background(), Scope{CallerUID: "caller", SpaceID: "space"}, Mutation{Plugin: model.Plugin{ID: "plugin-id", Name: "Name", Type: model.PluginTypeSkill, Tags: []byte(`[]`), Publisher: "pub", Visibility: model.PluginVisibilityPrivate, CreatorName: "Creator", CreatedByType: "human", Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p", Status: 1}, Relations: []model.PluginRelation{{TargetPluginID: "target-id", Type: "expert_skill", Data: []byte(`{}`), Status: 1}}, OperatorID: "caller", OperatorName: "Caller", RequestID: "request-id"})
+	err := r.Create(context.Background(), Scope{CallerUID: "caller", SpaceID: "space"}, Mutation{Plugin: model.Plugin{ID: "plugin-id", Name: "Name", Type: model.PluginTypeExpert, Tags: []byte(`[]`), Publisher: "pub", Visibility: model.PluginVisibilityPrivate, CreatorName: "Creator", CreatedByType: "human", Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p", Status: 1}, Relations: []model.PluginRelation{{TargetPluginID: "target-id", Type: "expert_skill", Data: []byte(`{}`), Status: 1}}, OperatorID: "caller", OperatorName: "Caller", RequestID: "request-id"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateRejectsInvisibleRelationTargetBeforeWriting(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT p.plugin_type FROM plugins p .*p.space_id = \?.*p.owner_uid = \?.*FOR UPDATE`).WithArgs("foreign", scope.SpaceID, scope.CallerUID).WillReturnRows(sqlmock.NewRows([]string{"plugin_type"}))
+	mock.ExpectRollback()
+
+	err := New(db).Create(context.Background(), scope, Mutation{Plugin: model.Plugin{ID: "plugin-id", Type: model.PluginTypeExpert}, Relations: []model.PluginRelation{{TargetPluginID: "foreign", Type: "expert_skill"}}})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err=%v, want ErrNotFound", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -85,8 +140,8 @@ func TestCreateRollsBackWhenAuditAppendFails(t *testing.T) {
 func TestListPlacementCategoriesCarriesVisibilityScope(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
-	q := regexp.QuoteMeta("WHERE cp.placement_code=? AND cp.plugin_type=? AND cp.visible=1 AND c.status=1 AND c.deleted_at IS NULL AND p.deleted_at IS NULL AND") + `.*p.space_id = \? .*p.owner_uid = \?`
-	mock.ExpectQuery(q).WithArgs("home", model.PluginTypeExpert, "space-a", "caller-a").WillReturnRows(sqlmock.NewRows([]string{"category_id", "name", "icon_key", "plugin_types_json", "sort_order", "status", "created_at", "updated_at"}))
+	q := regexp.QuoteMeta("WHERE cp.placement_code=? AND cp.plugin_type=? AND p.plugin_type=? AND cp.visible=1 AND c.status=1 AND c.deleted_at IS NULL AND p.deleted_at IS NULL AND") + `.*p.space_id = \? .*p.owner_uid = \?`
+	mock.ExpectQuery(q).WithArgs("home", model.PluginTypeExpert, model.PluginTypeExpert, "space-a", "caller-a").WillReturnRows(sqlmock.NewRows([]string{"category_id", "name", "icon_key", "plugin_types_json", "sort_order", "status", "created_at", "updated_at"}))
 	_, err := New(db).ListPlacementCategories(context.Background(), Scope{CallerUID: "caller-a", SpaceID: "space-a"}, "home", model.PluginTypeExpert)
 	if err != nil {
 		t.Fatal(err)

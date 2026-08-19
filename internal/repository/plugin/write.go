@@ -31,6 +31,9 @@ func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) error {
 	if p.ID == "" {
 		p.ID = r.id()
 	}
+	if err = lockRelationTargets(ctx, tx, scope, p.Type, m.Relations); err != nil {
+		return err
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO plugins (plugin_id,plugin_name,plugin_type,category_id,tags_json,publisher,owner_uid,space_id,visibility,
 creator_name,created_by_type,created_by_bot_uid,created_by_bot_name,manifest_json,plugin_json,manifest_hash,plugin_hash,current_version_id,status,created_at,updated_at)
 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.OwnerUID, p.SpaceID, p.Visibility, p.CreatorName, p.CreatedByType, p.CreatedByBotUID, p.CreatedByBotName, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.CurrentVersionID, p.Status, now, now)
@@ -59,6 +62,12 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) error {
 	}
 	now := r.now()
 	p := m.Plugin
+	if p.Type != before.Type {
+		return ErrInvalidRelation
+	}
+	if err = lockRelationTargets(ctx, tx, scope, p.Type, m.Relations); err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,creator_name=?,created_by_type=?,created_by_bot_uid=?,created_by_bot_name=?,manifest_json=?,plugin_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
 WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.Visibility, p.CreatorName, p.CreatedByType, p.CreatedByBotUID, p.CreatedByBotName, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.Status, now, p.ID, scope.CallerUID, scope.SpaceID)
 	if err != nil {
@@ -130,6 +139,51 @@ func mustAffect(res sql.Result) error {
 	}
 	return nil
 }
+
+// lockRelationTargets revalidates every edge at the persistence boundary in the
+// mutation transaction. The visibility predicate prevents cross-scope edges,
+// and FOR UPDATE prevents a target from being deleted between validation and
+// insertion.
+func lockRelationTargets(ctx context.Context, tx *sql.Tx, scope Scope, sourceType model.PluginType, relations []model.PluginRelation) error {
+	seen := make(map[string]struct{}, len(relations))
+	for _, relation := range relations {
+		if relation.TargetPluginID == "" {
+			return ErrInvalidRelation
+		}
+		key := relation.Type + "\x00" + relation.TargetPluginID
+		if _, exists := seen[key]; exists {
+			return ErrInvalidRelation
+		}
+		seen[key] = struct{}{}
+		row := tx.QueryRowContext(ctx, `SELECT p.plugin_type FROM plugins p WHERE p.plugin_id=? AND p.deleted_at IS NULL AND `+visibilitySQL+` FOR UPDATE`, relation.TargetPluginID, scope.SpaceID, scope.CallerUID)
+		var targetType model.PluginType
+		if err := row.Scan(&targetType); err != nil {
+			if err == sql.ErrNoRows {
+				return ErrNotFound
+			}
+			return err
+		}
+		if !validPersistedRelation(relation.Type, sourceType, targetType) {
+			return ErrInvalidRelation
+		}
+	}
+	return nil
+}
+
+func validPersistedRelation(relationType string, sourceType, targetType model.PluginType) bool {
+	switch relationType {
+	case "expert_team_member":
+		return sourceType == model.PluginTypeExpertTeam && targetType == model.PluginTypeExpert
+	case "expert_skill":
+		return (sourceType == model.PluginTypeExpert || sourceType == model.PluginTypeExpertTeam) && targetType == model.PluginTypeSkill
+	case "plugin_dependency":
+		validSource := sourceType == model.PluginTypeExpert || sourceType == model.PluginTypeExpertTeam || sourceType == model.PluginTypeConnector
+		return validSource && (targetType == model.PluginTypeSkill || targetType == model.PluginTypeConnector)
+	default:
+		return false
+	}
+}
+
 func insertRelations(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, source, creator string, rels []model.PluginRelation) error {
 	for _, x := range rels {
 		id := x.ID

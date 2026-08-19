@@ -16,7 +16,7 @@ func TestDuplicateGraphDeepCopiesGraphAndCommits(t *testing.T) {
 	r := New(db)
 	now := time.Date(2026, 8, 19, 9, 0, 0, 0, time.UTC)
 	r.now = func() time.Time { return now }
-	ids := []string{"child-copy", "leaf-copy", "root-rel-copy", "child-rel-copy", "audit-copy"}
+	ids := []string{"child-copy", "leaf-copy", "root-rel-copy", "child-rel-copy", "root-audit-copy", "child-audit-copy", "leaf-audit-copy"}
 	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
 	scope := Scope{CallerUID: "caller", SpaceID: "space"}
 
@@ -29,7 +29,9 @@ func TestDuplicateGraphDeepCopiesGraphAndCommits(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("leaf-copy", "Leaf", model.PluginTypeExpert, nil, "[]", "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "{}", "{}", "sha256:m", "sha256:leaf", nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO plugin_relations`).WithArgs("root-rel-copy", "root-copy", "child-copy", "plugin_dependency", 0, `{"role":"x"}`, 1, "caller", now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO plugin_relations`).WithArgs("child-rel-copy", "child-copy", "leaf-copy", "plugin_dependency", 0, `{"role":"x"}`, 1, "caller", now, now).WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-copy", "root-copy", "duplicate", "caller", "Caller", "request", nil, "sha256:root", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("root-audit-copy", "root-copy", "duplicate", "caller", "Caller", "request", nil, "sha256:root", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("child-audit-copy", "child-copy", "duplicate", "caller", "Caller", "request", nil, "sha256:child", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("leaf-audit-copy", "leaf-copy", "duplicate", "caller", "Caller", "request", nil, "sha256:leaf", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
 	duplicate := model.Plugin{ID: "root-copy", Name: "Root copy", Type: model.PluginTypeExpert, Tags: []byte(`[]`), Publisher: "pub", CreatorName: "Creator", CreatedByType: "human", Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:root", Status: 1}
@@ -39,6 +41,24 @@ func TestDuplicateGraphDeepCopiesGraphAndCommits(t *testing.T) {
 	}
 	if len(ids) != 0 {
 		t.Fatalf("unused generated IDs: %v", ids)
+	}
+	if err = mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDuplicateGraphRejectsUnsafeConnectorDescendantBeforeWriting(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	mock.ExpectBegin()
+	expectDuplicateNode(mock, "root", scope, pluginRow("root", "Root"), relationRows("root", "connector"))
+	expectDuplicateNode(mock, "connector", scope, connectorPluginRow("connector", `{"config":{"env":{"API_TOKEN":"plain-token"}}}`), emptyRelationRows())
+	mock.ExpectRollback()
+
+	err := New(db).DuplicateGraph(context.Background(), scope, "root", model.Plugin{ID: "copy"}, Mutation{})
+	if !errors.Is(err, ErrUnsafeConnectorData) {
+		t.Fatalf("err=%v, want ErrUnsafeConnectorData", err)
 	}
 	if err = mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -87,6 +107,11 @@ func expectDuplicateNode(mock sqlmock.Sqlmock, id string, scope Scope, pluginRow
 func pluginRow(id, name string) *sqlmock.Rows {
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	return sqlmock.NewRows(pluginTestColumns()).AddRow(id, name, model.PluginTypeExpert, nil, []byte(`[]`), "pub", "source-owner", "source-space", model.PluginVisibilityPublic, "Creator", "human", nil, nil, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:"+id, nil, 1, now, now, nil)
+}
+
+func connectorPluginRow(id, pkg string) *sqlmock.Rows {
+	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	return sqlmock.NewRows(pluginTestColumns()).AddRow(id, "Connector", model.PluginTypeConnector, nil, []byte(`[]`), "pub", "source-owner", "source-space", model.PluginVisibilityPublic, "Creator", "human", nil, nil, []byte(`{}`), []byte(pkg), "sha256:m", "sha256:"+id, nil, 1, now, now, nil)
 }
 
 func relationRows(source, target string) *sqlmock.Rows {

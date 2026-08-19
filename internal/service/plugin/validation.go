@@ -202,14 +202,22 @@ func secretValuePresent(value any, path []string) bool {
 	switch x := value.(type) {
 	case map[string]any:
 		for key, child := range x {
-			next := append(path, strings.ToLower(key))
+			normalizedKey := normalizeSecretKey(key)
+			next := append(path, normalizedKey)
+			insideSecretValues := len(path) > 0 && (path[len(path)-1] == "secrets" || path[len(path)-1] == "credentials")
+			if isSecretDeclaration(normalizedKey) && !insideSecretValues {
+				if secretDeclarationSafe(normalizedKey, child) {
+					continue
+				}
+				return true
+			}
 			if isSecretContainer(next) {
-				if secretContainerHasValue(child) {
+				if secretContainerHasValue(child, normalizedKey) {
 					return true
 				}
 				continue
 			}
-			if isSecretField(key) && !isSecretDeclaration(key) && nonEmptyLiteral(child) {
+			if isSecretField(normalizedKey) && (nonEmptyLiteral(child) || secretContainerHasValue(child, "secrets")) {
 				return true
 			}
 			if secretValuePresent(child, next) {
@@ -234,22 +242,121 @@ func isSecretContainer(path []string) bool {
 	return leaf == "env" || leaf == "headers" || leaf == "secrets" || leaf == "credentials"
 }
 
-func secretContainerHasValue(value any) bool {
+func secretContainerHasValue(value any, container string) bool {
 	switch x := value.(type) {
 	case map[string]any:
-		for _, child := range x {
-			if nonEmptyLiteral(child) || secretContainerHasValue(child) {
+		if isSecretDeclarationObject(x) {
+			return false
+		}
+		for key, child := range x {
+			normalizedKey := normalizeSecretKey(key)
+			// In value-mapping containers, caller-chosen keys may look like
+			// declarations (for example CUSTOM_NAME) but their values are secrets.
+			if (container == "secrets" || container == "credentials") && nonEmptyLiteral(child) {
+				return true
+			}
+			if isSecretDeclaration(normalizedKey) {
+				if secretDeclarationSafe(normalizedKey, child) {
+					continue
+				}
+				return true
+			}
+			if isSecretField(normalizedKey) && nonEmptyLiteral(child) {
+				return true
+			}
+			if nestedContainer := isSecretContainer([]string{normalizedKey}); nestedContainer {
+				if secretContainerHasValue(child, normalizedKey) {
+					return true
+				}
+				continue
+			}
+			// A secrets container maps caller-chosen secret names to values. Env and
+			// header containers, by contrast, routinely contain harmless literals.
+			if (container == "secrets" || container == "credentials") && nonEmptyLiteral(child) {
+				return true
+			}
+			if secretContainerHasValue(child, container) {
 				return true
 			}
 		}
 	case []any:
 		for _, child := range x {
-			if nonEmptyLiteral(child) || secretContainerHasValue(child) {
+			if (container == "secrets" || container == "credentials") && nonEmptyLiteral(child) {
+				return true
+			}
+			if secretContainerHasValue(child, container) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func secretDeclarationSafe(key string, value any) bool {
+	if strings.HasSuffix(key, "_ref") || strings.HasSuffix(key, "_refs") {
+		switch x := value.(type) {
+		case string:
+			return isSecretReference(x)
+		case []any:
+			for _, item := range x {
+				ref, ok := item.(string)
+				if !ok || !isSecretReference(ref) {
+					return false
+				}
+			}
+			return true
+		default:
+			return false
+		}
+	}
+	if strings.HasSuffix(key, "_name") || strings.HasSuffix(key, "_names") || strings.HasPrefix(key, "required_") {
+		switch x := value.(type) {
+		case string:
+			return strings.TrimSpace(x) != ""
+		case []any:
+			for _, item := range x {
+				name, ok := item.(string)
+				if !ok || strings.TrimSpace(name) == "" {
+					return false
+				}
+			}
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+func isSecretDeclarationObject(value map[string]any) bool {
+	if len(value) == 0 {
+		return false
+	}
+	hasNameOrRef := false
+	for key, child := range value {
+		switch normalizeSecretKey(key) {
+		case "name", "key", "env", "description", "required", "optional", "type":
+			// Declaration metadata must not itself contain nested configuration.
+			if _, object := child.(map[string]any); object {
+				return false
+			}
+			if _, array := child.([]any); array {
+				return false
+			}
+			if normalizeSecretKey(key) == "name" || normalizeSecretKey(key) == "key" || normalizeSecretKey(key) == "env" {
+				hasNameOrRef = true
+			}
+		case "ref", "reference", "source":
+			s, ok := child.(string)
+			if !ok || !isSecretReference(s) {
+				return false
+			}
+			hasNameOrRef = true
+		default:
+			return false
+		}
+	}
+	return hasNameOrRef
 }
 
 func nonEmptyLiteral(value any) bool {
@@ -273,18 +380,26 @@ func isSecretReference(v string) bool {
 		strings.HasPrefix(lower, "vault://") || strings.HasPrefix(lower, "ref://")
 }
 
+func normalizeSecretKey(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	return strings.NewReplacer("-", "_", ".", "_", " ", "_").Replace(key)
+}
+
 func isSecretField(key string) bool {
-	key = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), "-", "_"))
-	for _, marker := range []string{"password", "passwd", "secret", "token", "api_key", "apikey", "private_key", "authorization", "credential"} {
-		if key == marker || strings.HasSuffix(key, "_"+marker) {
+	key = normalizeSecretKey(key)
+	parts := strings.FieldsFunc(key, func(r rune) bool { return r == '_' })
+	for _, part := range parts {
+		switch part {
+		case "password", "passwd", "secret", "token", "bearer", "auth", "authorization", "credential", "credentials", "apikey":
 			return true
 		}
 	}
-	return false
+	return strings.Contains(key, "api_key") || strings.Contains(key, "private_key") ||
+		strings.Contains(key, "access_key")
 }
 
 func isSecretDeclaration(key string) bool {
-	key = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), "-", "_"))
+	key = normalizeSecretKey(key)
 	return strings.HasSuffix(key, "_name") || strings.HasSuffix(key, "_names") ||
 		strings.HasSuffix(key, "_ref") || strings.HasSuffix(key, "_refs") ||
 		strings.HasPrefix(key, "required_")

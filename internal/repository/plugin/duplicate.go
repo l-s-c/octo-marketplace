@@ -33,6 +33,15 @@ func (r *Repo) DuplicateGraph(ctx context.Context, scope Scope, sourcePluginID s
 	if err != nil {
 		return err
 	}
+	// Complete secret preflight before generating IDs or issuing any write.
+	for _, sourceID := range order {
+		node := nodes[sourceID].plugin
+		if node.Type == model.PluginTypeConnector {
+			if err := rejectPersistedConnectorSecrets(node.Manifest, node.Package); err != nil {
+				return err
+			}
+		}
+	}
 
 	now := r.now()
 	ids := make(map[string]string, len(order))
@@ -47,6 +56,7 @@ func (r *Repo) DuplicateGraph(ctx context.Context, scope Scope, sourcePluginID s
 		}
 	}
 
+	copiesBySource := make(map[string]model.Plugin, len(order))
 	for _, sourceID := range order {
 		copy := nodes[sourceID].plugin
 		if sourceID == sourcePluginID {
@@ -61,6 +71,7 @@ func (r *Repo) DuplicateGraph(ctx context.Context, scope Scope, sourcePluginID s
 		if err := insertDuplicatePlugin(ctx, tx, copy, now); err != nil {
 			return err
 		}
+		copiesBySource[sourceID] = copy
 	}
 
 	for _, sourceID := range order {
@@ -79,14 +90,15 @@ func (r *Repo) DuplicateGraph(ctx context.Context, scope Scope, sourcePluginID s
 		}
 	}
 
-	root := duplicate
-	root.ID = ids[sourcePluginID]
-	audit.Plugin = root
 	if audit.OperatorID == "" {
 		audit.OperatorID = scope.CallerUID
 	}
-	if err := insertAudit(ctx, tx, r.id(), now, root, "duplicate", audit, "", root.PluginHash); err != nil {
-		return err
+	for _, sourceID := range order {
+		copy := copiesBySource[sourceID]
+		audit.Plugin = copy
+		if err := insertAudit(ctx, tx, r.id(), now, copy, "duplicate", audit, "", copy.PluginHash); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

@@ -59,9 +59,9 @@ func (f *fakeStore) ListAudits(context.Context, pluginrepo.Scope, string, int, i
 func (f *fakeStore) ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, error) {
 	return nil, f.err
 }
-func (f *fakeStore) Publish(_ context.Context, _ pluginrepo.Scope, p pluginrepo.PublishParams) (string, error) {
+func (f *fakeStore) Publish(_ context.Context, _ pluginrepo.Scope, p pluginrepo.PublishParams) (*model.PluginVersion, error) {
 	f.publishParams = p
-	return "version-new", f.err
+	return &model.PluginVersion{ID: "version-new", PluginID: p.PluginID, Version: p.Version, Manifest: json.RawMessage(`{"stored":true}`), Relations: json.RawMessage(`[]`), CreatedBy: p.CreatedBy}, f.err
 }
 func (f *fakeStore) DuplicateGraph(_ context.Context, _ pluginrepo.Scope, _ string, p model.Plugin, m pluginrepo.Mutation) error {
 	f.duplicate, f.duplicateMeta = p, m
@@ -130,7 +130,13 @@ func TestConnectorRejectsSecretValuesButAllowsNamesAndReferences(t *testing.T) {
 	bad := []json.RawMessage{
 		json.RawMessage(`{"config":{"env":{"API_TOKEN":"plain-token"}}}`),
 		json.RawMessage(`{"client_secret":"plain-token"}`),
+		json.RawMessage(`{"nested":{"client_secret_value":"plain-token"}}`),
 		json.RawMessage(`{"headers":{"Authorization":"Bearer abc"}}`),
+		json.RawMessage(`{"transport":{"bearer":"plain-token"}}`),
+		json.RawMessage(`{"transport":{"auth":"plain-token"}}`),
+		json.RawMessage(`{"config":{"credentials":{"username":"octo","value":"plain-token"}}}`),
+		json.RawMessage(`{"config":{"secrets":{"CUSTOM_NAME":"plain-token"}}}`),
+		json.RawMessage(`{"items":[{"deep":{"auth":{"value":"plain-token"}}}]}`),
 	}
 	for _, pkg := range bad {
 		r := validRequest()
@@ -141,8 +147,11 @@ func TestConnectorRejectsSecretValuesButAllowsNamesAndReferences(t *testing.T) {
 		}
 	}
 	for _, pkg := range []json.RawMessage{
-		json.RawMessage(`{"required_secret_names":["API_TOKEN"],"config":{"env":{"API_TOKEN":""}}}`),
-		json.RawMessage(`{"config":{"env":{"API_TOKEN":"${API_TOKEN}"},"headers":{"Authorization":"secret://auth-header"}}}`),
+		json.RawMessage(`{"required_secret_names":["API_TOKEN"],"config":{"env":{"API_TOKEN":"","REGION":"us-east-1"}}}`),
+		json.RawMessage(`{"config":{"env":{"API_TOKEN":"${API_TOKEN}"},"headers":{"Authorization":"secret://auth-header","Accept":"application/json"}}}`),
+		json.RawMessage(`{"client_secret_value":"vault://connectors/client-secret","bearer":"env://BEARER_TOKEN","auth":"${AUTH_VALUE}"}`),
+		json.RawMessage(`{"secrets":[{"name":"API_TOKEN","description":"connector token","required":true},{"ref":"secret://API_TOKEN"}]}`),
+		json.RawMessage(`{"credentials":{"name":"OAUTH_CREDENTIALS","description":"configured externally"}}`),
 	} {
 		r := validRequest()
 		r.Type = model.PluginTypeConnector
@@ -202,7 +211,7 @@ func TestPublishUsesRepositoryContractAndReturnedVersionID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version.ID != "version-new" || f.publishParams.PluginID != "plugin-1" || f.publishParams.CreatedBy != testCaller.UID || len(f.publishParams.Placements) != 1 {
+	if version.ID != "version-new" || string(version.Manifest) != `{"stored":true}` || f.publishParams.PluginID != "plugin-1" || f.publishParams.CreatedBy != testCaller.UID || len(f.publishParams.Placements) != 1 {
 		t.Fatalf("version=%#v params=%#v", version, f.publishParams)
 	}
 }
