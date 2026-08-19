@@ -145,6 +145,17 @@ func TestCreateRejectsInvalidFieldsAndJSONShapes(t *testing.T) {
 	}
 }
 
+func TestConnectorRejectsCamelCaseSecretFields(t *testing.T) {
+	for _, key := range []string{"clientSecret", "accessToken", "privateKeyValue"} {
+		r := validRequest()
+		r.Type = model.PluginTypeConnector
+		r.Package = json.RawMessage(`{"` + key + `":"plain-value"}`)
+		if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, r); !errors.Is(err, ErrSecretValue) {
+			t.Fatalf("field %s accepted: %v", key, err)
+		}
+	}
+}
+
 func TestConnectorRejectsSecretValuesButAllowsNamesAndReferences(t *testing.T) {
 	bad := []json.RawMessage{
 		json.RawMessage(`{"config":{"env":{"API_TOKEN":"plain-token"}}}`),
@@ -216,6 +227,11 @@ func TestRelationSourceTargetValidation(t *testing.T) {
 	if _, err := fixedService(f).Create(context.Background(), testCaller, r); err != nil {
 		t.Fatalf("valid relation: %v", err)
 	}
+	r.Relations[0].Data = json.RawMessage(`{"accessToken":"plain-value"}`)
+	if _, err := fixedService(f).Create(context.Background(), testCaller, r); !errors.Is(err, ErrSecretValue) {
+		t.Fatalf("secret relation data accepted: %v", err)
+	}
+	r.Relations[0].Data = nil
 	r.Type = model.PluginTypeConnector
 	if _, err := fixedService(f).Create(context.Background(), testCaller, r); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("invalid source err = %v", err)

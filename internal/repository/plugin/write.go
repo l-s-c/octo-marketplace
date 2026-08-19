@@ -26,6 +26,16 @@ func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) error {
 	defer tx.Rollback()
 	now := r.now()
 	p := m.Plugin
+	if p.Type == model.PluginTypeConnector {
+		if err = rejectPersistedConnectorSecrets(p.Manifest, p.Package); err != nil {
+			return err
+		}
+	}
+	for _, relation := range m.Relations {
+		if err = rejectPersistedConnectorSecrets(relation.Data); err != nil {
+			return err
+		}
+	}
 	p.OwnerUID = scope.CallerUID
 	p.SpaceID = &scope.SpaceID
 	if p.ID == "" {
@@ -65,6 +75,16 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) error {
 	}
 	now := r.now()
 	p := m.Plugin
+	if p.Type == model.PluginTypeConnector {
+		if err = rejectPersistedConnectorSecrets(p.Manifest, p.Package); err != nil {
+			return err
+		}
+	}
+	for _, relation := range m.Relations {
+		if err = rejectPersistedConnectorSecrets(relation.Data); err != nil {
+			return err
+		}
+	}
 	if p.Type != before.Type {
 		return ErrInvalidRelation
 	}

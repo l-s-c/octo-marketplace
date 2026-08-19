@@ -381,8 +381,25 @@ func isSecretReference(v string) bool {
 }
 
 func normalizeSecretKey(key string) string {
-	key = strings.ToLower(strings.TrimSpace(key))
-	return strings.NewReplacer("-", "_", ".", "_", " ", "_").Replace(key)
+	key = strings.TrimSpace(key)
+	var out strings.Builder
+	out.Grow(len(key) + 4)
+	for i, r := range key {
+		if r == '-' || r == '.' || r == ' ' {
+			if out.Len() > 0 && !strings.HasSuffix(out.String(), "_") {
+				out.WriteByte('_')
+			}
+			continue
+		}
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			prev := rune(key[i-1])
+			if prev != '_' && prev != '-' && prev != '.' && prev != ' ' && !(prev >= 'A' && prev <= 'Z') {
+				out.WriteByte('_')
+			}
+		}
+		out.WriteRune(r)
+	}
+	return strings.ToLower(out.String())
 }
 
 func isSecretField(key string) bool {

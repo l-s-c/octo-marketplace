@@ -8,6 +8,9 @@ import (
 
 func rejectPersistedConnectorSecrets(values ...json.RawMessage) error {
 	for _, raw := range values {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.UseNumber()
 		var value any
@@ -25,7 +28,7 @@ func persistedSecretValuePresent(value any) bool {
 	switch x := value.(type) {
 	case map[string]any:
 		for key, child := range x {
-			normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), "-", "_"))
+			normalized := normalizePersistedSecretKey(key)
 			if isPersistedSecretContainer(normalized) && persistedContainerHasLiteral(child) {
 				return true
 			}
@@ -87,7 +90,27 @@ func isPersistedSecretReference(value string) bool {
 		strings.HasPrefix(value, "vault://") || strings.HasPrefix(value, "ref://")
 }
 
+func normalizePersistedSecretKey(key string) string {
+	key = strings.TrimSpace(key)
+	var out strings.Builder
+	for i, r := range key {
+		if r == '-' || r == '.' || r == ' ' {
+			out.WriteByte('_')
+			continue
+		}
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			prev := rune(key[i-1])
+			if prev != '_' && !(prev >= 'A' && prev <= 'Z') {
+				out.WriteByte('_')
+			}
+		}
+		out.WriteRune(r)
+	}
+	return strings.ToLower(out.String())
+}
+
 func isPersistedSecretField(key string) bool {
+	key = normalizePersistedSecretKey(key)
 	for _, marker := range []string{"password", "passwd", "secret", "token", "api_key", "apikey", "private_key", "authorization", "credential"} {
 		if key == marker || strings.HasSuffix(key, "_"+marker) {
 			return true

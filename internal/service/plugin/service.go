@@ -388,6 +388,11 @@ func (s *Service) buildRelations(ctx context.Context, c Caller, source *model.Pl
 		if err != nil {
 			return nil, err
 		}
+		if len(data) > 0 {
+			if err := rejectConnectorSecrets(data); err != nil {
+				return nil, err
+			}
+		}
 		out = append(out, model.PluginRelation{ID: s.id(), SourcePluginID: source.ID, TargetPluginID: targetID, Type: typ, SortOrder: r.SortOrder, Data: data, Status: 1, CreatedBy: c.UID, CreatedAt: now, UpdatedAt: now})
 	}
 	return out, nil
