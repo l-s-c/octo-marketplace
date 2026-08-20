@@ -87,7 +87,19 @@ func fixedService(f *fakeStore) *Service {
 var testCaller = Caller{UID: "user-1", Name: "Alice", SpaceID: "space-a", RequestID: "request-1"}
 
 func validRequest() WriteRequest {
-	return WriteRequest{Name: "  Example Plugin  ", Type: model.PluginTypeExpert, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`["one","one","two"]`), Manifest: json.RawMessage(`{"z":1,"a":{"b":2}}`), Package: json.RawMessage(`{"files":[]}`)}
+	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"Example Plugin","plugin_type":"expert","name":"example-plugin","description":"An example plugin.","labels":["one","two"],"examples":[]}`)
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":"{\"$schema\":\"cowork-plugin-manifest-1.0.json\",\"description\":\"An example plugin.\",\"examples\":[],\"labels\":[\"one\",\"two\"],\"name\":\"example-plugin\",\"plugin_name\":\"Example Plugin\",\"plugin_type\":\"expert\"}"}]}`)
+	return WriteRequest{Name: "  Example Plugin  ", Type: model.PluginTypeExpert, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`["one","one","two"]`), Manifest: manifest, Package: pkg}
+}
+
+func connectorRequest(config json.RawMessage) WriteRequest {
+	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"Example Plugin","plugin_type":"connector","name":"example-plugin","description":"An example plugin.","labels":["one","two"],"examples":[],"config":` + string(config) + `}`)
+	canonical, _, err := normalizeManifest(manifest, "Example Plugin", model.PluginTypeConnector, json.RawMessage(`["one","two"]`))
+	if err != nil {
+		panic(err)
+	}
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(string(canonical)) + `}]}`)
+	return WriteRequest{Name: "Example Plugin", Type: model.PluginTypeConnector, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`["one","two"]`), Manifest: manifest, Package: pkg}
 }
 
 func TestCreateValidatesAndCanonicalizes(t *testing.T) {
@@ -96,10 +108,11 @@ func TestCreateValidatesAndCanonicalizes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if f.create.Name != "Example Plugin" || string(f.create.Manifest) != `{"a":{"b":2},"z":1}` {
+	wantManifest := `{"$schema":"cowork-plugin-manifest-1.0.json","description":"An example plugin.","examples":[],"labels":["one","two"],"name":"example-plugin","plugin_name":"Example Plugin","plugin_type":"expert"}`
+	if f.create.Name != "Example Plugin" || string(f.create.Manifest) != wantManifest {
 		t.Fatalf("created = %#v", f.create)
 	}
-	wantManifestHash, _ := hashForTest(json.RawMessage(`{"a":{"b":2},"z":1}`))
+	wantManifestHash, _ := hashForTest(json.RawMessage(wantManifest))
 	if f.create.ManifestHash != wantManifestHash {
 		t.Fatalf("manifest hash = %q, want %q", f.create.ManifestHash, wantManifestHash)
 	}
@@ -130,7 +143,13 @@ func TestCreateRejectsInvalidFieldsAndJSONShapes(t *testing.T) {
 		{"system visibility", func(r *WriteRequest) { r.Visibility = model.PluginVisibilitySystem }},
 		{"empty name", func(r *WriteRequest) { r.Name = " " }},
 		{"manifest array", func(r *WriteRequest) { r.Manifest = json.RawMessage(`[]`) }},
+		{"outer manifest name mismatch", func(r *WriteRequest) { r.Name = "Other" }},
+		{"outer manifest type mismatch", func(r *WriteRequest) { r.Type = model.PluginTypeSkill }},
+		{"outer manifest tags mismatch", func(r *WriteRequest) { r.Tags = json.RawMessage(`["other"]`) }},
 		{"package scalar", func(r *WriteRequest) { r.Package = json.RawMessage(`true`) }},
+		{"package missing manifest", func(r *WriteRequest) {
+			r.Package = json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[]}`)
+		}},
 		{"tags object", func(r *WriteRequest) { r.Tags = json.RawMessage(`{}`) }},
 	}
 	for _, tt := range tests {
@@ -147,9 +166,7 @@ func TestCreateRejectsInvalidFieldsAndJSONShapes(t *testing.T) {
 
 func TestConnectorRejectsCamelCaseSecretFields(t *testing.T) {
 	for _, key := range []string{"clientSecret", "accessToken", "privateKeyValue"} {
-		r := validRequest()
-		r.Type = model.PluginTypeConnector
-		r.Package = json.RawMessage(`{"` + key + `":"plain-value"}`)
+		r := connectorRequest(json.RawMessage(`{"` + key + `":"plain-value"}`))
 		if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, r); !errors.Is(err, ErrSecretValue) {
 			t.Fatalf("field %s accepted: %v", key, err)
 		}
@@ -169,9 +186,7 @@ func TestConnectorRejectsSecretValuesButAllowsNamesAndReferences(t *testing.T) {
 		json.RawMessage(`{"items":[{"deep":{"auth":{"value":"plain-token"}}}]}`),
 	}
 	for _, pkg := range bad {
-		r := validRequest()
-		r.Type = model.PluginTypeConnector
-		r.Package = pkg
+		r := connectorRequest(pkg)
 		if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, r); !errors.Is(err, ErrSecretValue) {
 			t.Fatalf("package %s: err = %v", pkg, err)
 		}
@@ -183,9 +198,7 @@ func TestConnectorRejectsSecretValuesButAllowsNamesAndReferences(t *testing.T) {
 		json.RawMessage(`{"secrets":[{"name":"API_TOKEN","description":"connector token","required":true},{"ref":"secret://API_TOKEN"}]}`),
 		json.RawMessage(`{"credentials":{"name":"OAUTH_CREDENTIALS","description":"configured externally"}}`),
 	} {
-		r := validRequest()
-		r.Type = model.PluginTypeConnector
-		r.Package = pkg
+		r := connectorRequest(pkg)
 		if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, r); err != nil {
 			t.Fatalf("package %s: %v", pkg, err)
 		}

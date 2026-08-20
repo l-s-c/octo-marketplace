@@ -333,19 +333,16 @@ func (s *Service) buildWrite(ctx context.Context, c Caller, pluginID string, req
 	if !validName(name) || !validPluginType(req.Type) || !validVisibility(req.Visibility, c.IsSystemAdmin) {
 		return nil, nil, ErrInvalidRequest
 	}
-	manifest, manifestHash, err := normalizeObject(req.Manifest)
+	manifest, tags, err := normalizeManifest(req.Manifest, name, req.Type, req.Tags)
 	if err != nil {
 		return nil, nil, err
 	}
-	pkg, _, err := normalizeObject(req.Package)
+	manifestHash := hashJSON(manifest)
+	pkg, err := normalizePackage(req.Package, manifest)
 	if err != nil {
 		return nil, nil, err
 	}
 	pluginHash := hashJSON(append(append(cloneJSON(manifest), '\n'), pkg...))
-	tags, err := normalizeTags(req.Tags)
-	if err != nil {
-		return nil, nil, err
-	}
 	if req.Type == model.PluginTypeConnector {
 		if err := rejectConnectorSecrets(manifest, pkg); err != nil {
 			return nil, nil, err
