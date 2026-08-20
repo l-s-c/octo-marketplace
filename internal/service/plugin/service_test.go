@@ -13,6 +13,8 @@ import (
 
 type fakeStore struct {
 	plugins       map[string]*model.Plugin
+	relations     map[string][]model.PluginRelation
+	getIDs        []string
 	create        *model.Plugin
 	createRels    []model.PluginRelation
 	createAudit   model.PluginAuditLog
@@ -32,6 +34,7 @@ func (f *fakeStore) List(context.Context, pluginrepo.Scope, pluginrepo.ListFilte
 	return nil, 0, f.err
 }
 func (f *fakeStore) GetWithRelations(_ context.Context, _ pluginrepo.Scope, id string) (*model.Plugin, []model.PluginRelation, error) {
+	f.getIDs = append(f.getIDs, id)
 	if f.err != nil {
 		return nil, nil, f.err
 	}
@@ -40,7 +43,8 @@ func (f *fakeStore) GetWithRelations(_ context.Context, _ pluginrepo.Scope, id s
 		return nil, nil, pluginrepo.ErrNotFound
 	}
 	copy := *p
-	return &copy, nil, nil
+	rels := append([]model.PluginRelation(nil), f.relations[id]...)
+	return &copy, rels, nil
 }
 func (f *fakeStore) Create(_ context.Context, _ pluginrepo.Scope, m pluginrepo.Mutation) error {
 	p := m.Plugin
