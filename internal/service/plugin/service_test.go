@@ -228,7 +228,7 @@ func TestCrossSpaceNotFoundPropagatesWithoutLeak(t *testing.T) {
 	if _, err := fixedService(f).Detail(context.Background(), testCaller, "expert:plugin-other", true); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("detail err = %v", err)
 	}
-	if err := fixedService(f).Delete(context.Background(), testCaller, "plugin-other"); !errors.Is(err, ErrNotFound) {
+	if err := fixedService(f).Delete(context.Background(), testCaller, "expert:plugin-other"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete err = %v", err)
 	}
 }
@@ -253,25 +253,26 @@ func TestRelationSourceTargetValidation(t *testing.T) {
 
 func TestHistoryListsPropagateExactTotalsAndNotFound(t *testing.T) {
 	f := &fakeStore{
+		plugins:      map[string]*model.Plugin{"plugin-1": {ID: "plugin-1", Type: model.PluginTypeExpert}},
 		audits:       []model.PluginAuditLog{{ID: "audit-1"}},
 		auditTotal:   37,
 		versions:     []model.PluginVersion{{ID: "version-1"}},
 		versionTotal: 42,
 	}
 	svc := fixedService(f)
-	audits, auditTotal, err := svc.ListAuditLogs(context.Background(), testCaller, "plugin-1", 20, 20)
+	audits, auditTotal, err := svc.ListAuditLogs(context.Background(), testCaller, "expert:plugin-1", 20, 20)
 	if err != nil || len(audits) != 1 || auditTotal != 37 {
 		t.Fatalf("audits=%#v total=%d err=%v", audits, auditTotal, err)
 	}
-	versions, versionTotal, err := svc.ListVersions(context.Background(), testCaller, "plugin-1", 20, 40)
+	versions, versionTotal, err := svc.ListVersions(context.Background(), testCaller, "expert:plugin-1", 20, 40)
 	if err != nil || len(versions) != 1 || versionTotal != 42 {
 		t.Fatalf("versions=%#v total=%d err=%v", versions, versionTotal, err)
 	}
 	f.err = pluginrepo.ErrNotFound
-	if _, _, err := svc.ListAuditLogs(context.Background(), testCaller, "foreign", 20, 0); !errors.Is(err, ErrNotFound) {
+	if _, _, err := svc.ListAuditLogs(context.Background(), testCaller, "expert:foreign", 20, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("audit not found err=%v", err)
 	}
-	if _, _, err := svc.ListVersions(context.Background(), testCaller, "foreign", 20, 0); !errors.Is(err, ErrNotFound) {
+	if _, _, err := svc.ListVersions(context.Background(), testCaller, "expert:foreign", 20, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("version not found err=%v", err)
 	}
 }
@@ -280,7 +281,7 @@ func TestPublishUsesRepositoryContractAndReturnedVersionID(t *testing.T) {
 	f := &fakeStore{plugins: map[string]*model.Plugin{
 		"plugin-1": {ID: "plugin-1", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p"},
 	}}
-	version, err := fixedService(f).Publish(context.Background(), testCaller, "plugin-1", PublishRequest{Version: "1.0.0", Placements: []PlacementRequest{{PlacementCode: "home", Visible: true}}})
+	version, err := fixedService(f).Publish(context.Background(), testCaller, "expert:plugin-1", PublishRequest{Version: "1.0.0", Placements: []PlacementRequest{{PlacementCode: "home", Visible: true}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,11 +295,11 @@ func TestRepositoryConflictsAndInvalidPlacementsMapToServiceErrors(t *testing.T)
 		"plugin-1": {ID: "plugin-1", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},
 	}}
 	f.err = pluginrepo.ErrConflict
-	if err := fixedService(f).Delete(context.Background(), testCaller, "plugin-1"); !errors.Is(err, ErrConflict) {
+	if err := fixedService(f).Delete(context.Background(), testCaller, "expert:plugin-1"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("Delete conflict = %v, want ErrConflict", err)
 	}
 	f.err = pluginrepo.ErrInvalidPlacement
-	if _, err := fixedService(f).Publish(context.Background(), testCaller, "plugin-1", PublishRequest{Version: "1.0.0"}); !errors.Is(err, ErrInvalidRequest) {
+	if _, err := fixedService(f).Publish(context.Background(), testCaller, "expert:plugin-1", PublishRequest{Version: "1.0.0"}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("Publish invalid placement = %v, want ErrInvalidRequest", err)
 	}
 }
@@ -306,7 +307,7 @@ func TestRepositoryConflictsAndInvalidPlacementsMapToServiceErrors(t *testing.T)
 func TestDuplicatePassesIndependentRootAndAuditMetadata(t *testing.T) {
 	source := &model.Plugin{ID: "source", Name: "Source", Type: model.PluginTypeExpert, OwnerUID: "another", Visibility: model.PluginVisibilityPublic, Manifest: json.RawMessage(`{"a":1}`), Package: json.RawMessage(`{"b":2}`), Tags: json.RawMessage(`["x"]`), PluginHash: "sha256:p"}
 	f := &fakeStore{plugins: map[string]*model.Plugin{"source": source}}
-	copy, err := fixedService(f).Duplicate(context.Background(), testCaller, "source", "Copy")
+	copy, err := fixedService(f).Duplicate(context.Background(), testCaller, "expert:source", "Copy")
 	if err != nil {
 		t.Fatal(err)
 	}

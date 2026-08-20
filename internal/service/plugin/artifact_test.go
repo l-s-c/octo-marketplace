@@ -80,7 +80,7 @@ func artifactService(pkg string, store *artifactStorage) *Service {
 	pkg = designPackage(pkg)
 	space := testCaller.SpaceID
 	repo := &fakeStore{plugins: map[string]*model.Plugin{
-		"plugin-1": {ID: "plugin-1", SpaceID: &space, Package: []byte(pkg)},
+		"plugin-1": {ID: "plugin-1", Type: model.PluginTypeSkill, SpaceID: &space, Package: []byte(pkg)},
 	}}
 	return New(repo, store).WithRuntime(func() string { return "upload-id" }, nil)
 }
@@ -120,7 +120,7 @@ func TestOpenAttachmentRequiresExactPackageReferenceAndManagedPrefix(t *testing.
 	store := &artifactStorage{objects: map[string][]byte{key: []byte("hello"), "plugins/space-b/attachments/secret": []byte("secret")}}
 	pkg := `{"attachments":[{"path":"assets/data.bin","content_type":"storage","mime_type":"application/octet-stream","object_key":"` + key + `","content_size":5}]}`
 	svc := artifactService(pkg, store)
-	result, err := svc.OpenAttachment(context.Background(), testCaller, "plugin-1", key)
+	result, err := svc.OpenAttachment(context.Background(), testCaller, "skill:plugin-1", key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestOpenAttachmentRequiresExactPackageReferenceAndManagedPrefix(t *testing.
 	if string(got) != "hello" || result.Path != "assets/data.bin" {
 		t.Fatalf("download=%q result=%#v", got, result)
 	}
-	if _, err := svc.OpenAttachment(context.Background(), testCaller, "plugin-1", "plugins/space-b/attachments/secret"); !errors.Is(err, ErrNotFound) {
+	if _, err := svc.OpenAttachment(context.Background(), testCaller, "skill:plugin-1", "plugins/space-b/attachments/secret"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unreferenced err=%v", err)
 	}
 	if len(store.getCalls) != 1 {
@@ -151,7 +151,7 @@ func TestPrepareArchiveRejectsUnsafePathsKeysAndSymlinkConcepts(t *testing.T) {
 	for _, pkg := range tests {
 		t.Run(pkg, func(t *testing.T) {
 			svc := artifactService(pkg, &artifactStorage{objects: map[string][]byte{key: []byte("x")}})
-			if _, err := svc.PrepareArchive(context.Background(), testCaller, "plugin-1", ""); !errors.Is(err, ErrInvalidRequest) {
+			if _, err := svc.PrepareArchive(context.Background(), testCaller, "skill:plugin-1", ""); !errors.Is(err, ErrInvalidRequest) {
 				t.Fatalf("err=%v", err)
 			}
 		})
@@ -165,7 +165,7 @@ func TestArchiveStreamsSortedRawAndStorageFiles(t *testing.T) {
 		`{"path":"z.bin","content_type":"storage","mime_type":"application/octet-stream","storage_uri":"` + key + `","content_size":3},` +
 		`{"path":"a.txt","content_type":"raw","mime_type":"text/plain","raw_content":"hello","content_size":5}]}`
 	svc := artifactService(pkg, store)
-	archive, err := svc.PrepareArchive(context.Background(), testCaller, "plugin-1", "")
+	archive, err := svc.PrepareArchive(context.Background(), testCaller, "skill:plugin-1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,11 +205,11 @@ func TestArchiveStreamsSortedRawAndStorageFiles(t *testing.T) {
 func TestPrepareArchiveEnforcesFileAndTotalLimits(t *testing.T) {
 	svc := artifactService(`{"attachments":[{"path":"a","content_type":"raw","raw_content":"12"},{"path":"b","content_type":"raw","raw_content":"34"}]}`, &artifactStorage{})
 	svc.maxArchiveFiles = 1
-	if _, err := svc.PrepareArchive(context.Background(), testCaller, "plugin-1", ""); !errors.Is(err, ErrInvalidRequest) {
+	if _, err := svc.PrepareArchive(context.Background(), testCaller, "skill:plugin-1", ""); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("file count err=%v", err)
 	}
 	svc.maxArchiveFiles, svc.maxArchiveBytes = 2, 3
-	if _, err := svc.PrepareArchive(context.Background(), testCaller, "plugin-1", ""); !errors.Is(err, ErrTooLarge) {
+	if _, err := svc.PrepareArchive(context.Background(), testCaller, "skill:plugin-1", ""); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("total size err=%v", err)
 	}
 }

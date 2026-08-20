@@ -293,24 +293,42 @@ func (s *Service) ListAuditLogs(ctx context.Context, caller Caller, pluginID str
 }
 
 func (s *Service) ListVersions(ctx context.Context, caller Caller, pluginID string, limit, offset int) ([]model.PluginVersion, int64, error) {
-	if validateReadPage(caller, pluginID, limit, offset) != nil {
+	if validateCaller(caller) != nil || limit < 0 || limit > maxListLimit || offset < 0 {
 		return nil, 0, ErrInvalidRequest
 	}
-	items, total, err := s.repo.ListVersions(ctx, scope(caller), pluginID, limit, offset)
+	storageID, expectedType, err := parseWirePluginID(pluginID)
+	if err != nil {
+		return nil, 0, err
+	}
+	p, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
+	if err != nil {
+		return nil, 0, mapStoreError(err)
+	}
+	if p.Type != expectedType {
+		return nil, 0, ErrNotFound
+	}
+	items, total, err := s.repo.ListVersions(ctx, scope(caller), storageID, limit, offset)
+	for i := range items {
+		items[i].PluginType = p.Type
+	}
 	return items, total, mapStoreError(err)
 }
 
 func (s *Service) Publish(ctx context.Context, caller Caller, pluginID string, req PublishRequest) (*model.PluginVersion, error) {
-	if validateCaller(caller) != nil || strings.TrimSpace(pluginID) == "" || !validVersion(req.Version) {
+	if validateCaller(caller) != nil || !validVersion(req.Version) {
 		return nil, ErrInvalidRequest
 	}
+	storageID, expectedType, err := parseWirePluginID(pluginID)
+	if err != nil {
+		return nil, err
+	}
 	now := s.now()
-	placements, err := s.buildPlacements(pluginID, req.Placements, now)
+	placements, err := s.buildPlacements(storageID, req.Placements, now)
 	if err != nil {
 		return nil, err
 	}
 	params := pluginrepo.PublishParams{
-		PluginID:     pluginID,
+		PluginID:     storageID,
 		Version:      strings.TrimSpace(req.Version),
 		CreatedBy:    caller.UID,
 		OperatorName: caller.Name,
@@ -322,16 +340,24 @@ func (s *Service) Publish(ctx context.Context, caller Caller, pluginID string, r
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
+	version.PluginType = expectedType
 	return version, nil
 }
 
 func (s *Service) Duplicate(ctx context.Context, caller Caller, sourcePluginID, name string) (*model.Plugin, error) {
-	if validateCaller(caller) != nil || strings.TrimSpace(sourcePluginID) == "" {
+	if validateCaller(caller) != nil {
 		return nil, ErrInvalidRequest
 	}
-	source, _, err := s.repo.GetWithRelations(ctx, scope(caller), sourcePluginID)
+	storageID, expectedType, err := parseWirePluginID(sourcePluginID)
+	if err != nil {
+		return nil, err
+	}
+	source, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
 	if err != nil {
 		return nil, mapStoreError(err)
+	}
+	if source.Type != expectedType {
+		return nil, ErrNotFound
 	}
 	if source.Type == model.PluginTypeConnector {
 		if err := rejectConnectorSecrets(source.Manifest, source.Package); err != nil {
@@ -355,7 +381,7 @@ func (s *Service) Duplicate(ctx context.Context, caller Caller, sourcePluginID, 
 	copy.CreatedAt, copy.UpdatedAt, copy.DeletedAt = now, now, nil
 	copy.Manifest, copy.Package, copy.Tags = cloneJSON(source.Manifest), cloneJSON(source.Package), cloneJSON(source.Tags)
 	audit := s.audit(caller, copy.ID, "duplicate", nil, &copy, now)
-	if err := s.repo.DuplicateGraph(ctx, scope(caller), sourcePluginID, copy, mutation(copy, nil, audit)); err != nil {
+	if err := s.repo.DuplicateGraph(ctx, scope(caller), storageID, copy, mutation(copy, nil, audit)); err != nil {
 		return nil, mapStoreError(err)
 	}
 	return &copy, nil

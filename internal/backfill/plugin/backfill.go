@@ -285,20 +285,16 @@ func (r *Runner) skills(ctx context.Context, counts map[string]int, cats map[str
 			extras = append(extras, rawAttachment{path: "SKILL.md", mimeType: "text/markdown", content: readme})
 		}
 		pkg, _ := packageJSON(m, extras...)
-		vid := DeterministicID("skillver", id+":"+v)
-		if current != "" {
-			vid = DeterministicID("skillver", current)
+		vs, selected, issue, e := r.skillVersions(ctx, id, pid, current, v, creatorID, c, m, pkg)
+		if e != nil {
+			return e
 		}
 		d := sql.NullTime{}
 		if deleted {
 			d = sql.NullTime{Time: u, Valid: true}
 		}
 		tj, _ := canonical(tags)
-		p.plugins = append(p.plugins, plugRow{pid, pluginName, "skill", cats["categories:"+cat], string(tj), ownerName, owner, space, visibility, creator, "human", "", "", string(m), string(pkg), hashJSON(m), both(m, pkg), vid, active(d), c, u, d})
-		vs, issue, e := r.skillVersions(ctx, id, pid, v, creatorID, c, m, pkg)
-		if e != nil {
-			return e
-		}
+		p.plugins = append(p.plugins, plugRow{pid, pluginName, "skill", cats["categories:"+cat], string(tj), ownerName, owner, space, visibility, creator, "human", "", "", selected.manifest, selected.pkg, selected.mhash, selected.phash, selected.id, active(d), c, u, d})
 		p.versions = append(p.versions, vs...)
 		if issue != nil {
 			p.issues = append(p.issues, *issue)
@@ -306,43 +302,56 @@ func (r *Runner) skills(ctx context.Context, counts map[string]int, cats map[str
 	}
 	return rs.Err()
 }
-func (r *Runner) skillVersions(ctx context.Context, sid, pid, fv, fby string, fc time.Time, m, pkg []byte) ([]verRow, *Issue, error) {
-	rs, e := r.db.QueryContext(ctx, `SELECT id,version,changelog,storage,changed_by,created_at FROM skill_versions WHERE skill_id=? ORDER BY created_at,id`, sid)
-	if e != nil {
-		return nil, nil, e
+func (r *Runner) skillVersions(ctx context.Context, sid, pid, currentSourceID, fallbackVersion, fallbackBy string, fallbackCreated time.Time, manifest, pkg []byte) ([]verRow, verRow, *Issue, error) {
+	rs, err := r.db.QueryContext(ctx, `SELECT id,version,changelog,storage,changed_by,created_at FROM skill_versions WHERE skill_id=? ORDER BY created_at,id`, sid)
+	if err != nil {
+		return nil, verRow{}, nil, err
 	}
 	defer rs.Close()
 	var out []verRow
+	selectedIndex := -1
 	for rs.Next() {
-		var id, v, by string
-		var ch, storage sql.NullString
-		var c time.Time
-		if e = rs.Scan(&id, &v, &ch, &storage, &by, &c); e != nil {
-			return nil, nil, e
+		var id, version, by string
+		var changelog, storage sql.NullString
+		var created time.Time
+		if err = rs.Scan(&id, &version, &changelog, &storage, &by, &created); err != nil {
+			return nil, verRow{}, nil, err
 		}
-		vp := pkg
-		if storage.Valid {
-			if !json.Valid([]byte(storage.String)) {
-				return nil, nil, fmt.Errorf("invalid skill version storage JSON")
-			}
-			// Legacy storage metadata cannot safely become an attachment without
-			// the corresponding bytes and content hash. Keep the canonical
-			// current snapshot package rather than fabricating package content.
+		if storage.Valid && !json.Valid([]byte(storage.String)) {
+			return nil, verRow{}, nil, fmt.Errorf("invalid skill version storage JSON")
 		}
+		// Legacy storage metadata cannot safely become an attachment without
+		// the corresponding bytes and content hash. Every history row therefore
+		// retains the same canonical snapshot package.
 		if by == "" {
-			by = fby
+			by = fallbackBy
 		}
-		out = append(out, mkver(DeterministicID("skillver", id), pid, v, ch.String, by, c, m, vp))
+		out = append(out, mkver(DeterministicID("skillver", id), pid, version, changelog.String, by, created, manifest, pkg))
+		if id == currentSourceID {
+			selectedIndex = len(out) - 1
+		}
+	}
+	if err = rs.Err(); err != nil {
+		return nil, verRow{}, nil, err
 	}
 	if len(out) == 0 {
-		if fv == "" {
-			fv = "legacy"
+		if currentSourceID != "" {
+			return nil, verRow{}, nil, fmt.Errorf("skill %q current_version_id %q does not reference its version history", sid, currentSourceID)
 		}
-		out = append(out, mkver(DeterministicID("skillver", sid+":"+fv), pid, fv, "", fby, fc, m, pkg))
-		i := Issue{"info", "synthetic_skill_version", "skills", sid, "no version rows; current snapshot created"}
-		return out, &i, nil
+		if fallbackVersion == "" {
+			fallbackVersion = "legacy"
+		}
+		row := mkver(DeterministicID("skillver", sid+":"+fallbackVersion), pid, fallbackVersion, "", fallbackBy, fallbackCreated, manifest, pkg)
+		issue := Issue{"info", "synthetic_skill_version", "skills", sid, "no version rows; current snapshot created"}
+		return []verRow{row}, row, &issue, nil
 	}
-	return out, nil, rs.Err()
+	if currentSourceID != "" && selectedIndex < 0 {
+		return nil, verRow{}, nil, fmt.Errorf("skill %q current_version_id %q does not reference its version history", sid, currentSourceID)
+	}
+	if selectedIndex < 0 {
+		selectedIndex = len(out) - 1 // ORDER BY created_at,id makes this deterministic latest.
+	}
+	return out, out[selectedIndex], nil, nil
 }
 
 type legacySkillRef struct {

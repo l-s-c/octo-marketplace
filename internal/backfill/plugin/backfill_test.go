@@ -196,6 +196,99 @@ func TestBuildSkillAndConnectorDocuments(t *testing.T) {
 	}
 }
 
+func TestSkillVersionsSelectsExactCurrentPointer(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	created := time.Unix(100, 0).UTC()
+	manifest := []byte(`{"manifest":true}`)
+	pkg := []byte(`{"package":true}`)
+	mock.ExpectQuery("SELECT id,version,changelog,storage,changed_by,created_at FROM skill_versions").WithArgs("skill-1").WillReturnRows(
+		sqlmock.NewRows([]string{"id", "version", "changelog", "storage", "changed_by", "created_at"}).
+			AddRow("version-a", "1.0.0", nil, `{}`, "author-a", created).
+			AddRow("version-b", "2.0.0", "selected", `{}`, "author-b", created.Add(time.Hour)),
+	)
+	versions, selected, issue, err := New(db).skillVersions(context.Background(), "skill-1", "storage-plugin", "version-a", "fallback", "fallback-author", created, manifest, pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue != nil || len(versions) != 2 || selected.id != DeterministicID("skillver", "version-a") || selected.version != "1.0.0" {
+		t.Fatalf("versions=%#v selected=%#v issue=%#v", versions, selected, issue)
+	}
+	if selected.manifest != string(manifest) || selected.pkg != string(pkg) || selected.phash != both(manifest, pkg) {
+		t.Fatalf("selected payload mismatch: %#v", selected)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSkillVersionsSelectsDeterministicLatestWhenPointerEmpty(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	created := time.Unix(100, 0).UTC()
+	mock.ExpectQuery("SELECT id,version,changelog,storage,changed_by,created_at FROM skill_versions").WithArgs("skill-1").WillReturnRows(
+		sqlmock.NewRows([]string{"id", "version", "changelog", "storage", "changed_by", "created_at"}).
+			AddRow("version-a", "1.0.0", nil, nil, "", created).
+			AddRow("version-b", "1.1.0", nil, nil, "", created),
+	)
+	versions, selected, issue, err := New(db).skillVersions(context.Background(), "skill-1", "storage-plugin", "", "fallback", "fallback-author", created, []byte(`{}`), []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue != nil || len(versions) != 2 || selected.id != DeterministicID("skillver", "version-b") {
+		t.Fatalf("versions=%#v selected=%#v issue=%#v", versions, selected, issue)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSkillVersionsCreatesSyntheticCurrentWithoutHistory(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	created := time.Unix(100, 0).UTC()
+	mock.ExpectQuery("SELECT id,version,changelog,storage,changed_by,created_at FROM skill_versions").WithArgs("skill-1").WillReturnRows(
+		sqlmock.NewRows([]string{"id", "version", "changelog", "storage", "changed_by", "created_at"}),
+	)
+	versions, selected, issue, err := New(db).skillVersions(context.Background(), "skill-1", "storage-plugin", "", "1.0.0", "author", created, []byte(`{}`), []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 1 || selected.id != versions[0].id || issue == nil || selected.version != "1.0.0" {
+		t.Fatalf("versions=%#v selected=%#v issue=%#v", versions, selected, issue)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSkillVersionsRejectsDanglingCurrentPointer(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SELECT id,version,changelog,storage,changed_by,created_at FROM skill_versions").WithArgs("skill-1").WillReturnRows(
+		sqlmock.NewRows([]string{"id", "version", "changelog", "storage", "changed_by", "created_at"}).
+			AddRow("version-a", "1.0.0", nil, nil, "author", time.Unix(100, 0).UTC()),
+	)
+	if _, _, _, err := New(db).skillVersions(context.Background(), "skill-1", "storage-plugin", "missing", "fallback", "fallback-author", time.Time{}, []byte(`{}`), []byte(`{}`)); err == nil {
+		t.Fatal("dangling current pointer accepted")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestApplyCountersSurviveVerificationProjection(t *testing.T) {
 	rep := Report{Observed: Counts{Inserted: 3, Existing: 4}}
 	inserted, existing := rep.Observed.Inserted, rep.Observed.Existing

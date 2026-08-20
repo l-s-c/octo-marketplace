@@ -22,8 +22,10 @@ func DeterministicID(family, sourceID string) string {
 	return family + "_" + hex.EncodeToString(sum[:])[:32]
 }
 
-// PluginID preserves a source ID only when it is globally unique and fits the
-// unified column. Colliding IDs are deterministically namespaced by family.
+// PluginID returns the opaque unified-table storage ID. Cowork external IDs are
+// prefixed at the service boundary (for example skill:<storage-id>); storing that
+// prefix here would violate the existing VARCHAR(64) contract and double-prefix
+// API responses. Colliding legacy IDs are deterministically namespaced.
 func PluginID(family, sourceID string, globalCount int) string {
 	if globalCount == 1 && len(sourceID) <= 64 {
 		return sourceID

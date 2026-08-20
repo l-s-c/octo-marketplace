@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestPluginIDPreservesOnlyGloballyUnique(t *testing.T) {
+func TestPluginIDUsesOpaqueStorageContract(t *testing.T) {
 	if got := PluginID("skill", "same", 1); got != "same" {
 		t.Fatalf("unique ID = %q", got)
 	}
