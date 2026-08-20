@@ -12,7 +12,6 @@ import (
 )
 
 func emptySourceExpectations(mock sqlmock.Sqlmock) {
-	mock.ExpectQuery("SELECT id,COUNT\\(\\*\\) FROM").WillReturnRows(sqlmock.NewRows([]string{"id", "count"}))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT id,name,icon_key,sort_order,created_at,updated_at,deleted_at FROM categories")).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "icon_key", "sort_order", "created_at", "updated_at", "deleted_at"}))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT id,name,icon_key,sort_order,created_at,updated_at,deleted_at FROM expert_categories")).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "icon_key", "sort_order", "created_at", "updated_at", "deleted_at"}))
 	mock.ExpectQuery("SELECT id,name FROM skill_tags").WillReturnRows(sqlmock.NewRows([]string{"id", "name"}))
@@ -35,7 +34,7 @@ func TestDryRunDoesNotWrite(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if got.Expected.Plugins != 0 || len(got.Issues) != 1 {
+	if got.Expected.Plugins != 0 || len(got.Issues) != 0 {
 		t.Fatalf("unexpected report: %#v", got)
 	}
 	if e = mock.ExpectationsWereMet(); e != nil {
@@ -67,7 +66,6 @@ func TestBuildExpertAndSquadGraph(t *testing.T) {
 	}
 	defer db.Close()
 	now := time.Unix(100, 0).UTC()
-	mock.ExpectQuery("SELECT id,COUNT\\(\\*\\) FROM").WillReturnRows(sqlmock.NewRows([]string{"id", "count"}).AddRow("expert-1", 1).AddRow("squad-1", 1))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT id,name,icon_key,sort_order,created_at,updated_at,deleted_at FROM categories")).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "icon_key", "sort_order", "created_at", "updated_at", "deleted_at"}))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT id,name,icon_key,sort_order,created_at,updated_at,deleted_at FROM expert_categories")).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "icon_key", "sort_order", "created_at", "updated_at", "deleted_at"}).AddRow("cat", "Category", "icon", 1, now, now, nil))
 	mock.ExpectQuery("SELECT id,name FROM skill_tags").WillReturnRows(sqlmock.NewRows([]string{"id", "name"}))
@@ -150,7 +148,6 @@ func TestBuildSkillAndConnectorDocuments(t *testing.T) {
 	}
 	defer db.Close()
 	now := time.Unix(100, 0).UTC()
-	mock.ExpectQuery("SELECT id,COUNT\\(\\*\\) FROM").WillReturnRows(sqlmock.NewRows([]string{"id", "count"}).AddRow("skill-1", 1).AddRow("connector-1", 1))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT id,name,icon_key,sort_order,created_at,updated_at,deleted_at FROM categories")).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "icon_key", "sort_order", "created_at", "updated_at", "deleted_at"}).AddRow("cat", "Category", "icon", 1, now, now, nil))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT id,name,icon_key,sort_order,created_at,updated_at,deleted_at FROM expert_categories")).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "icon_key", "sort_order", "created_at", "updated_at", "deleted_at"}))
 	mock.ExpectQuery("SELECT id,name FROM skill_tags").WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(1, "Skill Tag"))
@@ -185,11 +182,11 @@ func TestBuildSkillAndConnectorDocuments(t *testing.T) {
 		byType[plugin.typ] = plugin
 	}
 	skillPlugin, ok := byType["skill"]
-	if !ok || skillPlugin.id != "skill-1" || skillPlugin.name != "Display Skill" {
+	if !ok || skillPlugin.id != PluginID("skill", "skill-1") || skillPlugin.name != "Display Skill" {
 		t.Fatalf("skill plugin = %#v; all plugins = %#v", skillPlugin, p.plugins)
 	}
 	connectorPlugin, ok := byType["connector"]
-	if !ok || connectorPlugin.id != "connector-1" || connectorPlugin.name != "Connector" {
+	if !ok || connectorPlugin.id != PluginID("connector", "connector-1") || connectorPlugin.name != "Connector" {
 		t.Fatalf("connector plugin = %#v; all plugins = %#v", connectorPlugin, p.plugins)
 	}
 	var connectorManifest pluginManifest
@@ -412,5 +409,71 @@ func TestApplyEmptyPlanUsesTransaction(t *testing.T) {
 	}
 	if e = mock.ExpectationsWereMet(); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestTopLevelSkillKeepsArtifactPointer(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Unix(100, 0).UTC()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id,name,icon_key,sort_order,created_at,updated_at,deleted_at FROM categories")).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "icon_key", "sort_order", "created_at", "updated_at", "deleted_at"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id,name,icon_key,sort_order,created_at,updated_at,deleted_at FROM expert_categories")).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "icon_key", "sort_order", "created_at", "updated_at", "deleted_at"}))
+	mock.ExpectQuery("SELECT id,name FROM skill_tags").WillReturnRows(sqlmock.NewRows([]string{"id", "name"}))
+	mock.ExpectQuery("SELECT id,name FROM expert_tags").WillReturnRows(sqlmock.NewRows([]string{"id", "name"}))
+	skillCols := []string{"id", "name", "display_name", "icon_url", "source_skill_id", "current_version_id", "description", "category_id", "tags", "owner_id", "owner_name", "creator_id", "creator_name", "space_id", "visibility", "version", "readme_content", "file_name", "file_url", "file_size", "file_sha256", "created_at", "updated_at", "is_deleted"}
+	mock.ExpectQuery("SELECT id,name,display_name").WillReturnRows(sqlmock.NewRows(skillCols).AddRow("skill-1", "prd-outline", "PRD Outline", "", "", "", "desc", "", `[]`, "owner", "Owner", "creator-1", "Creator", "space", "space", "1.0.0", "# readme", "prd.zip", "oss://bucket/prd.zip", 2048, "abc123", now, now, false))
+	mock.ExpectQuery("SELECT id,version,changelog,storage,changed_by,created_at FROM skill_versions").WillReturnRows(sqlmock.NewRows([]string{"id", "version", "changelog", "storage", "changed_by", "created_at"}))
+	mock.ExpectQuery("SELECT id,short_name,name,summary,category_id,tags,publisher,owner_uid,creator_name,created_by_type").WillReturnRows(sqlmock.NewRows([]string{"id", "short_name", "name", "summary", "category_id", "tags", "publisher", "owner_uid", "creator_name", "created_by_type", "created_by_bot_uid", "created_by_bot_name", "space_id", "visibility", "instruction", "mcp_config", "skills_json", "created_at", "updated_at", "deleted_at"}))
+	mock.ExpectQuery("SELECT id,short_name,name,summary,category_id,tags,publisher,owner_uid,creator_name,created_by_type").WillReturnRows(sqlmock.NewRows([]string{"id", "short_name", "name", "summary", "category_id", "tags", "publisher", "owner_uid", "creator_name", "created_by_type", "created_by_bot_uid", "created_by_bot_name", "space_id", "visibility", "leader", "strategies_json", "dependencies_json", "permission", "members_json", "created_at", "updated_at", "deleted_at"}))
+	mock.ExpectQuery("SELECT id,name,slug,slogan").WillReturnRows(sqlmock.NewRows([]string{"id", "name", "slug", "slogan", "category", "icon", "icon_version", "tags_json", "tools_json", "usage_examples_json", "faqs_json", "notes_json", "visibility", "owner_uid", "space_id", "creator_name", "created_by_type", "created_by_bot_uid", "created_by_bot_name", "transport", "config_json", "created_at", "updated_at", "deleted_at"}))
+	p, err := New(db).build(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.plugins) != 1 {
+		t.Fatalf("plugins=%d issues=%#v", len(p.plugins), p.issues)
+	}
+	pkg := p.plugins[0].pkg
+	for _, want := range []string{`skill/ref.json`, `oss://bucket/prd.zip`, `abc123`, `\"file_size\":2048`} {
+		if !regexp.MustCompile(regexp.QuoteMeta(want)).MatchString(pkg) {
+			t.Fatalf("package missing %q: %s", want, pkg)
+		}
+	}
+}
+
+func TestExpertWithInlineMCPRecordsUnlinkedConnectorIssue(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Unix(100, 0).UTC()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id,name,icon_key,sort_order,created_at,updated_at,deleted_at FROM categories")).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "icon_key", "sort_order", "created_at", "updated_at", "deleted_at"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id,name,icon_key,sort_order,created_at,updated_at,deleted_at FROM expert_categories")).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "icon_key", "sort_order", "created_at", "updated_at", "deleted_at"}))
+	mock.ExpectQuery("SELECT id,name FROM skill_tags").WillReturnRows(sqlmock.NewRows([]string{"id", "name"}))
+	mock.ExpectQuery("SELECT id,name FROM expert_tags").WillReturnRows(sqlmock.NewRows([]string{"id", "name"}))
+	mock.ExpectQuery("SELECT id,name,display_name").WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "icon_url", "source_skill_id", "current_version_id", "description", "category_id", "tags", "owner_id", "owner_name", "creator_id", "creator_name", "space_id", "visibility", "version", "readme_content", "file_name", "file_url", "file_size", "file_sha256", "created_at", "updated_at", "is_deleted"}))
+	expertCols := []string{"id", "short_name", "name", "summary", "category_id", "tags", "publisher", "owner_uid", "creator_name", "created_by_type", "created_by_bot_uid", "created_by_bot_name", "space_id", "visibility", "instruction", "mcp_config", "skills_json", "created_at", "updated_at", "deleted_at"}
+	mock.ExpectQuery("SELECT id,short_name,name,summary,category_id,tags,publisher,owner_uid,creator_name,created_by_type").WillReturnRows(sqlmock.NewRows(expertCols).AddRow("expert-1", "E", "Expert", "summary", "", `[]`, "pub", "owner", "creator", "human", nil, nil, "space", "private", "", `{"mcpServers":{"octo":{"command":"octo-mcp"}}}`, `[]`, now, now, nil))
+	mock.ExpectQuery("SELECT id,short_name,name,summary,category_id,tags,publisher,owner_uid,creator_name,created_by_type").WillReturnRows(sqlmock.NewRows([]string{"id", "short_name", "name", "summary", "category_id", "tags", "publisher", "owner_uid", "creator_name", "created_by_type", "created_by_bot_uid", "created_by_bot_name", "space_id", "visibility", "leader", "strategies_json", "dependencies_json", "permission", "members_json", "created_at", "updated_at", "deleted_at"}))
+	mock.ExpectQuery("SELECT id,name,slug,slogan").WillReturnRows(sqlmock.NewRows([]string{"id", "name", "slug", "slogan", "category", "icon", "icon_version", "tags_json", "tools_json", "usage_examples_json", "faqs_json", "notes_json", "visibility", "owner_uid", "space_id", "creator_name", "created_by_type", "created_by_bot_uid", "created_by_bot_name", "transport", "config_json", "created_at", "updated_at", "deleted_at"}))
+	p, err := New(db).build(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.plugins) != 1 {
+		t.Fatalf("plugins=%d issues=%#v", len(p.plugins), p.issues)
+	}
+	found := false
+	for _, issue := range p.issues {
+		if issue.Code == "expert_connector_unlinked" && issue.ID == "expert-1" && issue.Level == "info" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected expert_connector_unlinked issue, got %#v", p.issues)
 	}
 }

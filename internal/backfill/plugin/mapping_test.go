@@ -6,19 +6,24 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestPluginIDUsesOpaqueStorageContract(t *testing.T) {
-	if got := PluginID("skill", "same", 1); got != "same" {
-		t.Fatalf("unique ID = %q", got)
+var canonicalUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+func TestPluginIDIsDeterministicUUID(t *testing.T) {
+	a := PluginID("skill", "same")
+	b := PluginID("expert", "same")
+	if a == "same" || a == b || a != PluginID("skill", "same") {
+		t.Fatalf("IDs not stable/distinct: %q %q", a, b)
 	}
-	a := PluginID("skill", "same", 2)
-	b := PluginID("expert", "same", 2)
-	if a == "same" || a == b || a != PluginID("skill", "same", 2) {
-		t.Fatalf("prefixed IDs not stable/distinct: %q %q", a, b)
+	for _, v := range []string{a, b, DeterministicID("relation", "x")} {
+		if !canonicalUUID.MatchString(v) {
+			t.Fatalf("not a canonical derived UUID: %q", v)
+		}
 	}
 }
 

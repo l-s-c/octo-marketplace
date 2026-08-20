@@ -10,26 +10,36 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/id"
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+	pluginsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/plugin"
 )
 
 const secretPlaceholder = "__OCTO_SECRET_PLACEHOLDER__"
 
 var secretFragments = []string{"token", "secret", "password", "passwd", "api_key", "apikey", "access_key", "private_key", "authorization", "cookie"}
 
-// DeterministicID creates stable family-specific IDs for globally shared tables.
+// DeterministicID creates stable IDs for backfilled rows, rendered as UUIDs
+// (version 8 = derived per RFC 9562, RFC variant) from sha256(family NUL
+// sourceID) so re-runs stay idempotent and the legacy→unified mapping remains
+// recomputable.
 func DeterministicID(family, sourceID string) string {
 	sum := sha256.Sum256([]byte(family + "\x00" + sourceID))
-	return family + "_" + hex.EncodeToString(sum[:])[:32]
+	var raw [16]byte
+	copy(raw[:], sum[:16])
+	raw[6] = (raw[6] & 0x0f) | 0x80 // version 8: name-derived, not random or time-based
+	raw[8] = (raw[8] & 0x3f) | 0x80 // RFC 9562 variant
+	return id.Format(raw)
 }
 
-// PluginID returns the opaque unified-table storage ID. Cowork external IDs are
-// prefixed at the service boundary (for example skill:<storage-id>); storing that
-// prefix here would violate the existing VARCHAR(64) contract and double-prefix
-// API responses. Colliding legacy IDs are deterministically namespaced.
-func PluginID(family, sourceID string, globalCount int) string {
-	if globalCount == 1 && len(sourceID) <= 64 {
-		return sourceID
-	}
+// PluginID returns the opaque unified-table storage ID for a legacy record.
+// Every backfilled plugin gets a deterministic UUID: legacy source IDs are not
+// preserved, keeping the unified tables on a single UUID format. Cowork
+// external IDs are prefixed at the service boundary (for example
+// skill:<storage-id>); storing that prefix here would double-prefix API
+// responses.
+func PluginID(family, sourceID string) string {
 	return DeterministicID(family, sourceID)
 }
 
@@ -148,6 +158,33 @@ func jsonAttachment(path string, value any) (rawAttachment, error) {
 		return rawAttachment{}, err
 	}
 	return rawAttachment{path: path, mimeType: "application/json", content: string(raw)}, nil
+}
+
+// canonicalDocs runs draft documents through the service write validator so
+// backfilled rows can never bypass or drift from the API contract: the same
+// manifest/package schema rules, secret scan, canonicalization, and hash
+// formulas apply. The package embeds the service-canonical manifest bytes.
+func canonicalDocs(outerName, pluginType string, tags []string, draftManifest []byte, extras []rawAttachment, spaceID string) (*pluginsvc.CanonicalDocuments, error) {
+	if tags == nil {
+		tags = []string{}
+	}
+	tagsJSON, err := canonical(tags)
+	if err != nil {
+		return nil, err
+	}
+	manifest, canonicalTags, err := pluginsvc.CanonicalizeManifest(outerName, model.PluginType(pluginType), tagsJSON, draftManifest)
+	if err != nil {
+		return nil, fmt.Errorf("manifest rejected by service validator: %w", err)
+	}
+	pkg, err := packageJSON(manifest, extras...)
+	if err != nil {
+		return nil, err
+	}
+	docs, err := pluginsvc.CanonicalizeDocuments(outerName, model.PluginType(pluginType), canonicalTags, manifest, pkg, spaceID)
+	if err != nil {
+		return nil, fmt.Errorf("package rejected by service validator: %w", err)
+	}
+	return docs, nil
 }
 
 func secretShaped(key string) bool {
