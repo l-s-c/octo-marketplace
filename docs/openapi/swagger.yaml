@@ -300,16 +300,6 @@ components:
         pagination:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetPagination'
       type: object
-    github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_versionResponse:
-      properties:
-        data:
-          items:
-            $ref: '#/components/schemas/internal_api_handler_plugin.versionResponse'
-          type: array
-          uniqueItems: false
-        pagination:
-          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetPagination'
-      type: object
     github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetPagination:
       properties:
         page:
@@ -1567,7 +1557,9 @@ components:
       type: object
     internal_api_handler_plugin.duplicateRequest:
       properties:
-        name:
+        plugin_name:
+          type: string
+        source_plugin_id:
           type: string
       type: object
     internal_api_handler_plugin.placementRequest:
@@ -1597,20 +1589,22 @@ components:
           type: string
         current_version_id:
           type: string
-        manifest:
-          type: object
         manifest_hash:
           type: string
-        name:
-          type: string
+        manifest_json:
+          type: object
         owner_id:
           type: string
-        package:
-          type: object
         plugin_hash:
           type: string
         plugin_id:
           type: string
+        plugin_json:
+          type: object
+        plugin_name:
+          type: string
+        plugin_type:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginType'
         publisher:
           type: string
         space_id:
@@ -1622,10 +1616,32 @@ components:
             type: string
           type: array
           uniqueItems: false
-        type:
-          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginType'
         updated_at:
           type: string
+        visibility:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginVisibility'
+      type: object
+    internal_api_handler_plugin.pluginWriteRequest:
+      properties:
+        category_id:
+          type: string
+        manifest_json:
+          type: object
+        plugin_id:
+          type: string
+        plugin_json:
+          type: object
+        plugin_name:
+          type: string
+        plugin_type:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginType'
+        publisher:
+          type: string
+        tags:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         visibility:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginVisibility'
       type: object
@@ -1638,6 +1654,8 @@ components:
             $ref: '#/components/schemas/internal_api_handler_plugin.placementRequest'
           type: array
           uniqueItems: false
+        plugin_id:
+          type: string
         version:
           type: string
       type: object
@@ -1645,11 +1663,11 @@ components:
       properties:
         data:
           type: object
+        relation_type:
+          type: string
         sort_order:
           type: integer
         target_plugin_id:
-          type: string
-        type:
           type: string
       type: object
     internal_api_handler_plugin.relationResponse:
@@ -1658,14 +1676,24 @@ components:
           type: object
         relation_id:
           type: string
+        relation_type:
+          type: string
         sort_order:
           type: integer
         source_plugin_id:
           type: string
         target_plugin_id:
           type: string
-        type:
-          type: string
+      type: object
+    internal_api_handler_plugin.upsertRequest:
+      properties:
+        plugin:
+          $ref: '#/components/schemas/internal_api_handler_plugin.pluginWriteRequest'
+        relations:
+          items:
+            $ref: '#/components/schemas/internal_api_handler_plugin.relationRequest'
+          type: array
+          uniqueItems: false
       type: object
     internal_api_handler_plugin.versionResponse:
       properties:
@@ -1695,33 +1723,6 @@ components:
           type: string
         version_id:
           type: string
-      type: object
-    internal_api_handler_plugin.writeRequest:
-      properties:
-        category_id:
-          type: string
-        manifest:
-          type: object
-        name:
-          type: string
-        package:
-          type: object
-        publisher:
-          type: string
-        relations:
-          items:
-            $ref: '#/components/schemas/internal_api_handler_plugin.relationRequest'
-          type: array
-          uniqueItems: false
-        tags:
-          items:
-            type: string
-          type: array
-          uniqueItems: false
-        type:
-          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginType'
-        visibility:
-          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginVisibility'
       type: object
     internal_api_handler_skill.AdminCreateRequest:
       properties:
@@ -4941,6 +4942,550 @@ paths:
       summary: List owned experts
       tags:
       - expert
+  /internal/plugins/archive:
+    get:
+      description: Build and stream a bounded ZIP from the current or requested immutable
+        Plugin Package.
+      operationId: plugin.archive.download
+      parameters:
+      - description: Plugin ID
+        in: query
+        name: plugin_id
+        required: true
+        schema:
+          type: string
+      - description: Immutable Plugin version
+        in: query
+        name: version
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+          description: Plugin ZIP archive
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: PAYLOAD_TOO_LARGE
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Download plugin archive
+      tags:
+      - plugin
+  /internal/plugins/attachment/download:
+    get:
+      description: Stream an object referenced by the visible Plugin Package after
+        enforcing its managed Space prefix.
+      operationId: plugin.attachment.download
+      parameters:
+      - description: Plugin ID
+        in: query
+        name: plugin_id
+        required: true
+        schema:
+          type: string
+      - description: Package-referenced object key
+        in: query
+        name: object_key
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+          description: Attachment bytes
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Download plugin attachment
+      tags:
+      - plugin
+  /internal/plugins/attachment/upload:
+    post:
+      description: Create a server-scoped object key and short-lived PUT target without
+        modifying a Plugin.
+      operationId: plugin.attachment.create
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/internal_api_handler_plugin.attachmentUploadRequest'
+                description: Attachment metadata
+                summary: body
+        description: Attachment metadata
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_attachmentUploadResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: PAYLOAD_TOO_LARGE
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Initialize plugin attachment upload
+      tags:
+      - plugin
+  /internal/plugins/audit_logs:
+    get:
+      description: List append-only audit records for a caller-owned Plugin in the
+        current Space using offset pagination.
+      operationId: plugin.audit_log.list
+      parameters:
+      - description: Plugin ID
+        in: query
+        name: plugin_id
+        required: true
+        schema:
+          type: string
+      - description: Page number, default 1
+        in: query
+        name: page
+        schema:
+          type: integer
+      - description: Page size, default 20, max 100
+        in: query
+        name: page_size
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_auditLogResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: List plugin audit logs
+      tags:
+      - plugin
+  /internal/plugins/detail:
+    get:
+      description: Return one Plugin and its visible one-level relations without leaking
+        cross-Space existence.
+      operationId: plugin.get
+      parameters:
+      - description: Plugin ID
+        in: query
+        name: plugin_id
+        required: true
+        schema:
+          type: string
+      - description: Include one-level relations (default true)
+        in: query
+        name: include_relations
+        schema:
+          type: boolean
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Get plugin
+      tags:
+      - plugin
+  /internal/plugins/duplicate:
+    post:
+      description: Clone a visible Plugin and its relation graph into a new private
+        Plugin owned by the caller.
+      operationId: plugin.duplicate
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/internal_api_handler_plugin.duplicateRequest'
+                description: Source Plugin ID and optional Plugin name
+                summary: body
+        description: Source Plugin ID and optional Plugin name
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_pluginResponse'
+          description: Created
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: CONFLICT
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: PAYLOAD_TOO_LARGE
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Duplicate plugin
+      tags:
+      - plugin
+  /internal/plugins/publish:
+    post:
+      description: Create an immutable Plugin snapshot and atomically replace its
+        marketplace placements.
+      operationId: plugin.publish
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/internal_api_handler_plugin.publishRequest'
+                description: Plugin ID, version, and placements
+                summary: body
+        description: Plugin ID, version, and placements
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_versionResponse'
+          description: Created
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: CONFLICT
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: PAYLOAD_TOO_LARGE
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Publish plugin version
+      tags:
+      - plugin
+  /internal/plugins/upsert:
+    post:
+      description: Create or replace a Plugin from {plugin,relations}; owner and Space
+        remain server-derived.
+      operationId: plugin.upsert
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/internal_api_handler_plugin.upsertRequest'
+                description: Plugin current state and relations
+                summary: body
+        description: Plugin current state and relations
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: CONFLICT
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: PAYLOAD_TOO_LARGE
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Upsert plugin
+      tags:
+      - plugin
   /mcp_categories:
     get:
       description: Return MCP category keys and visible record counts for the current
@@ -5765,15 +6310,15 @@ paths:
         current Space.
       operationId: plugin_category.list
       parameters:
-      - description: Marketplace placement code
+      - description: Marketplace scene code
         in: query
-        name: placement_code
+        name: scene_code
         required: true
         schema:
           type: string
       - description: Plugin type
         in: query
-        name: type
+        name: plugin_type
         required: true
         schema:
           enum:
@@ -5835,14 +6380,16 @@ paths:
         pagination.
       operationId: plugin.list
       parameters:
-      - description: Marketplace placement code
+      - description: Marketplace scene code
         in: query
-        name: placement_code
+        name: scene_code
+        required: true
         schema:
           type: string
       - description: Plugin type
         in: query
-        name: type
+        name: plugin_type
+        required: true
         schema:
           enum:
           - expert
@@ -5855,21 +6402,11 @@ paths:
         name: category_id
         schema:
           type: string
-      - description: Exact tag
+      - description: Plugin name search query
         in: query
-        name: tag
+        name: q
         schema:
           type: string
-      - description: Name search keyword
-        in: query
-        name: keyword
-        schema:
-          type: string
-      - description: Restrict to Plugins owned by the caller
-        in: query
-        name: mine
-        schema:
-          type: boolean
       - description: Sort order
         in: query
         name: sort
@@ -5935,766 +6472,6 @@ paths:
       security:
       - Bearer: []
       summary: List plugins
-      tags:
-      - plugin
-    post:
-      description: Create a Plugin owned by the authenticated caller in the current
-        Space.
-      operationId: plugin.create
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/internal_api_handler_plugin.writeRequest'
-                description: Plugin current state
-                summary: body
-        description: Plugin current state
-        required: true
-      responses:
-        '201':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
-          description: Created
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: CONFLICT
-        '413':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: PAYLOAD_TOO_LARGE
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - Bearer: []
-      summary: Create plugin
-      tags:
-      - plugin
-  /plugins/{plugin_id}:
-    delete:
-      description: Soft-delete a caller-owned Plugin and append an audit record; repeated
-        deletion returns not found.
-      operationId: plugin.delete
-      parameters:
-      - description: Plugin ID
-        in: path
-        name: plugin_id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
-          description: OK
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: CONFLICT
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - Bearer: []
-      summary: Delete plugin
-      tags:
-      - plugin
-    get:
-      description: Return one Plugin and its visible one-level relations without leaking
-        cross-Space existence.
-      operationId: plugin.get
-      parameters:
-      - description: Plugin ID
-        in: path
-        name: plugin_id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
-          description: OK
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - Bearer: []
-      summary: Get plugin
-      tags:
-      - plugin
-    patch:
-      description: Replace the mutable current-state fields of a caller-owned Plugin;
-        immutable identity fields remain server-derived.
-      operationId: plugin.update
-      parameters:
-      - description: Plugin ID
-        in: path
-        name: plugin_id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/internal_api_handler_plugin.writeRequest'
-                description: Complete mutable Plugin state
-                summary: body
-        description: Complete mutable Plugin state
-        required: true
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
-          description: OK
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: CONFLICT
-        '413':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: PAYLOAD_TOO_LARGE
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - Bearer: []
-      summary: Update plugin
-      tags:
-      - plugin
-  /plugins/{plugin_id}/archive:
-    get:
-      description: Build and stream a bounded ZIP from the current or requested immutable
-        Plugin Package.
-      operationId: plugin.archive.download
-      parameters:
-      - description: Plugin ID
-        in: path
-        name: plugin_id
-        required: true
-        schema:
-          type: string
-      - description: Immutable Plugin version
-        in: query
-        name: version
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-      responses:
-        '200':
-          content:
-            application/zip:
-              schema:
-                type: string
-                format: binary
-          description: Plugin ZIP archive
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '413':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: PAYLOAD_TOO_LARGE
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - Bearer: []
-      summary: Download plugin archive
-      tags:
-      - plugin
-  /plugins/{plugin_id}/attachments/_download:
-    get:
-      description: Stream an object referenced by the visible Plugin Package after
-        enforcing its managed Space prefix.
-      operationId: plugin.attachment.download
-      parameters:
-      - description: Plugin ID
-        in: path
-        name: plugin_id
-        required: true
-        schema:
-          type: string
-      - description: Package-referenced object key
-        in: query
-        name: object_key
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-      responses:
-        '200':
-          content:
-            application/octet-stream:
-              schema:
-                type: string
-                format: binary
-          description: Attachment bytes
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - Bearer: []
-      summary: Download plugin attachment
-      tags:
-      - plugin
-  /plugins/{plugin_id}/audit_logs:
-    get:
-      description: List append-only audit records for a caller-owned Plugin in the
-        current Space using offset pagination.
-      operationId: plugin.audit_log.list
-      parameters:
-      - description: Plugin ID
-        in: path
-        name: plugin_id
-        required: true
-        schema:
-          type: string
-      - description: Page number, default 1
-        in: query
-        name: page
-        schema:
-          type: integer
-      - description: Page size, default 20, max 100
-        in: query
-        name: page_size
-        schema:
-          type: integer
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_auditLogResponse'
-          description: OK
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - Bearer: []
-      summary: List plugin audit logs
-      tags:
-      - plugin
-  /plugins/{plugin_id}/duplicate:
-    post:
-      description: Clone a visible Plugin and its relation graph into a new private
-        Plugin owned by the caller.
-      operationId: plugin.duplicate
-      parameters:
-      - description: Source Plugin ID
-        in: path
-        name: plugin_id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/internal_api_handler_plugin.duplicateRequest'
-                description: Optional duplicate name
-                summary: body
-        description: Optional duplicate name
-      responses:
-        '201':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_pluginResponse'
-          description: Created
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: CONFLICT
-        '413':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: PAYLOAD_TOO_LARGE
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - Bearer: []
-      summary: Duplicate plugin
-      tags:
-      - plugin
-  /plugins/{plugin_id}/publish:
-    post:
-      description: Create an immutable Plugin snapshot and atomically replace its
-        marketplace placements.
-      operationId: plugin.publish
-      parameters:
-      - description: Plugin ID
-        in: path
-        name: plugin_id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/internal_api_handler_plugin.publishRequest'
-                description: Version and placements
-                summary: body
-        description: Version and placements
-        required: true
-      responses:
-        '201':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_versionResponse'
-          description: Created
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: CONFLICT
-        '413':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: PAYLOAD_TOO_LARGE
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - Bearer: []
-      summary: Publish plugin version
-      tags:
-      - plugin
-  /plugins/{plugin_id}/versions:
-    get:
-      description: List immutable published snapshots for a visible Plugin using offset
-        pagination.
-      operationId: plugin.version.list
-      parameters:
-      - description: Plugin ID
-        in: path
-        name: plugin_id
-        required: true
-        schema:
-          type: string
-      - description: Page number, default 1
-        in: query
-        name: page
-        schema:
-          type: integer
-      - description: Page size, default 20, max 100
-        in: query
-        name: page_size
-        schema:
-          type: integer
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_versionResponse'
-          description: OK
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - Bearer: []
-      summary: List plugin versions
-      tags:
-      - plugin
-  /plugins/attachments:
-    post:
-      description: Create a server-scoped object key and short-lived PUT target without
-        modifying a Plugin.
-      operationId: plugin.attachment.create
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/internal_api_handler_plugin.attachmentUploadRequest'
-                description: Attachment metadata
-                summary: body
-        description: Attachment metadata
-        required: true
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_attachmentUploadResponse'
-          description: OK
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '413':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: PAYLOAD_TOO_LARGE
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - Bearer: []
-      summary: Initialize plugin attachment upload
       tags:
       - plugin
   /session:

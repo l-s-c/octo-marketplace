@@ -19,6 +19,7 @@ import (
 	marketmiddleware "github.com/Mininglamp-OSS/octo-marketplace/internal/middleware"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 	pluginsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/plugin"
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/service/plugin/pluginid"
 	"github.com/gin-gonic/gin"
 )
 
@@ -27,12 +28,10 @@ const maxBodyBytes = 3 << 20
 // Service is the handler-facing boundary over the unified Plugin service.
 type Service interface {
 	List(context.Context, pluginsvc.Caller, pluginsvc.ListParams) ([]model.Plugin, int64, error)
-	Detail(context.Context, pluginsvc.Caller, string) (*pluginsvc.Detail, error)
+	Detail(context.Context, pluginsvc.Caller, string, bool) (*pluginsvc.Detail, error)
 	Create(context.Context, pluginsvc.Caller, pluginsvc.WriteRequest) (*pluginsvc.Detail, error)
 	Update(context.Context, pluginsvc.Caller, string, pluginsvc.WriteRequest) (*pluginsvc.Detail, error)
-	Delete(context.Context, pluginsvc.Caller, string) error
 	ListAuditLogs(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginAuditLog, int64, error)
-	ListVersions(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginVersion, int64, error)
 	Publish(context.Context, pluginsvc.Caller, string, pluginsvc.PublishRequest) (*model.PluginVersion, error)
 	Duplicate(context.Context, pluginsvc.Caller, string, string) (*model.Plugin, error)
 	InitAttachmentUpload(context.Context, pluginsvc.Caller, string, string, int64) (*pluginsvc.AttachmentUpload, error)
@@ -62,45 +61,48 @@ func New(svc Service, categories ...CategoryService) *Handler {
 
 func (h *Handler) Register(rg *gin.RouterGroup) {
 	rg.GET("/plugins", h.List)
-	rg.POST("/plugins", h.Create)
-	rg.GET("/plugins/:plugin_id", h.Get)
-	rg.PATCH("/plugins/:plugin_id", h.Update)
-	rg.DELETE("/plugins/:plugin_id", h.Delete)
-	rg.GET("/plugins/:plugin_id/audit_logs", h.ListAuditLogs)
-	rg.GET("/plugins/:plugin_id/versions", h.ListVersions)
-	rg.POST("/plugins/:plugin_id/publish", h.Publish)
-	rg.POST("/plugins/:plugin_id/duplicate", h.Duplicate)
-	rg.POST("/plugins/attachments", h.InitAttachmentUpload)
-	rg.GET("/plugins/:plugin_id/attachments/_download", h.DownloadAttachment)
-	rg.GET("/plugins/:plugin_id/archive", h.DownloadArchive)
 	rg.GET("/plugin_categories", h.ListCategories)
+	internal := rg.Group("/internal/plugins")
+	internal.GET("/detail", h.Get)
+	internal.POST("/upsert", h.Upsert)
+	internal.POST("/duplicate", h.Duplicate)
+	internal.GET("/audit_logs", h.ListAuditLogs)
+	internal.GET("/archive", h.DownloadArchive)
+	internal.POST("/attachment/upload", h.InitAttachmentUpload)
+	internal.GET("/attachment/download", h.DownloadAttachment)
+	internal.POST("/publish", h.Publish)
 }
 
 type relationRequest struct {
 	TargetPluginID string          `json:"target_plugin_id"`
-	Type           string          `json:"type"`
+	RelationType   string          `json:"relation_type"`
 	SortOrder      int             `json:"sort_order"`
 	Data           json.RawMessage `json:"data,omitempty" swaggertype:"object"`
 }
 
-type writeRequest struct {
-	Name       string                 `json:"name"`
-	Type       model.PluginType       `json:"type"`
-	CategoryID *string                `json:"category_id,omitempty"`
-	Tags       []string               `json:"tags"`
-	Publisher  string                 `json:"publisher,omitempty"`
-	Visibility model.PluginVisibility `json:"visibility"`
-	Manifest   json.RawMessage        `json:"manifest" swaggertype:"object"`
-	Package    json.RawMessage        `json:"package" swaggertype:"object"`
-	Relations  []relationRequest      `json:"relations,omitempty"`
+type pluginWriteRequest struct {
+	PluginID     string                 `json:"plugin_id,omitempty"`
+	PluginName   string                 `json:"plugin_name"`
+	PluginType   model.PluginType       `json:"plugin_type"`
+	CategoryID   *string                `json:"category_id,omitempty"`
+	Tags         []string               `json:"tags"`
+	Publisher    string                 `json:"publisher,omitempty"`
+	Visibility   model.PluginVisibility `json:"visibility"`
+	ManifestJSON json.RawMessage        `json:"manifest_json" swaggertype:"object"`
+	PluginJSON   json.RawMessage        `json:"plugin_json" swaggertype:"object"`
 }
 
-func (r writeRequest) serviceRequest() pluginsvc.WriteRequest {
+type upsertRequest struct {
+	Plugin    pluginWriteRequest `json:"plugin"`
+	Relations []relationRequest  `json:"relations"`
+}
+
+func (r upsertRequest) serviceRequest() pluginsvc.WriteRequest {
 	relations := make([]pluginsvc.RelationRequest, len(r.Relations))
 	for i, x := range r.Relations {
-		relations[i] = pluginsvc.RelationRequest{TargetPluginID: x.TargetPluginID, Type: x.Type, SortOrder: x.SortOrder, Data: x.Data}
+		relations[i] = pluginsvc.RelationRequest{TargetPluginID: x.TargetPluginID, Type: x.RelationType, SortOrder: x.SortOrder, Data: x.Data}
 	}
-	return pluginsvc.WriteRequest{Name: r.Name, Type: r.Type, CategoryID: r.CategoryID, Tags: rawJSON(r.Tags), Publisher: r.Publisher, Visibility: r.Visibility, Manifest: r.Manifest, Package: r.Package, Relations: relations}
+	return pluginsvc.WriteRequest{Name: r.Plugin.PluginName, Type: r.Plugin.PluginType, CategoryID: r.Plugin.CategoryID, Tags: rawJSON(r.Plugin.Tags), Publisher: r.Plugin.Publisher, Visibility: r.Plugin.Visibility, Manifest: r.Plugin.ManifestJSON, Package: r.Plugin.PluginJSON, Relations: relations}
 }
 
 type placementRequest struct {
@@ -111,13 +113,15 @@ type placementRequest struct {
 }
 
 type publishRequest struct {
+	PluginID   string             `json:"plugin_id"`
 	Version    string             `json:"version"`
 	Changelog  *string            `json:"changelog,omitempty"`
 	Placements []placementRequest `json:"placements,omitempty"`
 }
 
 type duplicateRequest struct {
-	Name string `json:"name,omitempty"`
+	SourcePluginID string `json:"source_plugin_id"`
+	PluginName     string `json:"plugin_name,omitempty"`
 }
 
 type attachmentUploadRequest struct {
@@ -136,8 +140,8 @@ type attachmentUploadResponse struct {
 
 type pluginResponse struct {
 	PluginID         string                 `json:"plugin_id"`
-	Name             string                 `json:"name"`
-	Type             model.PluginType       `json:"type"`
+	PluginName       string                 `json:"plugin_name"`
+	PluginType       model.PluginType       `json:"plugin_type"`
 	CategoryID       *string                `json:"category_id,omitempty"`
 	Tags             []string               `json:"tags"`
 	Publisher        string                 `json:"publisher,omitempty"`
@@ -148,8 +152,8 @@ type pluginResponse struct {
 	CreatedByType    string                 `json:"created_by_type"`
 	CreatedByBotID   *string                `json:"created_by_bot_id,omitempty"`
 	CreatedByBotName *string                `json:"created_by_bot_name,omitempty"`
-	Manifest         json.RawMessage        `json:"manifest" swaggertype:"object"`
-	Package          json.RawMessage        `json:"package" swaggertype:"object"`
+	ManifestJSON     json.RawMessage        `json:"manifest_json" swaggertype:"object"`
+	PluginJSON       json.RawMessage        `json:"plugin_json" swaggertype:"object"`
 	ManifestHash     string                 `json:"manifest_hash"`
 	PluginHash       string                 `json:"plugin_hash"`
 	CurrentVersionID *string                `json:"current_version_id,omitempty"`
@@ -162,7 +166,7 @@ type relationResponse struct {
 	RelationID     string          `json:"relation_id"`
 	SourcePluginID string          `json:"source_plugin_id"`
 	TargetPluginID string          `json:"target_plugin_id"`
-	Type           string          `json:"type"`
+	RelationType   string          `json:"relation_type"`
 	SortOrder      int             `json:"sort_order"`
 	Data           json.RawMessage `json:"data,omitempty" swaggertype:"object"`
 }
@@ -217,12 +221,10 @@ type categoryResponse struct {
 // @Accept json
 // @Produce json
 // @Security Bearer
-// @Param placement_code query string false "Marketplace placement code"
-// @Param type query string false "Plugin type" Enums(expert,expert_team,skill,connector)
+// @Param scene_code query string true "Marketplace scene code"
+// @Param plugin_type query string true "Plugin type" Enums(expert,expert_team,skill,connector)
 // @Param category_id query string false "Category ID"
-// @Param tag query string false "Exact tag"
-// @Param keyword query string false "Name search keyword"
-// @Param mine query bool false "Restrict to Plugins owned by the caller"
+// @Param q query string false "Plugin name search query"
 // @Param sort query string false "Sort order" Enums(newest,oldest,name,placement)
 // @Param page query int false "Page number, default 1"
 // @Param page_size query int false "Page size, default 20, max 100"
@@ -244,16 +246,17 @@ func (h *Handler) List(c *gin.Context) {
 		validation(c, "pagination")
 		return
 	}
-	mine := false
-	if raw, present := c.GetQuery("mine"); present {
-		parsed, err := strconv.ParseBool(raw)
-		if err != nil {
-			validation(c, "mine")
-			return
-		}
-		mine = parsed
+	sceneCode := strings.TrimSpace(c.Query("scene_code"))
+	if sceneCode == "" {
+		validation(c, "scene_code")
+		return
 	}
-	items, total, err := h.svc.List(c.Request.Context(), caller, pluginsvc.ListParams{PlacementCode: c.Query("placement_code"), Type: model.PluginType(c.Query("type")), CategoryID: c.Query("category_id"), Tag: c.Query("tag"), Keyword: c.Query("keyword"), Mine: mine, Sort: c.Query("sort"), Limit: pageSize, Offset: (page - 1) * pageSize})
+	pluginType := model.PluginType(c.Query("plugin_type"))
+	if pluginType == "" {
+		validation(c, "plugin_type")
+		return
+	}
+	items, total, err := h.svc.List(c.Request.Context(), caller, pluginsvc.ListParams{PlacementCode: sceneCode, Type: pluginType, CategoryID: c.Query("category_id"), Keyword: c.Query("q"), Sort: c.Query("sort"), Limit: pageSize, Offset: (page - 1) * pageSize})
 	if err != nil {
 		writeServiceError(c, err, "plugin.list")
 		return
@@ -265,42 +268,6 @@ func (h *Handler) List(c *gin.Context) {
 	apiresponse.Offset(c, out, int(total), page, pageSize)
 }
 
-// Create godoc
-// @Summary Create plugin
-// @Description Create a Plugin owned by the authenticated caller in the current Space.
-// @Tags plugin
-// @ID plugin.create
-// @Accept json
-// @Produce json
-// @Security Bearer
-// @Param body body writeRequest true "Plugin current state"
-// @Success 201 {object} apiresponse.Data[detailResponse]
-// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
-// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
-// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
-// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
-// @Failure 409 {object} apiresponse.Error "CONFLICT"
-// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
-// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /plugins [post]
-func (h *Handler) Create(c *gin.Context) {
-	caller, ok := caller(c)
-	if !ok {
-		unauthorized(c)
-		return
-	}
-	var req writeRequest
-	if !decode(c, &req) {
-		return
-	}
-	v, err := h.svc.Create(c.Request.Context(), caller, req.serviceRequest())
-	if err != nil {
-		writeServiceError(c, err, "plugin.create")
-		return
-	}
-	apiresponse.Created(c, detailDTO(v))
-}
-
 // Get godoc
 // @Summary Get plugin
 // @Description Return one Plugin and its visible one-level relations without leaking cross-Space existence.
@@ -309,21 +276,31 @@ func (h *Handler) Create(c *gin.Context) {
 // @Accept json
 // @Produce json
 // @Security Bearer
-// @Param plugin_id path string true "Plugin ID"
+// @Param plugin_id query string true "Plugin ID"
+// @Param include_relations query bool false "Include one-level relations (default true)"
 // @Success 200 {object} apiresponse.Data[detailResponse]
 // @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
 // @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /plugins/{plugin_id} [get]
+// @Router /internal/plugins/detail [get]
 func (h *Handler) Get(c *gin.Context) {
 	caller, ok := caller(c)
 	if !ok {
 		unauthorized(c)
 		return
 	}
-	v, err := h.svc.Detail(c.Request.Context(), caller, c.Param("plugin_id"))
+	includeRelations := true
+	if raw, present := c.GetQuery("include_relations"); present {
+		var err error
+		includeRelations, err = strconv.ParseBool(raw)
+		if err != nil {
+			validation(c, "include_relations")
+			return
+		}
+	}
+	v, err := h.svc.Detail(c.Request.Context(), caller, c.Query("plugin_id"), includeRelations)
 	if err != nil {
 		writeServiceError(c, err, "plugin.get")
 		return
@@ -331,16 +308,15 @@ func (h *Handler) Get(c *gin.Context) {
 	apiresponse.OK(c, detailDTO(v))
 }
 
-// Update godoc
-// @Summary Update plugin
-// @Description Replace the mutable current-state fields of a caller-owned Plugin; immutable identity fields remain server-derived.
+// Upsert godoc
+// @Summary Upsert plugin
+// @Description Create or replace a Plugin from {plugin,relations}; owner and Space remain server-derived.
 // @Tags plugin
-// @ID plugin.update
+// @ID plugin.upsert
 // @Accept json
 // @Produce json
 // @Security Bearer
-// @Param plugin_id path string true "Plugin ID"
-// @Param body body writeRequest true "Complete mutable Plugin state"
+// @Param body body upsertRequest true "Plugin current state and relations"
 // @Success 200 {object} apiresponse.Data[detailResponse]
 // @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
 // @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
@@ -349,53 +325,31 @@ func (h *Handler) Get(c *gin.Context) {
 // @Failure 409 {object} apiresponse.Error "CONFLICT"
 // @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /plugins/{plugin_id} [patch]
-func (h *Handler) Update(c *gin.Context) {
+// @Router /internal/plugins/upsert [post]
+func (h *Handler) Upsert(c *gin.Context) {
 	caller, ok := caller(c)
 	if !ok {
 		unauthorized(c)
 		return
 	}
-	var req writeRequest
+	var req upsertRequest
 	if !decode(c, &req) {
 		return
 	}
-	v, err := h.svc.Update(c.Request.Context(), caller, c.Param("plugin_id"), req.serviceRequest())
+	var (
+		v   *pluginsvc.Detail
+		err error
+	)
+	if strings.TrimSpace(req.Plugin.PluginID) == "" {
+		v, err = h.svc.Create(c.Request.Context(), caller, req.serviceRequest())
+	} else {
+		v, err = h.svc.Update(c.Request.Context(), caller, req.Plugin.PluginID, req.serviceRequest())
+	}
 	if err != nil {
-		writeServiceError(c, err, "plugin.update")
+		writeServiceError(c, err, "plugin.upsert")
 		return
 	}
 	apiresponse.OK(c, detailDTO(v))
-}
-
-// Delete godoc
-// @Summary Delete plugin
-// @Description Soft-delete a caller-owned Plugin and append an audit record; repeated deletion returns not found.
-// @Tags plugin
-// @ID plugin.delete
-// @Accept json
-// @Produce json
-// @Security Bearer
-// @Param plugin_id path string true "Plugin ID"
-// @Success 200 {object} apiresponse.Data[apiresponse.EmptyResp]
-// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
-// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
-// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
-// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
-// @Failure 409 {object} apiresponse.Error "CONFLICT"
-// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /plugins/{plugin_id} [delete]
-func (h *Handler) Delete(c *gin.Context) {
-	caller, ok := caller(c)
-	if !ok {
-		unauthorized(c)
-		return
-	}
-	if err := h.svc.Delete(c.Request.Context(), caller, c.Param("plugin_id")); err != nil {
-		writeServiceError(c, err, "plugin.delete")
-		return
-	}
-	apiresponse.Empty(c)
 }
 
 // ListAuditLogs godoc
@@ -406,7 +360,7 @@ func (h *Handler) Delete(c *gin.Context) {
 // @Accept json
 // @Produce json
 // @Security Bearer
-// @Param plugin_id path string true "Plugin ID"
+// @Param plugin_id query string true "Plugin ID"
 // @Param page query int false "Page number, default 1"
 // @Param page_size query int false "Page size, default 20, max 100"
 // @Success 200 {object} apiresponse.OffsetList[auditLogResponse]
@@ -415,7 +369,7 @@ func (h *Handler) Delete(c *gin.Context) {
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /plugins/{plugin_id}/audit_logs [get]
+// @Router /internal/plugins/audit_logs [get]
 func (h *Handler) ListAuditLogs(c *gin.Context) {
 	caller, ok := caller(c)
 	if !ok {
@@ -427,7 +381,7 @@ func (h *Handler) ListAuditLogs(c *gin.Context) {
 		validation(c, "pagination")
 		return
 	}
-	items, total, err := h.svc.ListAuditLogs(c.Request.Context(), caller, c.Param("plugin_id"), size, (page-1)*size)
+	items, total, err := h.svc.ListAuditLogs(c.Request.Context(), caller, c.Query("plugin_id"), size, (page-1)*size)
 	if err != nil {
 		writeServiceError(c, err, "plugin.audit_log.list")
 		return
@@ -435,47 +389,6 @@ func (h *Handler) ListAuditLogs(c *gin.Context) {
 	out := make([]auditLogResponse, len(items))
 	for i, x := range items {
 		out[i] = auditDTO(x)
-	}
-	apiresponse.Offset(c, out, int(total), page, size)
-}
-
-// ListVersions godoc
-// @Summary List plugin versions
-// @Description List immutable published snapshots for a visible Plugin using offset pagination.
-// @Tags plugin
-// @ID plugin.version.list
-// @Accept json
-// @Produce json
-// @Security Bearer
-// @Param plugin_id path string true "Plugin ID"
-// @Param page query int false "Page number, default 1"
-// @Param page_size query int false "Page size, default 20, max 100"
-// @Success 200 {object} apiresponse.OffsetList[versionResponse]
-// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
-// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
-// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
-// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
-// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /plugins/{plugin_id}/versions [get]
-func (h *Handler) ListVersions(c *gin.Context) {
-	caller, ok := caller(c)
-	if !ok {
-		unauthorized(c)
-		return
-	}
-	page, size, ok := pagination(c)
-	if !ok {
-		validation(c, "pagination")
-		return
-	}
-	items, total, err := h.svc.ListVersions(c.Request.Context(), caller, c.Param("plugin_id"), size, (page-1)*size)
-	if err != nil {
-		writeServiceError(c, err, "plugin.version.list")
-		return
-	}
-	out := make([]versionResponse, len(items))
-	for i, x := range items {
-		out[i] = versionDTO(x)
 	}
 	apiresponse.Offset(c, out, int(total), page, size)
 }
@@ -488,8 +401,7 @@ func (h *Handler) ListVersions(c *gin.Context) {
 // @Accept json
 // @Produce json
 // @Security Bearer
-// @Param plugin_id path string true "Plugin ID"
-// @Param body body publishRequest true "Version and placements"
+// @Param body body publishRequest true "Plugin ID, version, and placements"
 // @Success 201 {object} apiresponse.Data[versionResponse]
 // @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
 // @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
@@ -498,7 +410,7 @@ func (h *Handler) ListVersions(c *gin.Context) {
 // @Failure 409 {object} apiresponse.Error "CONFLICT"
 // @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /plugins/{plugin_id}/publish [post]
+// @Router /internal/plugins/publish [post]
 func (h *Handler) Publish(c *gin.Context) {
 	caller, ok := caller(c)
 	if !ok {
@@ -513,7 +425,7 @@ func (h *Handler) Publish(c *gin.Context) {
 	for i, x := range req.Placements {
 		placements[i] = pluginsvc.PlacementRequest{PlacementCode: x.PlacementCode, CategoryID: x.CategoryID, Visible: x.IsVisible, SortOrder: x.SortOrder}
 	}
-	v, err := h.svc.Publish(c.Request.Context(), caller, c.Param("plugin_id"), pluginsvc.PublishRequest{Version: req.Version, Changelog: req.Changelog, Placements: placements})
+	v, err := h.svc.Publish(c.Request.Context(), caller, req.PluginID, pluginsvc.PublishRequest{Version: req.Version, Changelog: req.Changelog, Placements: placements})
 	if err != nil {
 		writeServiceError(c, err, "plugin.publish")
 		return
@@ -529,8 +441,7 @@ func (h *Handler) Publish(c *gin.Context) {
 // @Accept json
 // @Produce json
 // @Security Bearer
-// @Param plugin_id path string true "Source Plugin ID"
-// @Param body body duplicateRequest false "Optional duplicate name"
+// @Param body body duplicateRequest true "Source Plugin ID and optional Plugin name"
 // @Success 201 {object} apiresponse.Data[pluginResponse]
 // @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
 // @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
@@ -539,7 +450,7 @@ func (h *Handler) Publish(c *gin.Context) {
 // @Failure 409 {object} apiresponse.Error "CONFLICT"
 // @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /plugins/{plugin_id}/duplicate [post]
+// @Router /internal/plugins/duplicate [post]
 func (h *Handler) Duplicate(c *gin.Context) {
 	caller, ok := caller(c)
 	if !ok {
@@ -547,10 +458,10 @@ func (h *Handler) Duplicate(c *gin.Context) {
 		return
 	}
 	var req duplicateRequest
-	if c.Request.ContentLength != 0 && !decode(c, &req) {
+	if !decode(c, &req) {
 		return
 	}
-	v, err := h.svc.Duplicate(c.Request.Context(), caller, c.Param("plugin_id"), req.Name)
+	v, err := h.svc.Duplicate(c.Request.Context(), caller, req.SourcePluginID, req.PluginName)
 	if err != nil {
 		writeServiceError(c, err, "plugin.duplicate")
 		return
@@ -574,7 +485,7 @@ func (h *Handler) Duplicate(c *gin.Context) {
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /plugins/attachments [post]
+// @Router /internal/plugins/attachment/upload [post]
 func (h *Handler) InitAttachmentUpload(c *gin.Context) {
 	caller, ok := caller(c)
 	if !ok {
@@ -607,7 +518,7 @@ func (h *Handler) InitAttachmentUpload(c *gin.Context) {
 // @Accept json
 // @Produce application/octet-stream
 // @Security Bearer
-// @Param plugin_id path string true "Plugin ID"
+// @Param plugin_id query string true "Plugin ID"
 // @Param object_key query string true "Package-referenced object key"
 // @Success 200 {file} binary "Attachment bytes"
 // @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
@@ -615,14 +526,14 @@ func (h *Handler) InitAttachmentUpload(c *gin.Context) {
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /plugins/{plugin_id}/attachments/_download [get]
+// @Router /internal/plugins/attachment/download [get]
 func (h *Handler) DownloadAttachment(c *gin.Context) {
 	caller, ok := caller(c)
 	if !ok {
 		unauthorized(c)
 		return
 	}
-	result, err := h.svc.OpenAttachment(c.Request.Context(), caller, c.Param("plugin_id"), c.Query("object_key"))
+	result, err := h.svc.OpenAttachment(c.Request.Context(), caller, c.Query("plugin_id"), c.Query("object_key"))
 	if err != nil {
 		writeServiceError(c, err, "plugin.attachment.download")
 		return
@@ -646,7 +557,7 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 // @Accept json
 // @Produce application/zip
 // @Security Bearer
-// @Param plugin_id path string true "Plugin ID"
+// @Param plugin_id query string true "Plugin ID"
 // @Param version query string false "Immutable Plugin version"
 // @Success 200 {file} binary "Plugin ZIP archive"
 // @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
@@ -655,20 +566,21 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /plugins/{plugin_id}/archive [get]
+// @Router /internal/plugins/archive [get]
 func (h *Handler) DownloadArchive(c *gin.Context) {
 	caller, ok := caller(c)
 	if !ok {
 		unauthorized(c)
 		return
 	}
-	archive, err := h.svc.PrepareArchive(c.Request.Context(), caller, c.Param("plugin_id"), c.Query("version"))
+	pluginID := c.Query("plugin_id")
+	archive, err := h.svc.PrepareArchive(c.Request.Context(), caller, pluginID, c.Query("version"))
 	if err != nil {
 		writeServiceError(c, err, "plugin.archive.download")
 		return
 	}
 	c.Header("Content-Type", "application/zip")
-	c.Header("Content-Disposition", contentDisposition(c.Param("plugin_id")+".zip"))
+	c.Header("Content-Disposition", contentDisposition(pluginID+".zip"))
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Status(http.StatusOK)
 	if err := h.svc.WriteArchive(c.Request.Context(), archive, c.Writer); err != nil {
@@ -684,8 +596,8 @@ func (h *Handler) DownloadArchive(c *gin.Context) {
 // @Accept json
 // @Produce json
 // @Security Bearer
-// @Param placement_code query string true "Marketplace placement code"
-// @Param type query string true "Plugin type" Enums(expert,expert_team,skill,connector)
+// @Param scene_code query string true "Marketplace scene code"
+// @Param plugin_type query string true "Plugin type" Enums(expert,expert_team,skill,connector)
 // @Success 200 {object} apiresponse.Data[[]categoryResponse]
 // @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
 // @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
@@ -699,13 +611,13 @@ func (h *Handler) ListCategories(c *gin.Context) {
 		unauthorized(c)
 		return
 	}
-	placement, typ := strings.TrimSpace(c.Query("placement_code")), model.PluginType(c.Query("type"))
+	placement, typ := strings.TrimSpace(c.Query("scene_code")), model.PluginType(c.Query("plugin_type"))
 	if placement == "" {
-		validation(c, "placement_code")
+		validation(c, "scene_code")
 		return
 	}
 	if typ == "" {
-		validation(c, "type")
+		validation(c, "plugin_type")
 		return
 	}
 	if h.categories == nil {
@@ -796,7 +708,7 @@ func pluginDTO(p *model.Plugin) pluginResponse {
 	if p == nil {
 		return pluginResponse{}
 	}
-	return pluginResponse{PluginID: p.ID, Name: p.Name, Type: p.Type, CategoryID: p.CategoryID, Tags: stringSlice(p.Tags), Publisher: p.Publisher, OwnerID: p.OwnerUID, SpaceID: p.SpaceID, Visibility: p.Visibility, CreatorName: p.CreatorName, CreatedByType: p.CreatedByType, CreatedByBotID: p.CreatedByBotUID, CreatedByBotName: p.CreatedByBotName, Manifest: normalizedObjectRaw(p.Manifest), Package: normalizedObjectRaw(p.Package), ManifestHash: p.ManifestHash, PluginHash: p.PluginHash, CurrentVersionID: p.CurrentVersionID, Status: p.Status, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
+	return pluginResponse{PluginID: wirePluginID(p.Type, p.ID), PluginName: p.Name, PluginType: p.Type, CategoryID: p.CategoryID, Tags: stringSlice(p.Tags), Publisher: p.Publisher, OwnerID: p.OwnerUID, SpaceID: p.SpaceID, Visibility: p.Visibility, CreatorName: p.CreatorName, CreatedByType: p.CreatedByType, CreatedByBotID: p.CreatedByBotUID, CreatedByBotName: p.CreatedByBotName, ManifestJSON: normalizedObjectRaw(p.Manifest), PluginJSON: normalizedObjectRaw(p.Package), ManifestHash: p.ManifestHash, PluginHash: p.PluginHash, CurrentVersionID: p.CurrentVersionID, Status: p.Status, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
 }
 func detailDTO(d *pluginsvc.Detail) detailResponse {
 	if d == nil {
@@ -804,10 +716,35 @@ func detailDTO(d *pluginsvc.Detail) detailResponse {
 	}
 	rels := make([]relationResponse, len(d.Relations))
 	for i, x := range d.Relations {
-		rels[i] = relationResponse{RelationID: x.ID, SourcePluginID: x.SourcePluginID, TargetPluginID: x.TargetPluginID, Type: x.Type, SortOrder: x.SortOrder, Data: normalizedObjectRaw(x.Data)}
+		sourceType := x.SourcePluginType
+		if sourceType == "" && d.Plugin != nil && x.SourcePluginID == d.Plugin.ID {
+			sourceType = d.Plugin.Type
+		}
+		rels[i] = relationResponse{RelationID: x.ID, SourcePluginID: wirePluginID(sourceType, x.SourcePluginID), TargetPluginID: wirePluginID(x.TargetPluginType, x.TargetPluginID), RelationType: x.Type, SortOrder: x.SortOrder, Data: normalizedObjectRaw(x.Data)}
 	}
 	return detailResponse{Plugin: pluginDTO(d.Plugin), Relations: rels}
 }
+func wirePluginID(typ model.PluginType, storageID string) string {
+	var kind pluginid.Kind
+	switch typ {
+	case model.PluginTypeExpert:
+		kind = pluginid.Expert
+	case model.PluginTypeExpertTeam:
+		kind = pluginid.ExpertTeam
+	case model.PluginTypeSkill:
+		kind = pluginid.Skill
+	case model.PluginTypeConnector:
+		kind = pluginid.Connector
+	default:
+		return ""
+	}
+	encoded, err := pluginid.NewTopLevel(kind, storageID)
+	if err != nil {
+		return ""
+	}
+	return encoded.String()
+}
+
 func auditDTO(x model.PluginAuditLog) auditLogResponse {
 	return auditLogResponse{AuditLogID: x.ID, PluginID: x.PluginID, Action: x.Action, OperatorID: x.OperatorID, OperatorName: x.OperatorName, RequestID: x.RequestID, BeforeHash: x.BeforeHash, AfterHash: x.AfterHash, ManifestSnapshot: x.ManifestSnapshot, PluginSnapshot: x.PluginSnapshot, Remark: x.Remark, CreatedAt: x.CreatedAt}
 }

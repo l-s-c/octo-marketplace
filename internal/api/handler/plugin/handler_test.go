@@ -20,27 +20,28 @@ import (
 )
 
 type fakeService struct {
-	caller       pluginsvc.Caller
-	write        pluginsvc.WriteRequest
-	list         []model.Plugin
-	detail       *pluginsvc.Detail
-	err          error
-	upload       *pluginsvc.AttachmentUpload
-	download     *pluginsvc.AttachmentDownload
-	archive      *pluginsvc.Archive
-	archiveZip   []byte
-	audits       []model.PluginAuditLog
-	auditTotal   int64
-	versions     []model.PluginVersion
-	versionTotal int64
+	caller           pluginsvc.Caller
+	write            pluginsvc.WriteRequest
+	list             []model.Plugin
+	detail           *pluginsvc.Detail
+	includeRelations bool
+	err              error
+	upload           *pluginsvc.AttachmentUpload
+	download         *pluginsvc.AttachmentDownload
+	archive          *pluginsvc.Archive
+	archiveZip       []byte
+	audits           []model.PluginAuditLog
+	auditTotal       int64
+	versions         []model.PluginVersion
+	versionTotal     int64
 }
 
 func (f *fakeService) List(_ context.Context, c pluginsvc.Caller, _ pluginsvc.ListParams) ([]model.Plugin, int64, error) {
 	f.caller = c
 	return f.list, int64(len(f.list)), f.err
 }
-func (f *fakeService) Detail(_ context.Context, c pluginsvc.Caller, _ string) (*pluginsvc.Detail, error) {
-	f.caller = c
+func (f *fakeService) Detail(_ context.Context, c pluginsvc.Caller, _ string, includeRelations bool) (*pluginsvc.Detail, error) {
+	f.caller, f.includeRelations = c, includeRelations
 	return f.detail, f.err
 }
 func (f *fakeService) Create(_ context.Context, c pluginsvc.Caller, r pluginsvc.WriteRequest) (*pluginsvc.Detail, error) {
@@ -109,15 +110,15 @@ func testEngine(s Service) *gin.Engine {
 
 type interfaceKey string
 
-func TestCreateUsesServerDerivedIdentityAndStandardEnvelope(t *testing.T) {
+func TestUpsertUsesServerDerivedIdentityAndStandardEnvelope(t *testing.T) {
 	space := "space-a"
 	f := &fakeService{detail: &pluginsvc.Detail{Plugin: &model.Plugin{ID: "plugin-1", Name: "Demo", Type: model.PluginTypeSkill, OwnerUID: "user-1", SpaceID: &space, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`), CreatedAt: time.Now(), UpdatedAt: time.Now()}}}
-	body := []byte(`{"name":"Demo","type":"skill","visibility":"private","tags":[],"manifest":{},"package":{}}`)
+	body := []byte(`{"plugin":{"plugin_name":"Demo","plugin_type":"skill","visibility":"private","tags":[],"manifest_json":{},"plugin_json":{}},"relations":[]}`)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/plugins", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/plugins/upsert", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	testEngine(f).ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if f.caller.UID != "user-1" || f.caller.SpaceID != "space-a" || f.caller.Name != "Alice" {
@@ -128,11 +129,11 @@ func TestCreateUsesServerDerivedIdentityAndStandardEnvelope(t *testing.T) {
 	}
 }
 
-func TestCreateRejectsClientIdentityFields(t *testing.T) {
+func TestUpsertRejectsClientIdentityFields(t *testing.T) {
 	f := &fakeService{}
 	rec := httptest.NewRecorder()
-	body := []byte(`{"name":"Demo","type":"skill","visibility":"private","tags":[],"manifest":{},"package":{},"owner_id":"attacker"}`)
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/plugins", bytes.NewReader(body)))
+	body := []byte(`{"plugin":{"plugin_name":"Demo","plugin_type":"skill","visibility":"private","tags":[],"manifest_json":{},"plugin_json":{},"owner_id":"attacker"},"relations":[]}`)
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/internal/plugins/upsert", bytes.NewReader(body)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -144,7 +145,7 @@ func TestCreateRejectsClientIdentityFields(t *testing.T) {
 func TestCrossSpaceNotFoundIsSanitized(t *testing.T) {
 	f := &fakeService{err: pluginsvc.ErrNotFound}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins/other-space", nil))
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=other-space", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -156,7 +157,7 @@ func TestCrossSpaceNotFoundIsSanitized(t *testing.T) {
 func TestInternalErrorIsSanitized(t *testing.T) {
 	f := &fakeService{err: errors.New("sql: secret DSN")}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins/p1", nil))
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=p1", nil))
 	if rec.Code != http.StatusInternalServerError || bytes.Contains(rec.Body.Bytes(), []byte("secret DSN")) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -165,7 +166,7 @@ func TestInternalErrorIsSanitized(t *testing.T) {
 func TestAttachmentUploadReturnsStableKeyAndPresignedTarget(t *testing.T) {
 	f := &fakeService{upload: &pluginsvc.AttachmentUpload{ObjectKey: "plugins/space-a/attachments/id.bin", UploadURL: "https://upload.invalid/signed", Headers: http.Header{"Content-Type": []string{"application/octet-stream"}}, ExpiresIn: 3600}}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/attachments", strings.NewReader(`{"file_name":"x.bin","file_size":4,"content_type":"application/octet-stream"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/plugins/attachment/upload", strings.NewReader(`{"file_name":"x.bin","file_size":4,"content_type":"application/octet-stream"}`))
 	req.Header.Set("Content-Type", "application/json")
 	testEngine(f).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"object_key":"plugins/space-a/attachments/id.bin"`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"method":"PUT"`)) {
@@ -179,7 +180,7 @@ func TestAttachmentUploadReturnsStableKeyAndPresignedTarget(t *testing.T) {
 func TestAttachmentDownloadStreamsSafeHeaders(t *testing.T) {
 	f := &fakeService{download: &pluginsvc.AttachmentDownload{Body: io.NopCloser(strings.NewReader("data")), Path: "dir/evil\r\nX-Test.txt", ContentType: "text/plain", Size: 4}}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins/p1/attachments/_download?object_key=plugins%2Fspace-a%2Fattachments%2Fid", nil))
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/attachment/download?plugin_id=p1&object_key=plugins%2Fspace-a%2Fattachments%2Fid", nil))
 	if rec.Code != http.StatusOK || rec.Body.String() != "data" || rec.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("status=%d headers=%#v body=%q", rec.Code, rec.Header(), rec.Body.String())
 	}
@@ -191,7 +192,7 @@ func TestAttachmentDownloadStreamsSafeHeaders(t *testing.T) {
 func TestArchivePreflightErrorsRemainSanitizedJSON(t *testing.T) {
 	f := &fakeService{err: errors.New("storage path /secret/key")}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins/p1/archive", nil))
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/archive?plugin_id=p1", nil))
 	if rec.Code != http.StatusInternalServerError || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") || strings.Contains(rec.Body.String(), "/secret/key") {
 		t.Fatalf("status=%d headers=%#v body=%s", rec.Code, rec.Header(), rec.Body.String())
 	}
@@ -203,8 +204,7 @@ func TestHistoryListsUseExactRepositoryTotals(t *testing.T) {
 		url  string
 		fake *fakeService
 	}{
-		{name: "audits", url: "/api/v1/plugins/p1/audit_logs?page=2&page_size=10", fake: &fakeService{audits: []model.PluginAuditLog{{ID: "a1"}}, auditTotal: 37}},
-		{name: "versions", url: "/api/v1/plugins/p1/versions?page=3&page_size=10", fake: &fakeService{versions: []model.PluginVersion{{ID: "v1", Relations: json.RawMessage(`[]`)}}, versionTotal: 42}},
+		{name: "audits", url: "/api/v1/internal/plugins/audit_logs?plugin_id=p1&page=2&page_size=10", fake: &fakeService{audits: []model.PluginAuditLog{{ID: "a1"}}, auditTotal: 37}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -221,30 +221,55 @@ func TestHistoryListsUseExactRepositoryTotals(t *testing.T) {
 			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 				t.Fatal(err)
 			}
-			want := 37
-			if tt.name == "versions" {
-				want = 42
-			}
-			if body.Pagination.Total != want {
-				t.Fatalf("pagination.total=%d want=%d body=%s", body.Pagination.Total, want, rec.Body.String())
+			if body.Pagination.Total != 37 {
+				t.Fatalf("pagination.total=%d want=37 body=%s", body.Pagination.Total, rec.Body.String())
 			}
 		})
 	}
 }
 
-func TestListRejectsMalformedMine(t *testing.T) {
+func TestListRequiresConfirmedQueryNames(t *testing.T) {
 	f := &fakeService{}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins?mine=definitely", nil))
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"field":"mine"`) {
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins?plugin_type=skill", nil))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"field":"scene_code"`) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDetailDefaultsRelationsAndSupportsFalse(t *testing.T) {
+	for _, tc := range []struct {
+		query string
+		want  bool
+	}{{query: "", want: true}, {query: "&include_relations=false", want: false}} {
+		f := &fakeService{detail: &pluginsvc.Detail{Plugin: &model.Plugin{}}}
+		rec := httptest.NewRecorder()
+		testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=p1"+tc.query, nil))
+		if rec.Code != http.StatusOK || f.includeRelations != tc.want {
+			t.Fatalf("query=%q status=%d include_relations=%v body=%s", tc.query, rec.Code, f.includeRelations, rec.Body.String())
+		}
+	}
+}
+
+func TestOldRESTRoutesAreNotRegistered(t *testing.T) {
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodPost, "/api/v1/plugins", strings.NewReader(`{}`)),
+		httptest.NewRequest(http.MethodGet, "/api/v1/plugins/p1", nil),
+		httptest.NewRequest(http.MethodPatch, "/api/v1/plugins/p1", strings.NewReader(`{}`)),
+		httptest.NewRequest(http.MethodDelete, "/api/v1/plugins/p1", nil),
+	} {
+		rec := httptest.NewRecorder()
+		testEngine(&fakeService{}).ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s %s status=%d", req.Method, req.URL.Path, rec.Code)
+		}
 	}
 }
 
 func TestListUsesOffsetEnvelope(t *testing.T) {
 	f := &fakeService{list: []model.Plugin{{ID: "p1", Name: "One"}}}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins?page=2&page_size=10", nil))
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins?scene_code=loop&plugin_type=skill&page=2&page_size=10", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}

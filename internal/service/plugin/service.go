@@ -169,13 +169,27 @@ func (s *Service) List(ctx context.Context, caller Caller, p ListParams) ([]mode
 	return items, total, mapStoreError(err)
 }
 
-func (s *Service) Detail(ctx context.Context, caller Caller, pluginID string) (*Detail, error) {
-	if validateCaller(caller) != nil || strings.TrimSpace(pluginID) == "" {
+func (s *Service) Detail(ctx context.Context, caller Caller, pluginID string, includeRelations bool) (*Detail, error) {
+	if validateCaller(caller) != nil {
 		return nil, ErrInvalidRequest
 	}
-	p, rels, err := s.repo.GetWithRelations(ctx, scope(caller), pluginID)
+	storageID, expectedType, err := parseWirePluginID(pluginID)
+	if err != nil {
+		return nil, err
+	}
+	p, rels, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
 	if err != nil {
 		return nil, mapStoreError(err)
+	}
+	if p.Type != expectedType {
+		return nil, ErrNotFound
+	}
+	if !includeRelations {
+		rels = []model.PluginRelation{}
+	} else {
+		for i := range rels {
+			rels[i].SourcePluginType = p.Type
+		}
 	}
 	return &Detail{Plugin: p, Relations: rels}, nil
 }
@@ -204,21 +218,22 @@ func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, re
 	if err := validateCaller(caller); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(pluginID) == "" {
-		return nil, ErrInvalidRequest
+	storageID, expectedType, err := parseWirePluginID(pluginID)
+	if err != nil {
+		return nil, err
 	}
-	old, _, err := s.repo.GetWithRelations(ctx, scope(caller), pluginID)
+	old, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
-	if old.OwnerUID != caller.UID || (old.SpaceID != nil && *old.SpaceID != caller.SpaceID) {
+	if old.Type != expectedType || old.OwnerUID != caller.UID || (old.SpaceID != nil && *old.SpaceID != caller.SpaceID) {
 		return nil, ErrNotFound
 	}
 	if req.Type != old.Type {
 		return nil, ErrInvalidRequest
 	}
 	now := s.now()
-	p, rels, err := s.buildWrite(ctx, caller, pluginID, req, now)
+	p, rels, err := s.buildWrite(ctx, caller, storageID, req, now)
 	if err != nil {
 		return nil, err
 	}
@@ -227,9 +242,9 @@ func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, re
 	p.CreatorName, p.CreatedByType = old.CreatorName, old.CreatedByType
 	p.CreatedByBotUID, p.CreatedByBotName = old.CreatedByBotUID, old.CreatedByBotName
 	for i := range rels {
-		rels[i].SourcePluginID = pluginID
+		rels[i].SourcePluginID = storageID
 	}
-	audit := s.audit(caller, pluginID, "update", old, p, now)
+	audit := s.audit(caller, storageID, "update", old, p, now)
 	if err := s.repo.Update(ctx, scope(caller), mutation(*p, rels, audit)); err != nil {
 		return nil, mapStoreError(err)
 	}
@@ -237,25 +252,43 @@ func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, re
 }
 
 func (s *Service) Delete(ctx context.Context, caller Caller, pluginID string) error {
-	if validateCaller(caller) != nil || strings.TrimSpace(pluginID) == "" {
+	if validateCaller(caller) != nil {
 		return ErrInvalidRequest
 	}
-	old, _, err := s.repo.GetWithRelations(ctx, scope(caller), pluginID)
+	storageID, expectedType, err := parseWirePluginID(pluginID)
+	if err != nil {
+		return err
+	}
+	old, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
 	if err != nil {
 		return mapStoreError(err)
 	}
-	if old.OwnerUID != caller.UID || (old.SpaceID != nil && *old.SpaceID != caller.SpaceID) {
+	if old.Type != expectedType || old.OwnerUID != caller.UID || (old.SpaceID != nil && *old.SpaceID != caller.SpaceID) {
 		return ErrNotFound
 	}
-	audit := s.audit(caller, pluginID, "delete", old, nil, s.now())
-	return mapStoreError(s.repo.Delete(ctx, scope(caller), pluginID, audit.OperatorID, audit.OperatorName, audit.RequestID, audit.Remark))
+	audit := s.audit(caller, storageID, "delete", old, nil, s.now())
+	return mapStoreError(s.repo.Delete(ctx, scope(caller), storageID, audit.OperatorID, audit.OperatorName, audit.RequestID, audit.Remark))
 }
 
 func (s *Service) ListAuditLogs(ctx context.Context, caller Caller, pluginID string, limit, offset int) ([]model.PluginAuditLog, int64, error) {
-	if validateReadPage(caller, pluginID, limit, offset) != nil {
+	if validateCaller(caller) != nil || limit < 0 || limit > maxListLimit || offset < 0 {
 		return nil, 0, ErrInvalidRequest
 	}
-	items, total, err := s.repo.ListAudits(ctx, scope(caller), pluginID, limit, offset)
+	storageID, expectedType, err := parseWirePluginID(pluginID)
+	if err != nil {
+		return nil, 0, err
+	}
+	p, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
+	if err != nil {
+		return nil, 0, mapStoreError(err)
+	}
+	if p.Type != expectedType {
+		return nil, 0, ErrNotFound
+	}
+	items, total, err := s.repo.ListAudits(ctx, scope(caller), storageID, limit, offset)
+	for i := range items {
+		items[i].PluginType = p.Type
+	}
 	return items, total, mapStoreError(err)
 }
 
@@ -365,8 +398,9 @@ func (s *Service) buildRelations(ctx context.Context, c Caller, source *model.Pl
 	out := make([]model.PluginRelation, 0, len(in))
 	seen := make(map[string]struct{}, len(in))
 	for _, r := range in {
-		targetID, typ := strings.TrimSpace(r.TargetPluginID), strings.TrimSpace(r.Type)
-		if targetID == "" || targetID == source.ID || !validRelationSource(typ, source.Type) {
+		targetID, expectedTargetType, err := parseWirePluginID(r.TargetPluginID)
+		typ := strings.TrimSpace(r.Type)
+		if err != nil || targetID == source.ID || !validRelationSource(typ, source.Type) {
 			return nil, ErrInvalidRequest
 		}
 		key := typ + "\x00" + targetID
@@ -378,7 +412,7 @@ func (s *Service) buildRelations(ctx context.Context, c Caller, source *model.Pl
 		if err != nil {
 			return nil, mapStoreError(err)
 		}
-		if !validRelationTarget(typ, target.Type) {
+		if target.Type != expectedTargetType || !validRelationTarget(typ, target.Type) {
 			return nil, ErrInvalidRequest
 		}
 		data, err := normalizeOptionalObject(r.Data)
@@ -390,7 +424,7 @@ func (s *Service) buildRelations(ctx context.Context, c Caller, source *model.Pl
 				return nil, err
 			}
 		}
-		out = append(out, model.PluginRelation{ID: s.id(), SourcePluginID: source.ID, TargetPluginID: targetID, Type: typ, SortOrder: r.SortOrder, Data: data, Status: 1, CreatedBy: c.UID, CreatedAt: now, UpdatedAt: now})
+		out = append(out, model.PluginRelation{ID: s.id(), SourcePluginID: source.ID, SourcePluginType: source.Type, TargetPluginID: targetID, TargetPluginType: target.Type, ExpectedTargetType: expectedTargetType, Type: typ, SortOrder: r.SortOrder, Data: data, Status: 1, CreatedBy: c.UID, CreatedAt: now, UpdatedAt: now})
 	}
 	return out, nil
 }

@@ -53,23 +53,27 @@ type Plugin struct {
 
 // PluginRelation is one directed, one-level composition edge.
 type PluginRelation struct {
-	ID             string
-	SourcePluginID string
-	TargetPluginID string
-	Type           string
-	SortOrder      int
-	Data           json.RawMessage
-	Status         int
-	CreatedBy      string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	DeletedAt      *time.Time
+	ID                 string
+	SourcePluginID     string
+	SourcePluginType   PluginType
+	TargetPluginID     string
+	TargetPluginType   PluginType
+	ExpectedTargetType PluginType
+	Type               string
+	SortOrder          int
+	Data               json.RawMessage
+	Status             int
+	CreatedBy          string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	DeletedAt          *time.Time
 }
 
 // PluginAuditLog is an append-only operation record.
 type PluginAuditLog struct {
 	ID               string
 	PluginID         string
+	PluginType       PluginType
 	Action           string
 	OperatorID       string
 	OperatorName     string
@@ -86,6 +90,7 @@ type PluginAuditLog struct {
 type PluginVersion struct {
 	ID           string
 	PluginID     string
+	PluginType   PluginType
 	Version      string
 	Manifest     json.RawMessage
 	Package      json.RawMessage

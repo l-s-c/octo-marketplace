@@ -221,6 +221,9 @@ func lockRelationTargets(ctx context.Context, tx *sql.Tx, scope Scope, sourceTyp
 			}
 			return err
 		}
+		if relation.ExpectedTargetType != "" && relation.ExpectedTargetType != targetType {
+			return ErrInvalidRelation
+		}
 		if !validPersistedRelation(relation.Type, sourceType, targetType) {
 			return ErrInvalidRelation
 		}

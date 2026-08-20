@@ -225,7 +225,7 @@ func TestCreateStampsTrustedIdentity(t *testing.T) {
 
 func TestCrossSpaceNotFoundPropagatesWithoutLeak(t *testing.T) {
 	f := &fakeStore{err: pluginrepo.ErrNotFound}
-	if _, err := fixedService(f).Detail(context.Background(), testCaller, "plugin-other"); !errors.Is(err, ErrNotFound) {
+	if _, err := fixedService(f).Detail(context.Background(), testCaller, "expert:plugin-other", true); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("detail err = %v", err)
 	}
 	if err := fixedService(f).Delete(context.Background(), testCaller, "plugin-other"); !errors.Is(err, ErrNotFound) {
@@ -236,7 +236,7 @@ func TestCrossSpaceNotFoundPropagatesWithoutLeak(t *testing.T) {
 func TestRelationSourceTargetValidation(t *testing.T) {
 	f := &fakeStore{plugins: map[string]*model.Plugin{"skill-1": {ID: "skill-1", Type: model.PluginTypeSkill}}}
 	r := validRequest()
-	r.Relations = []RelationRequest{{TargetPluginID: "skill-1", Type: "expert_skill"}}
+	r.Relations = []RelationRequest{{TargetPluginID: "skill:skill-1", Type: "expert_skill"}}
 	if _, err := fixedService(f).Create(context.Background(), testCaller, r); err != nil {
 		t.Fatalf("valid relation: %v", err)
 	}
