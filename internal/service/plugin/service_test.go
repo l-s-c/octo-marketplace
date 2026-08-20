@@ -20,7 +20,11 @@ type fakeStore struct {
 	createAudit   model.PluginAuditLog
 	update        *model.Plugin
 	deleteScope   pluginrepo.Scope
+	deleteID      string
+	auditID       string
+	versionID     string
 	publishParams pluginrepo.PublishParams
+	duplicateID   string
 	duplicate     model.Plugin
 	duplicateMeta pluginrepo.Mutation
 	audits        []model.PluginAuditLog
@@ -57,14 +61,16 @@ func (f *fakeStore) Update(_ context.Context, _ pluginrepo.Scope, m pluginrepo.M
 	f.update = &p
 	return f.err
 }
-func (f *fakeStore) Delete(_ context.Context, s pluginrepo.Scope, _, _, _, _ string, _ *string) error {
-	f.deleteScope = s
+func (f *fakeStore) Delete(_ context.Context, s pluginrepo.Scope, id, _, _, _ string, _ *string) error {
+	f.deleteScope, f.deleteID = s, id
 	return f.err
 }
-func (f *fakeStore) ListAudits(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginAuditLog, int64, error) {
+func (f *fakeStore) ListAudits(_ context.Context, _ pluginrepo.Scope, id string, _, _ int) ([]model.PluginAuditLog, int64, error) {
+	f.auditID = id
 	return f.audits, f.auditTotal, f.err
 }
-func (f *fakeStore) ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, int64, error) {
+func (f *fakeStore) ListVersions(_ context.Context, _ pluginrepo.Scope, id string, _, _ int) ([]model.PluginVersion, int64, error) {
+	f.versionID = id
 	return f.versions, f.versionTotal, f.err
 }
 func (f *fakeStore) GetVersion(_ context.Context, _ pluginrepo.Scope, pluginID, version string) (*model.PluginVersion, error) {
@@ -77,8 +83,8 @@ func (f *fakeStore) Publish(_ context.Context, _ pluginrepo.Scope, p pluginrepo.
 	f.publishParams = p
 	return &model.PluginVersion{ID: "version-new", PluginID: p.PluginID, Version: p.Version, Manifest: json.RawMessage(`{"stored":true}`), Relations: json.RawMessage(`[]`), CreatedBy: p.CreatedBy}, f.err
 }
-func (f *fakeStore) DuplicateGraph(_ context.Context, _ pluginrepo.Scope, _ string, p model.Plugin, m pluginrepo.Mutation) error {
-	f.duplicate, f.duplicateMeta = p, m
+func (f *fakeStore) DuplicateGraph(_ context.Context, _ pluginrepo.Scope, sourceID string, p model.Plugin, m pluginrepo.Mutation) error {
+	f.duplicateID, f.duplicate, f.duplicateMeta = sourceID, p, m
 	return f.err
 }
 

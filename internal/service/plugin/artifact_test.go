@@ -137,6 +137,16 @@ func TestOpenAttachmentRequiresExactPackageReferenceAndManagedPrefix(t *testing.
 	}
 }
 
+func TestArtifactEndpointsRejectWrongWireType(t *testing.T) {
+	svc := artifactService(`{"attachments":[]}`, &artifactStorage{})
+	if _, err := svc.OpenAttachment(context.Background(), testCaller, "expert:plugin-1", "object"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("OpenAttachment wrong type error = %v", err)
+	}
+	if _, err := svc.PrepareArchive(context.Background(), testCaller, "expert:plugin-1", ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("PrepareArchive wrong type error = %v", err)
+	}
+}
+
 func TestPrepareArchiveRejectsUnsafePathsKeysAndSymlinkConcepts(t *testing.T) {
 	key := "plugins/space-a/attachments/x"
 	tests := []string{

@@ -46,6 +46,40 @@ func TestDetailRejectsNonRowWireIDsBeforeRepository(t *testing.T) {
 	}
 }
 
+func TestActionEndpointsPassOnlyOpaqueStorageIDs(t *testing.T) {
+	store := &fakeStore{
+		plugins: map[string]*model.Plugin{
+			"opaque-1": {ID: "opaque-1", Name: "Original", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},
+		},
+		audits:   []model.PluginAuditLog{{PluginID: "opaque-1"}},
+		versions: []model.PluginVersion{{PluginID: "opaque-1"}},
+	}
+	svc := fixedService(store)
+	ctx := context.Background()
+
+	if err := svc.Delete(ctx, testCaller, "expert:opaque-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.ListAuditLogs(ctx, testCaller, "expert:opaque-1", 20, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.ListVersions(ctx, testCaller, "expert:opaque-1", 20, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Publish(ctx, testCaller, "expert:opaque-1", PublishRequest{Version: "1.0.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Duplicate(ctx, testCaller, "expert:opaque-1", "Copy"); err != nil {
+		t.Fatal(err)
+	}
+	if store.deleteID != "opaque-1" || store.auditID != "opaque-1" || store.versionID != "opaque-1" || store.publishParams.PluginID != "opaque-1" || store.duplicateID != "opaque-1" {
+		t.Fatalf("storage IDs: delete=%q audit=%q version=%q publish=%q duplicate=%q", store.deleteID, store.auditID, store.versionID, store.publishParams.PluginID, store.duplicateID)
+	}
+	if store.publishParams.ExpectedPluginType != model.PluginTypeExpert {
+		t.Fatalf("publish expected type = %q", store.publishParams.ExpectedPluginType)
+	}
+}
+
 func TestRelationWireTargetBecomesOpaqueAndKeepsExpectedType(t *testing.T) {
 	store := &fakeStore{plugins: map[string]*model.Plugin{
 		"target-1": {ID: "target-1", Type: model.PluginTypeSkill},

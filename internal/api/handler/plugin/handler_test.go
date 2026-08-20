@@ -288,7 +288,7 @@ func TestOldRESTRoutesAreNotRegistered(t *testing.T) {
 }
 
 func TestListUsesOffsetEnvelope(t *testing.T) {
-	f := &fakeService{list: []model.Plugin{{ID: "p1", Name: "One"}}}
+	f := &fakeService{list: []model.Plugin{{ID: "p1", Name: "One", Type: model.PluginTypeSkill}}}
 	rec := httptest.NewRecorder()
 	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins?scene_code=loop&plugin_type=skill&page=2&page_size=10", nil))
 	if rec.Code != http.StatusOK {
@@ -305,5 +305,8 @@ func TestListUsesOffsetEnvelope(t *testing.T) {
 	}
 	if body.Pagination.Page != 2 || body.Pagination.PageSize != 10 {
 		t.Fatalf("body=%s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"plugin_id":"skill:p1"`) {
+		t.Fatalf("list returned unprefixed ID: %s", rec.Body.String())
 	}
 }

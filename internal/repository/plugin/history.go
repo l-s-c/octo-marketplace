@@ -120,6 +120,7 @@ func scanPluginVersion(s interface{ Scan(...any) error }) (*model.PluginVersion,
 // PublishParams describes an immutable version and its replacement placements.
 type PublishParams struct {
 	PluginID, Version, CreatedBy, OperatorName, RequestID string
+	ExpectedPluginType                                    model.PluginType
 	Changelog                                             *string
 	Placements                                            []model.PluginPlacement
 }
@@ -135,6 +136,9 @@ func (r *Repo) Publish(ctx context.Context, scope Scope, p PublishParams) (*mode
 	current, err := getOwnedForUpdate(ctx, tx, scope, p.PluginID)
 	if err != nil {
 		return nil, err
+	}
+	if p.ExpectedPluginType != "" && current.Type != p.ExpectedPluginType {
+		return nil, ErrNotFound
 	}
 	if current.Type == model.PluginTypeConnector {
 		if err := rejectPersistedConnectorSecrets(current.Manifest, current.Package); err != nil {
@@ -153,7 +157,7 @@ func (r *Repo) Publish(ctx context.Context, scope Scope, p PublishParams) (*mode
 		return nil, err
 	}
 	now := r.now()
-	version := &model.PluginVersion{ID: r.id(), PluginID: p.PluginID, Version: p.Version, Manifest: cloneJSON(current.Manifest), Package: cloneJSON(current.Package), ManifestHash: current.ManifestHash, PluginHash: current.PluginHash, Relations: cloneJSON(relationJSON), Changelog: p.Changelog, CreatedBy: p.CreatedBy, CreatedAt: now}
+	version := &model.PluginVersion{ID: r.id(), PluginID: p.PluginID, PluginType: current.Type, Version: p.Version, Manifest: cloneJSON(current.Manifest), Package: cloneJSON(current.Package), ManifestHash: current.ManifestHash, PluginHash: current.PluginHash, Relations: cloneJSON(relationJSON), Changelog: p.Changelog, CreatedBy: p.CreatedBy, CreatedAt: now}
 	_, err = tx.ExecContext(ctx, `INSERT INTO plugin_versions (version_id,plugin_id,version,manifest_json,plugin_json,manifest_hash,plugin_hash,relations_json,changelog,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, version.ID, version.PluginID, version.Version, string(version.Manifest), string(version.Package), version.ManifestHash, version.PluginHash, string(version.Relations), version.Changelog, version.CreatedBy, version.CreatedAt)
 	if err != nil {
 		var me *mysql.MySQLError

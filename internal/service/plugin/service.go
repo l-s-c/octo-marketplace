@@ -328,13 +328,14 @@ func (s *Service) Publish(ctx context.Context, caller Caller, pluginID string, r
 		return nil, err
 	}
 	params := pluginrepo.PublishParams{
-		PluginID:     storageID,
-		Version:      strings.TrimSpace(req.Version),
-		CreatedBy:    caller.UID,
-		OperatorName: caller.Name,
-		RequestID:    caller.RequestID,
-		Changelog:    trimOptional(req.Changelog),
-		Placements:   placements,
+		PluginID:           storageID,
+		ExpectedPluginType: expectedType,
+		Version:            strings.TrimSpace(req.Version),
+		CreatedBy:          caller.UID,
+		OperatorName:       caller.Name,
+		RequestID:          caller.RequestID,
+		Changelog:          trimOptional(req.Changelog),
+		Placements:         placements,
 	}
 	version, err := s.repo.Publish(ctx, scope(caller), params)
 	if err != nil {
