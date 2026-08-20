@@ -148,7 +148,7 @@ func TestUpsertRejectsClientIdentityFields(t *testing.T) {
 func TestCrossSpaceNotFoundIsSanitized(t *testing.T) {
 	f := &fakeService{err: pluginsvc.ErrNotFound}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=other-space", nil))
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=expert:other-space", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -160,7 +160,7 @@ func TestCrossSpaceNotFoundIsSanitized(t *testing.T) {
 func TestInternalErrorIsSanitized(t *testing.T) {
 	f := &fakeService{err: errors.New("sql: secret DSN")}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=p1", nil))
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=skill:p1", nil))
 	if rec.Code != http.StatusInternalServerError || bytes.Contains(rec.Body.Bytes(), []byte("secret DSN")) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -183,7 +183,7 @@ func TestAttachmentUploadReturnsStableKeyAndPresignedTarget(t *testing.T) {
 func TestAttachmentDownloadStreamsSafeHeaders(t *testing.T) {
 	f := &fakeService{download: &pluginsvc.AttachmentDownload{Body: io.NopCloser(strings.NewReader("data")), Path: "dir/evil\r\nX-Test.txt", ContentType: "text/plain", Size: 4}}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/attachment/download?plugin_id=p1&object_key=plugins%2Fspace-a%2Fattachments%2Fid", nil))
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/attachment/download?plugin_id=skill:p1&object_key=plugins%2Fspace-a%2Fattachments%2Fid", nil))
 	if rec.Code != http.StatusOK || rec.Body.String() != "data" || rec.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("status=%d headers=%#v body=%q", rec.Code, rec.Header(), rec.Body.String())
 	}
@@ -195,7 +195,7 @@ func TestAttachmentDownloadStreamsSafeHeaders(t *testing.T) {
 func TestArchivePreflightErrorsRemainSanitizedJSON(t *testing.T) {
 	f := &fakeService{err: errors.New("storage path /secret/key")}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/archive?plugin_id=p1", nil))
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/archive?plugin_id=skill:p1", nil))
 	if rec.Code != http.StatusInternalServerError || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") || strings.Contains(rec.Body.String(), "/secret/key") {
 		t.Fatalf("status=%d headers=%#v body=%s", rec.Code, rec.Header(), rec.Body.String())
 	}
@@ -207,7 +207,7 @@ func TestHistoryListsUseExactRepositoryTotals(t *testing.T) {
 		url  string
 		fake *fakeService
 	}{
-		{name: "audits", url: "/api/v1/internal/plugins/audit_logs?plugin_id=p1&page=2&page_size=10", fake: &fakeService{audits: []model.PluginAuditLog{{ID: "a1"}}, auditTotal: 37}},
+		{name: "audits", url: "/api/v1/internal/plugins/audit_logs?plugin_id=skill:p1&page=2&page_size=10", fake: &fakeService{audits: []model.PluginAuditLog{{ID: "a1"}}, auditTotal: 37}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -265,7 +265,7 @@ func TestDetailDefaultsRelationsAndSupportsFalse(t *testing.T) {
 	}{{query: "", want: true}, {query: "&include_relations=false", want: false}} {
 		f := &fakeService{detail: &pluginsvc.Detail{Plugin: &model.Plugin{}}}
 		rec := httptest.NewRecorder()
-		testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=p1"+tc.query, nil))
+		testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=skill:p1"+tc.query, nil))
 		if rec.Code != http.StatusOK || f.includeRelations != tc.want {
 			t.Fatalf("query=%q status=%d include_relations=%v body=%s", tc.query, rec.Code, f.includeRelations, rec.Body.String())
 		}

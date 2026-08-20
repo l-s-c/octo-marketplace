@@ -34,6 +34,37 @@ func TestDetailParsesStorageIDAndTypeChecksPrefix(t *testing.T) {
 	}
 }
 
+func TestAllRowIDMethodsRejectRawIDsBeforeRepository(t *testing.T) {
+	store := &fakeStore{}
+	svc := fixedService(store)
+	ctx := context.Background()
+	checks := []struct {
+		name string
+		run  func() error
+	}{
+		{"detail", func() error { _, err := svc.Detail(ctx, testCaller, "raw-id", true); return err }},
+		{"update", func() error { _, err := svc.Update(ctx, testCaller, "raw-id", validRequest()); return err }},
+		{"delete", func() error { return svc.Delete(ctx, testCaller, "raw-id") }},
+		{"audit", func() error { _, _, err := svc.ListAuditLogs(ctx, testCaller, "raw-id", 20, 0); return err }},
+		{"versions", func() error { _, _, err := svc.ListVersions(ctx, testCaller, "raw-id", 20, 0); return err }},
+		{"publish", func() error {
+			_, err := svc.Publish(ctx, testCaller, "raw-id", PublishRequest{Version: "1.0.0"})
+			return err
+		}},
+		{"duplicate", func() error { _, err := svc.Duplicate(ctx, testCaller, "raw-id", "Copy"); return err }},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			if err := check.run(); !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("error = %v, want ErrInvalidRequest", err)
+			}
+		})
+	}
+	if len(store.getIDs) != 0 || store.deleteID != "" || store.auditID != "" || store.versionID != "" || store.publishParams.PluginID != "" || store.duplicateID != "" {
+		t.Fatalf("raw ID reached repository: %#v", store)
+	}
+}
+
 func TestDetailRejectsNonRowWireIDsBeforeRepository(t *testing.T) {
 	for _, wireID := range []string{"opaque-1", " skill:opaque-1", "expert_member:team-1:member-1"} {
 		store := &fakeStore{}

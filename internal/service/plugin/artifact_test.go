@@ -137,6 +137,16 @@ func TestOpenAttachmentRequiresExactPackageReferenceAndManagedPrefix(t *testing.
 	}
 }
 
+func TestArtifactEndpointsRejectRawIDs(t *testing.T) {
+	svc := artifactService(`{"attachments":[]}`, &artifactStorage{})
+	if _, err := svc.OpenAttachment(context.Background(), testCaller, "plugin-1", "object"); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("OpenAttachment raw ID error = %v", err)
+	}
+	if _, err := svc.PrepareArchive(context.Background(), testCaller, "plugin-1", ""); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("PrepareArchive raw ID error = %v", err)
+	}
+}
+
 func TestArtifactEndpointsRejectWrongWireType(t *testing.T) {
 	svc := artifactService(`{"attachments":[]}`, &artifactStorage{})
 	if _, err := svc.OpenAttachment(context.Background(), testCaller, "expert:plugin-1", "object"); !errors.Is(err, ErrNotFound) {
