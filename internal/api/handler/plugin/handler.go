@@ -749,7 +749,7 @@ func auditDTO(x model.PluginAuditLog) auditLogResponse {
 	return auditLogResponse{AuditLogID: x.ID, PluginID: wirePluginID(x.PluginType, x.PluginID), Action: x.Action, OperatorID: x.OperatorID, OperatorName: x.OperatorName, RequestID: x.RequestID, BeforeHash: x.BeforeHash, AfterHash: x.AfterHash, ManifestSnapshot: x.ManifestSnapshot, PluginSnapshot: x.PluginSnapshot, Remark: x.Remark, CreatedAt: x.CreatedAt}
 }
 func versionDTO(x model.PluginVersion) versionResponse {
-	return versionResponse{VersionID: x.ID, PluginID: wirePluginID(x.PluginType, x.PluginID), Version: x.Version, Manifest: x.Manifest, Package: x.Package, ManifestHash: x.ManifestHash, PluginHash: x.PluginHash, Relations: objectSlice(x.Relations), Changelog: x.Changelog, CreatedBy: x.CreatedBy, CreatedAt: x.CreatedAt}
+	return versionResponse{VersionID: x.ID, PluginID: wirePluginID(x.PluginType, x.PluginID), Version: x.Version, Manifest: x.Manifest, Package: x.Package, ManifestHash: x.ManifestHash, PluginHash: x.PluginHash, Relations: versionRelationSlice(x.Relations), Changelog: x.Changelog, CreatedBy: x.CreatedBy, CreatedAt: x.CreatedAt}
 }
 
 func rawJSON(value any) json.RawMessage {
@@ -789,10 +789,21 @@ func contentDisposition(name string) string {
 	return `attachment; filename="` + name + `"`
 }
 
-func objectSlice(raw json.RawMessage) []map[string]any {
-	var out []map[string]any
-	if len(raw) == 0 || json.Unmarshal(raw, &out) != nil || out == nil {
+func versionRelationSlice(raw json.RawMessage) []map[string]any {
+	var relations []model.PluginRelation
+	if len(raw) == 0 || json.Unmarshal(raw, &relations) != nil || relations == nil {
 		return []map[string]any{}
+	}
+	out := make([]map[string]any, 0, len(relations))
+	for _, relation := range relations {
+		out = append(out, map[string]any{
+			"relation_id":      relation.ID,
+			"source_plugin_id": wirePluginID(relation.SourcePluginType, relation.SourcePluginID),
+			"target_plugin_id": wirePluginID(relation.TargetPluginType, relation.TargetPluginID),
+			"relation_type":    relation.Type,
+			"sort_order":       relation.SortOrder,
+			"data":             normalizedObjectRaw(relation.Data),
+		})
 	}
 	return out
 }

@@ -287,6 +287,26 @@ func TestOldRESTRoutesAreNotRegistered(t *testing.T) {
 	}
 }
 
+func TestVersionDTOEncodesSnapshotRelationIDs(t *testing.T) {
+	raw, err := json.Marshal([]model.PluginRelation{{ID: "rel-1", SourcePluginID: "expert-1", SourcePluginType: model.PluginTypeExpert, TargetPluginID: "connector-1", TargetPluginType: model.PluginTypeConnector, Type: "plugin_dependency", Data: json.RawMessage(`{"role":"tool"}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dto := versionDTO(model.PluginVersion{ID: "v1", PluginID: "expert-1", PluginType: model.PluginTypeExpert, Relations: raw})
+	encoded, err := json.Marshal(dto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"plugin_id":"expert:expert-1"`, `"source_plugin_id":"expert:expert-1"`, `"target_plugin_id":"connector:connector-1"`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("missing %s in %s", want, encoded)
+		}
+	}
+	if strings.Contains(string(encoded), `"source_plugin_id":"expert-1"`) || strings.Contains(string(encoded), `"target_plugin_id":"connector-1"`) {
+		t.Fatalf("opaque relation ID leaked: %s", encoded)
+	}
+}
+
 func TestListUsesOffsetEnvelope(t *testing.T) {
 	f := &fakeService{list: []model.Plugin{{ID: "p1", Name: "One", Type: model.PluginTypeSkill}}}
 	rec := httptest.NewRecorder()

@@ -149,6 +149,9 @@ func (r *Repo) Publish(ctx context.Context, scope Scope, p PublishParams) (*mode
 	if err != nil {
 		return nil, err
 	}
+	for i := range relations {
+		relations[i].SourcePluginType = current.Type
+	}
 	if err = lockPublishPlacementCategories(ctx, tx, current.Type, p.Placements); err != nil {
 		return nil, err
 	}
@@ -202,7 +205,7 @@ func (r *Repo) Publish(ctx context.Context, scope Scope, p PublishParams) (*mode
 }
 
 func loadPublishRelations(ctx context.Context, tx *sql.Tx, scope Scope, pluginID string) ([]model.PluginRelation, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT r.relation_id,r.source_plugin_id,r.target_plugin_id,r.relation_type,r.sort_order,r.relation_json,r.status,r.created_by,r.created_at,r.updated_at,r.deleted_at
+	rows, err := tx.QueryContext(ctx, `SELECT r.relation_id,r.source_plugin_id,r.target_plugin_id,p.plugin_type,r.relation_type,r.sort_order,r.relation_json,r.status,r.created_by,r.created_at,r.updated_at,r.deleted_at
 FROM plugin_relations r JOIN plugins p ON p.plugin_id=r.target_plugin_id
 WHERE r.source_plugin_id=? AND r.status=1 AND r.deleted_at IS NULL AND p.status=1 AND p.deleted_at IS NULL AND `+visibilitySQL+`
 ORDER BY r.sort_order,r.relation_id FOR UPDATE`, pluginID, scope.SpaceID, scope.CallerUID)
@@ -215,7 +218,7 @@ ORDER BY r.sort_order,r.relation_id FOR UPDATE`, pluginID, scope.SpaceID, scope.
 		var relation model.PluginRelation
 		var data []byte
 		var deleted sql.NullTime
-		if err := rows.Scan(&relation.ID, &relation.SourcePluginID, &relation.TargetPluginID, &relation.Type, &relation.SortOrder, &data, &relation.Status, &relation.CreatedBy, &relation.CreatedAt, &relation.UpdatedAt, &deleted); err != nil {
+		if err := rows.Scan(&relation.ID, &relation.SourcePluginID, &relation.TargetPluginID, &relation.TargetPluginType, &relation.Type, &relation.SortOrder, &data, &relation.Status, &relation.CreatedBy, &relation.CreatedAt, &relation.UpdatedAt, &deleted); err != nil {
 			return nil, err
 		}
 		relation.Data = cloneJSON(data)

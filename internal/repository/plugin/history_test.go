@@ -90,7 +90,7 @@ func TestPublishSnapshotsLockedStateAndRelationsAndReturnsStoredVersion(t *testi
 		WillReturnRows(ownedPluginRow("plugin-id", scope, now))
 	mock.ExpectQuery(`SELECT r.relation_id.*JOIN plugins p ON p.plugin_id=r.target_plugin_id.*p.space_id = \?.*p.owner_uid = \?.*FOR UPDATE`).
 		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID).
-		WillReturnRows(relationRows("plugin-id", "target-id"))
+		WillReturnRows(publishRelationRows("plugin-id", "target-id", model.PluginTypeSkill))
 	mock.ExpectExec(`INSERT INTO plugin_versions`).
 		WithArgs("version-id", "plugin-id", "1.2.3", `{"manifest":true}`, `{"package":true}`, "sha256:m", "sha256:p", sqlmock.AnyArg(), nil, "caller", now).
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -107,12 +107,18 @@ func TestPublishSnapshotsLockedStateAndRelationsAndReturnsStoredVersion(t *testi
 		t.Fatalf("returned version = %#v", version)
 	}
 	var relations []model.PluginRelation
-	if err := json.Unmarshal(version.Relations, &relations); err != nil || len(relations) != 1 || relations[0].TargetPluginID != "target-id" {
+	if err := json.Unmarshal(version.Relations, &relations); err != nil || len(relations) != 1 || relations[0].TargetPluginID != "target-id" || relations[0].SourcePluginType != model.PluginTypeExpert || relations[0].TargetPluginType != model.PluginTypeSkill {
 		t.Fatalf("relations=%s err=%v", version.Relations, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func publishRelationRows(source, target string, targetType model.PluginType) *sqlmock.Rows {
+	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	return sqlmock.NewRows([]string{"relation_id", "source_plugin_id", "target_plugin_id", "plugin_type", "relation_type", "sort_order", "relation_json", "status", "created_by", "created_at", "updated_at", "deleted_at"}).
+		AddRow(source+"-relation", source, target, targetType, "plugin_dependency", 0, []byte(`{"role":"x"}`), 1, "source-owner", now, now, nil)
 }
 
 func TestPublishLocksAndValidatesPlacementCategory(t *testing.T) {
@@ -131,7 +137,7 @@ func TestPublishLocksAndValidatesPlacementCategory(t *testing.T) {
 		WillReturnRows(ownedPluginRow("plugin-id", scope, now))
 	mock.ExpectQuery(`SELECT r.relation_id.*FOR UPDATE`).
 		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID).
-		WillReturnRows(relationRows("plugin-id", "target-id"))
+		WillReturnRows(publishRelationRows("plugin-id", "target-id", model.PluginTypeSkill))
 	mock.ExpectQuery(`SELECT c.category_id FROM plugin_categories c.*JOIN plugin_category_placements cp ON cp.category_id=c.category_id.*JSON_CONTAINS.*cp.placement_code=\?.*cp.plugin_type=\?.*cp.visible=1.*FOR UPDATE`).
 		WithArgs(category, model.PluginTypeExpert, "home", model.PluginTypeExpert).
 		WillReturnRows(sqlmock.NewRows([]string{"category_id"}))
