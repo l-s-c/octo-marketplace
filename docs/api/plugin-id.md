@@ -31,16 +31,21 @@ Use this conversion at the service/API boundary:
 2. For a top-level ID, use `StorageID()` to obtain the exact opaque DB ID. The
    prefix selects and must agree with the resource type; the suffix is not
    normalized or regenerated.
-3. For an embedded ID, use `ResourceID` to load the parent and locate the nested
-   item by `MemberKey` and/or `SkillKey`. Embedded IDs do not map to an
-   independent `plugins` row and `StorageID()` deliberately returns no mapping.
-4. Encode outbound top-level records with `pluginid.NewTopLevel`; encode nested
-   addresses with the matching embedded constructor.
+3. Embedded resources in the approved seven-table unified model are ordinary
+   `plugins` rows. The current tables do not retain stable parent/member/skill
+   metadata that can reconstruct an exact historical composite design address,
+   so unified API responses encode each loaded row with its stored top-level
+   `plugin_type` prefix. Incoming composite addresses are rejected by row-based
+   endpoints until exact stable-key resolution metadata is available.
+4. Encode outbound loaded records with `pluginid.NewTopLevel` using the stored
+   row type. Composite constructors remain reserved for a future exact nested
+   resolver and must not be guessed from relation type or display data.
 
-This boundary is intentionally exposed without changing handlers, existing
-service methods, or backfill behavior. Integration should happen atomically at
-the unified API facade so repository methods continue receiving opaque DB IDs
-and wire responses consistently receive prefixed IDs.
+The integration lives at the unified service/handler boundary: repository
+methods continue receiving opaque DB IDs while wire requests and responses use
+strict typed prefixes. Relation reads load target types from joined Plugin rows;
+relation writes parse targets to opaque IDs and carry the expected prefix type
+into the repository's transactional target validation.
 
 ## Validation
 
