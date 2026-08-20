@@ -294,7 +294,13 @@ func (r *Runner) skills(ctx context.Context, counts map[string]int, cats map[str
 			d = sql.NullTime{Time: u, Valid: true}
 		}
 		tj, _ := canonical(tags)
-		p.plugins = append(p.plugins, plugRow{pid, pluginName, "skill", cats["categories:"+cat], string(tj), ownerName, owner, space, visibility, creator, "human", "", "", selected.manifest, selected.pkg, selected.mhash, selected.phash, selected.id, active(d), c, u, d})
+		p.plugins = append(p.plugins, plugRow{
+			id: pid, name: pluginName, typ: "skill", cat: cats["categories:"+cat], tags: string(tj),
+			publisher: ownerName, owner: owner, space: space, visibility: visibility,
+			creator: creator, by: "human", manifest: selected.manifest, pkg: selected.pkg,
+			mhash: selected.mhash, phash: selected.phash, versionID: selected.id,
+			status: active(d), created: c, updated: u, deleted: d,
+		})
 		p.versions = append(p.versions, vs...)
 		if issue != nil {
 			p.issues = append(p.issues, *issue)
@@ -512,7 +518,13 @@ func (r *Runner) experts(ctx context.Context, counts map[string]int, cats map[st
 		pkg, _ := packageJSON(manifest, extras...)
 		tj, _ := canonical(tags)
 		vid := DeterministicID("expertver", id)
-		x := plugRow{pid, name, "expert", cats["expert_categories:"+cat], string(tj), publisher, owner, space.String, expertVisibility(visibility), creator, by, botUID.String, botName.String, string(manifest), string(pkg), hashJSON(manifest), both(manifest, pkg), vid, active(deleted), created, updated, deleted}
+		x := plugRow{
+			id: pid, name: name, typ: "expert", cat: cats["expert_categories:"+cat], tags: string(tj),
+			publisher: publisher, owner: owner, space: space.String, visibility: expertVisibility(visibility),
+			creator: creator, by: by, botUID: botUID.String, botName: botName.String,
+			manifest: string(manifest), pkg: string(pkg), mhash: hashJSON(manifest), phash: both(manifest, pkg),
+			versionID: vid, status: active(deleted), created: created, updated: updated, deleted: deleted,
+		}
 		appendPlugin(p, x, mkver(vid, pid, "legacy", "", owner, created, manifest, pkg))
 		skillOccurrences := snapshotOccurrences(skills, skillIdentityKey)
 		for i, skill := range skills {
@@ -602,7 +614,13 @@ func (r *Runner) squads(ctx context.Context, counts map[string]int, cats map[str
 		pkg, _ := packageJSON(manifest, extras...)
 		tj, _ := canonical(tags)
 		vid := DeterministicID("expertteamver", id)
-		x := plugRow{pid, name, "expert_team", cats["expert_categories:"+cat], string(tj), publisher, owner, space.String, expertVisibility(visibility), creator, by, botUID.String, botName.String, string(manifest), string(pkg), hashJSON(manifest), both(manifest, pkg), vid, active(deleted), created, updated, deleted}
+		x := plugRow{
+			id: pid, name: name, typ: "expert_team", cat: cats["expert_categories:"+cat], tags: string(tj),
+			publisher: publisher, owner: owner, space: space.String, visibility: expertVisibility(visibility),
+			creator: creator, by: by, botUID: botUID.String, botName: botName.String,
+			manifest: string(manifest), pkg: string(pkg), mhash: hashJSON(manifest), phash: both(manifest, pkg),
+			versionID: vid, status: active(deleted), created: created, updated: updated, deleted: deleted,
+		}
 		appendPlugin(p, x, mkver(vid, pid, "legacy", "", owner, created, manifest, pkg))
 		memberOccurrences := snapshotOccurrences(members, memberIdentityKey)
 		for i, member := range members {
@@ -624,7 +642,13 @@ func (r *Runner) squads(ctx context.Context, counts map[string]int, cats map[str
 			}
 			mp, _ := packageJSON(mm, memberExtras...)
 			mvid := DeterministicID("snapshotmemberver", mid)
-			mx := plugRow{mid, member.Name, "expert", cats["expert_categories:"+cat], "[]", publisher, owner, space.String, expertVisibility(visibility), creator, by, botUID.String, botName.String, string(mm), string(mp), hashJSON(mm), both(mm, mp), mvid, active(deleted), created, updated, deleted}
+			mx := plugRow{
+				id: mid, name: member.Name, typ: "expert", cat: cats["expert_categories:"+cat], tags: "[]",
+				publisher: publisher, owner: owner, space: space.String, visibility: expertVisibility(visibility),
+				creator: creator, by: by, botUID: botUID.String, botName: botName.String,
+				manifest: string(mm), pkg: string(mp), mhash: hashJSON(mm), phash: both(mm, mp),
+				versionID: mvid, status: active(deleted), created: created, updated: updated, deleted: deleted,
+			}
 			appendPlugin(p, mx, mkver(mvid, mid, "legacy", "", owner, created, mm, mp))
 			p.relations = append(p.relations, relation(pid, mid, "expert_team_member", i, map[string]any{"source_index": i, "member_key": member.MemberKey, "role": member.Role, "is_leader": member.IsLeader}, owner, created, updated, deleted))
 			skillOccurrences := snapshotOccurrences(member.Skills, skillIdentityKey)
@@ -684,7 +708,13 @@ func (r *Runner) mcps(ctx context.Context, counts map[string]int, p *plan) error
 		pid := PluginID("connector", id, counts[id])
 		vid := DeterministicID("connectorver", id)
 		tj, _ := canonical(tv)
-		p.plugins = append(p.plugins, plugRow{pid, n, "connector", "", string(tj), "", owner, space.String, expertVisibility(visibility), creator, by, bu.String, bn.String, string(m), string(pkg), hashJSON(m), both(m, pkg), vid, active(d), c, u, d})
+		p.plugins = append(p.plugins, plugRow{
+			id: pid, name: n, typ: "connector", tags: string(tj), owner: owner,
+			space: space.String, visibility: expertVisibility(visibility), creator: creator, by: by,
+			botUID: bu.String, botName: bn.String, manifest: string(m), pkg: string(pkg),
+			mhash: hashJSON(m), phash: both(m, pkg), versionID: vid,
+			status: active(d), created: c, updated: u, deleted: d,
+		})
 		p.versions = append(p.versions, mkver(vid, pid, "legacy", "", owner, c, m, pkg))
 	}
 	return rs.Err()

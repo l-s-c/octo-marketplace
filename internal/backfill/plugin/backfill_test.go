@@ -179,13 +179,21 @@ func TestBuildSkillAndConnectorDocuments(t *testing.T) {
 	}
 	byType := make(map[string]plugRow, len(p.plugins))
 	for _, plugin := range p.plugins {
+		if _, duplicate := byType[plugin.typ]; duplicate {
+			t.Fatalf("duplicate plugin type %q in %#v", plugin.typ, p.plugins)
+		}
 		byType[plugin.typ] = plugin
 	}
-	if byType["skill"].name != "Display Skill" {
-		t.Fatalf("skill plugin name = %q", byType["skill"].name)
+	skillPlugin, ok := byType["skill"]
+	if !ok || skillPlugin.id != "skill-1" || skillPlugin.name != "Display Skill" {
+		t.Fatalf("skill plugin = %#v; all plugins = %#v", skillPlugin, p.plugins)
+	}
+	connectorPlugin, ok := byType["connector"]
+	if !ok || connectorPlugin.id != "connector-1" || connectorPlugin.name != "Connector" {
+		t.Fatalf("connector plugin = %#v; all plugins = %#v", connectorPlugin, p.plugins)
 	}
 	var connectorManifest pluginManifest
-	if err := json.Unmarshal([]byte(byType["connector"].manifest), &connectorManifest); err != nil {
+	if err := json.Unmarshal([]byte(connectorPlugin.manifest), &connectorManifest); err != nil {
 		t.Fatal(err)
 	}
 	if connectorManifest.Name != "connector-slug" || len(connectorManifest.Examples) != 1 || connectorManifest.Examples[0].Input != "try connector" {
