@@ -275,8 +275,16 @@ func (r *Runner) skills(ctx context.Context, counts map[string]int, cats map[str
 			continue
 		}
 		pid := PluginID("skill", id, counts[id])
-		m, _ := canonical(map[string]any{"schema": "octo.legacy-backfill/v1", "source_table": "skills", "source_id": id, "display_name": display, "icon_url": icon, "description": desc})
-		pkg, _ := canonical(map[string]any{"source_skill_id": source, "readme_content": readme, "file_name": fileName, "file_url": fileURL, "file_size": size, "file_sha256": sha})
+		pluginName := display
+		if pluginName == "" {
+			pluginName = n
+		}
+		m, _ := canonical(newPluginManifest(pluginName, "skill", n, desc, tags, nil))
+		extras := make([]rawAttachment, 0, 1)
+		if readme != "" {
+			extras = append(extras, rawAttachment{path: "SKILL.md", mimeType: "text/markdown", content: readme})
+		}
+		pkg, _ := packageJSON(m, extras...)
 		vid := DeterministicID("skillver", id+":"+v)
 		if current != "" {
 			vid = DeterministicID("skillver", current)
@@ -286,7 +294,7 @@ func (r *Runner) skills(ctx context.Context, counts map[string]int, cats map[str
 			d = sql.NullTime{Time: u, Valid: true}
 		}
 		tj, _ := canonical(tags)
-		p.plugins = append(p.plugins, plugRow{pid, n, "skill", cats["categories:"+cat], string(tj), ownerName, owner, space, visibility, creator, "human", "", "", string(m), string(pkg), hashJSON(m), both(m, pkg), vid, active(d), c, u, d})
+		p.plugins = append(p.plugins, plugRow{pid, pluginName, "skill", cats["categories:"+cat], string(tj), ownerName, owner, space, visibility, creator, "human", "", "", string(m), string(pkg), hashJSON(m), both(m, pkg), vid, active(d), c, u, d})
 		vs, issue, e := r.skillVersions(ctx, id, pid, v, creatorID, c, m, pkg)
 		if e != nil {
 			return e
@@ -314,11 +322,12 @@ func (r *Runner) skillVersions(ctx context.Context, sid, pid, fv, fby string, fc
 		}
 		vp := pkg
 		if storage.Valid {
-			var x any
-			if e = json.Unmarshal([]byte(storage.String), &x); e != nil {
-				return nil, nil, e
+			if !json.Valid([]byte(storage.String)) {
+				return nil, nil, fmt.Errorf("invalid skill version storage JSON")
 			}
-			vp, _ = canonical(map[string]any{"legacy_storage": x})
+			// Legacy storage metadata cannot safely become an attachment without
+			// the corresponding bytes and content hash. Keep the canonical
+			// current snapshot package rather than fabricating package content.
 		}
 		if by == "" {
 			by = fby
@@ -337,6 +346,7 @@ func (r *Runner) skillVersions(ctx context.Context, sid, pid, fv, fby string, fc
 }
 
 type legacySkillRef struct {
+	SkillKey     string   `json:"skill_key"`
 	Name         string   `json:"name"`
 	ObjectKey    string   `json:"object_key"`
 	ZipObjectKey string   `json:"zip_object_key"`
@@ -346,14 +356,15 @@ type legacySkillRef struct {
 }
 
 type legacyMember struct {
-	MemberKey   string           `json:"member_key"`
-	TemplateID  string           `json:"template_id"`
-	Name        string           `json:"name"`
-	Role        string           `json:"role"`
-	IsLeader    bool             `json:"is_leader"`
-	Instruction string           `json:"instruction"`
-	MCPConfig   string           `json:"mcp_config"`
-	Skills      []legacySkillRef `json:"skills"`
+	MemberKey     string           `json:"member_key"`
+	TemplateID    string           `json:"template_id"`
+	Name          string           `json:"name"`
+	Role          string           `json:"role"`
+	IsLeader      bool             `json:"is_leader"`
+	UsageExamples []string         `json:"usage_examples"`
+	Instruction   string           `json:"instruction"`
+	MCPConfig     string           `json:"mcp_config"`
+	Skills        []legacySkillRef `json:"skills"`
 }
 
 func decodeArray(raw string, out any) error {
@@ -371,17 +382,27 @@ func appendPlugin(p *plan, x plugRow, v verRow) {
 func snapshotSkill(parentID string, index, occurrence int, s legacySkillRef, owner, space, visibility, creator, by string, created, updated time.Time, deleted sql.NullTime) (plugRow, verRow) {
 	raw, _ := canonical(s)
 	source := "snapshot:" + hashJSON(raw)
-	if s.ObjectKey != "" {
+	if s.SkillKey != "" {
+		source = "skill_key:" + s.SkillKey
+	} else if s.ObjectKey != "" {
 		source = "object_key:" + s.ObjectKey
 	} else if s.ZipObjectKey != "" {
 		source = "zip_object_key:" + s.ZipObjectKey
 	}
 	id := DeterministicID("snapshotskill", fmt.Sprintf("%s:%s:%06d", parentID, source, occurrence))
-	manifest, _ := canonical(map[string]any{"schema": "octo.legacy-backfill/v1", "source_table": "embedded_skill_snapshot", "parent_plugin_id": parentID, "source_index": index})
-	pkg, _ := canonical(map[string]any{"name": s.Name, "object_key": s.ObjectKey, "zip_object_key": s.ZipObjectKey, "file_name": s.FileName, "file_size": s.FileSize, "files": s.Files})
+	manifest := embeddedSkillManifest(s)
+	extra, _ := jsonAttachment("skill/ref.json", map[string]any{"file_name": s.FileName, "file_size": s.FileSize, "files": nonNilStrings(s.Files), "object_key": s.ObjectKey, "skill_key": skillPathKey(s), "zip_object_key": s.ZipObjectKey})
+	pkg, _ := packageJSON(manifest, extra)
 	vid := DeterministicID("snapshotskillver", id)
 	x := plugRow{id: id, name: s.Name, typ: "skill", tags: "[]", owner: owner, space: space, visibility: visibility, creator: creator, by: by, manifest: string(manifest), pkg: string(pkg), mhash: hashJSON(manifest), phash: both(manifest, pkg), versionID: vid, status: active(deleted), created: created, updated: updated, deleted: deleted}
 	return x, mkver(vid, id, "legacy", "", owner, created, manifest, pkg)
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
 }
 
 func snapshotOccurrences[T any](items []T, key func(T) string) []int {
@@ -395,7 +416,22 @@ func snapshotOccurrences[T any](items []T, key func(T) string) []int {
 	return out
 }
 
+func skillPathKey(s legacySkillRef) string {
+	if s.SkillKey != "" {
+		return s.SkillKey
+	}
+	return DeterministicID("skillkey", skillIdentityKey(s))
+}
+
+func embeddedSkillManifest(s legacySkillRef) []byte {
+	raw, _ := canonical(newPluginManifest(s.Name, "skill", s.Name, "", nil, nil))
+	return raw
+}
+
 func skillIdentityKey(s legacySkillRef) string {
+	if s.SkillKey != "" {
+		return "skill_key:" + s.SkillKey
+	}
 	if s.ObjectKey != "" {
 		return "object_key:" + s.ObjectKey
 	}
@@ -449,10 +485,22 @@ func (r *Runner) experts(ctx context.Context, counts map[string]int, cats map[st
 			continue
 		}
 		pid := PluginID("expert", id, counts[id])
-		manifest, _ := canonical(map[string]any{"schema": "octo.legacy-backfill/v1", "source_table": "experts", "source_id": id, "short_name": short, "summary": summary})
+		manifest, _ := canonical(newPluginManifest(name, "expert", name, summary, tags, nil))
 		var cfg any
 		_ = json.Unmarshal(safeMCP, &cfg)
-		pkg, _ := canonical(map[string]any{"instruction": instruction, "mcp_config": cfg})
+		mcpAttachment, _ := jsonAttachment("expert/mcp.json", cfg)
+		extras := []rawAttachment{mcpAttachment}
+		if instruction != "" {
+			extras = append(extras, rawAttachment{path: "expert/instruction.md", mimeType: "text/markdown", content: instruction})
+		}
+		for _, skill := range skills {
+			key := skillPathKey(skill)
+			skillManifest := embeddedSkillManifest(skill)
+			extras = append(extras, rawAttachment{path: "skills/" + key + "/manifest.json", mimeType: "application/json", content: string(skillManifest)})
+			ref, _ := jsonAttachment("skills/"+key+"/ref.json", map[string]any{"file_name": skill.FileName, "file_size": skill.FileSize, "files": nonNilStrings(skill.Files), "object_key": skill.ObjectKey, "skill_key": key, "zip_object_key": skill.ZipObjectKey})
+			extras = append(extras, ref)
+		}
+		pkg, _ := packageJSON(manifest, extras...)
 		tj, _ := canonical(tags)
 		vid := DeterministicID("expertver", id)
 		x := plugRow{pid, name, "expert", cats["expert_categories:"+cat], string(tj), publisher, owner, space.String, expertVisibility(visibility), creator, by, botUID.String, botName.String, string(manifest), string(pkg), hashJSON(manifest), both(manifest, pkg), vid, active(deleted), created, updated, deleted}
@@ -517,8 +565,32 @@ func (r *Runner) squads(ctx context.Context, counts map[string]int, cats map[str
 			continue
 		}
 		pid := PluginID("expertteam", id, counts[id])
-		manifest, _ := canonical(map[string]any{"schema": "octo.legacy-backfill/v1", "source_table": "expert_squads", "source_id": id, "short_name": short, "summary": summary})
-		pkg, _ := canonical(map[string]any{"leader": leader, "strategies": strategyValue, "dependencies": dependencyValue, "permission": permission})
+		manifest, _ := canonical(newPluginManifest(name, "expert_team", name, summary, tags, nil))
+		teamConfig, _ := jsonAttachment("team/config.json", map[string]any{"dependencies": dependencyValue, "leader": leader, "permission": permission, "strategies": strategyValue})
+		extras := []rawAttachment{teamConfig}
+		for i, member := range members {
+			memberKey := member.MemberKey
+			if memberKey == "" {
+				memberKey = DeterministicID("memberkey", memberIdentityKey(member))
+			}
+			memberManifest, _ := canonical(newPluginManifest(member.Name, "expert", member.Name, member.Role, nil, member.UsageExamples))
+			extras = append(extras, rawAttachment{path: "members/" + memberKey + "/manifest.json", mimeType: "application/json", content: string(memberManifest)})
+			contextAttachment, _ := jsonAttachment("members/"+memberKey+"/expert/context.json", map[string]any{"is_leader": member.IsLeader, "role": member.Role, "template_id": member.TemplateID})
+			extras = append(extras, contextAttachment)
+			if member.Instruction != "" {
+				extras = append(extras, rawAttachment{path: "members/" + memberKey + "/expert/instruction.md", mimeType: "text/markdown", content: member.Instruction})
+			}
+			memberMCPAttachment, _ := jsonAttachment("members/"+memberKey+"/expert/mcp.json", memberMCP[i])
+			extras = append(extras, memberMCPAttachment)
+			for _, skill := range member.Skills {
+				skillKey := skillPathKey(skill)
+				skillManifest := embeddedSkillManifest(skill)
+				extras = append(extras, rawAttachment{path: "members/" + memberKey + "/skills/" + skillKey + "/manifest.json", mimeType: "application/json", content: string(skillManifest)})
+				ref, _ := jsonAttachment("members/"+memberKey+"/skills/"+skillKey+"/ref.json", map[string]any{"file_name": skill.FileName, "file_size": skill.FileSize, "files": nonNilStrings(skill.Files), "object_key": skill.ObjectKey, "skill_key": skillKey, "zip_object_key": skill.ZipObjectKey})
+				extras = append(extras, ref)
+			}
+		}
+		pkg, _ := packageJSON(manifest, extras...)
 		tj, _ := canonical(tags)
 		vid := DeterministicID("expertteamver", id)
 		x := plugRow{pid, name, "expert_team", cats["expert_categories:"+cat], string(tj), publisher, owner, space.String, expertVisibility(visibility), creator, by, botUID.String, botName.String, string(manifest), string(pkg), hashJSON(manifest), both(manifest, pkg), vid, active(deleted), created, updated, deleted}
@@ -527,8 +599,21 @@ func (r *Runner) squads(ctx context.Context, counts map[string]int, cats map[str
 		for i, member := range members {
 			memberSource := memberIdentityKey(member)
 			mid := DeterministicID("snapshotmember", fmt.Sprintf("%s:%s:%06d", pid, memberSource, memberOccurrences[i]))
-			mm, _ := canonical(map[string]any{"schema": "octo.legacy-backfill/v1", "source_table": "squad_member_snapshot", "parent_plugin_id": pid, "source_index": i})
-			mp, _ := canonical(map[string]any{"member_key": member.MemberKey, "template_id": member.TemplateID, "role": member.Role, "is_leader": member.IsLeader, "instruction": member.Instruction, "mcp_config": memberMCP[i]})
+			mm, _ := canonical(newPluginManifest(member.Name, "expert", member.Name, member.Role, nil, member.UsageExamples))
+			contextAttachment, _ := jsonAttachment("expert/context.json", map[string]any{"is_leader": member.IsLeader, "member_key": member.MemberKey, "role": member.Role, "template_id": member.TemplateID})
+			mcpAttachment, _ := jsonAttachment("expert/mcp.json", memberMCP[i])
+			memberExtras := []rawAttachment{contextAttachment, mcpAttachment}
+			if member.Instruction != "" {
+				memberExtras = append(memberExtras, rawAttachment{path: "expert/instruction.md", mimeType: "text/markdown", content: member.Instruction})
+			}
+			for _, skill := range member.Skills {
+				skillKey := skillPathKey(skill)
+				skillManifest := embeddedSkillManifest(skill)
+				memberExtras = append(memberExtras, rawAttachment{path: "skills/" + skillKey + "/manifest.json", mimeType: "application/json", content: string(skillManifest)})
+				ref, _ := jsonAttachment("skills/"+skillKey+"/ref.json", map[string]any{"file_name": skill.FileName, "file_size": skill.FileSize, "files": nonNilStrings(skill.Files), "object_key": skill.ObjectKey, "skill_key": skillKey, "zip_object_key": skill.ZipObjectKey})
+				memberExtras = append(memberExtras, ref)
+			}
+			mp, _ := packageJSON(mm, memberExtras...)
 			mvid := DeterministicID("snapshotmemberver", mid)
 			mx := plugRow{mid, member.Name, "expert", cats["expert_categories:"+cat], "[]", publisher, owner, space.String, expertVisibility(visibility), creator, by, botUID.String, botName.String, string(mm), string(mp), hashJSON(mm), both(mm, mp), mvid, active(deleted), created, updated, deleted}
 			appendPlugin(p, mx, mkver(mvid, mid, "legacy", "", owner, created, mm, mp))
@@ -565,14 +650,23 @@ func (r *Runner) mcps(ctx context.Context, counts map[string]int, p *plan) error
 			p.issues = append(p.issues, Issue{"skip", "unsafe_connector_config", "mcp_servers", id, e.Error()})
 			continue
 		}
-		var tv []string
-		var tl, ex, fq, nt, cfg any
-		if json.Unmarshal([]byte(tags), &tv) != nil || json.Unmarshal([]byte(tools), &tl) != nil || json.Unmarshal([]byte(examples), &ex) != nil || json.Unmarshal([]byte(faqs), &fq) != nil || json.Unmarshal([]byte(notes), &nt) != nil || json.Unmarshal(safe, &cfg) != nil {
+		var tv, exampleValues []string
+		var tl, fq, nt, cfg any
+		if json.Unmarshal([]byte(tags), &tv) != nil || json.Unmarshal([]byte(tools), &tl) != nil || json.Unmarshal([]byte(examples), &exampleValues) != nil || json.Unmarshal([]byte(faqs), &fq) != nil || json.Unmarshal([]byte(notes), &nt) != nil || json.Unmarshal(safe, &cfg) != nil {
 			p.issues = append(p.issues, Issue{"skip", "invalid_connector_json", "mcp_servers", id, "invalid JSON column"})
 			continue
 		}
-		m, _ := canonical(map[string]any{"schema": "octo.legacy-backfill/v1", "source_table": "mcp_servers", "source_id": id, "slug": slug, "slogan": slogan, "legacy_category": cat, "icon": icon, "icon_version": iconV})
-		pkg, _ := canonical(map[string]any{"transport": transport, "config": cfg, "tools": tl, "usage_examples": ex, "faqs": fq, "notes": nt})
+		canonicalName := slug
+		if canonicalName == "" {
+			canonicalName = n
+		}
+		m, _ := canonical(newPluginManifest(n, "connector", canonicalName, slogan, tv, exampleValues))
+		configAttachment, _ := jsonAttachment("connector/config.json", map[string]any{"config": cfg, "transport": transport})
+		toolsAttachment, _ := jsonAttachment("connector/tools.json", tl)
+		examplesAttachment, _ := jsonAttachment("connector/examples.json", exampleValues)
+		faqsAttachment, _ := jsonAttachment("connector/faqs.json", fq)
+		notesAttachment, _ := jsonAttachment("connector/notes.json", nt)
+		pkg, _ := packageJSON(m, configAttachment, toolsAttachment, examplesAttachment, faqsAttachment, notesAttachment)
 		pkg, e = SanitizeConnectorJSON(pkg)
 		if e != nil {
 			p.issues = append(p.issues, Issue{"skip", "unsafe_connector_package", "mcp_servers", id, e.Error()})

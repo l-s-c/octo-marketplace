@@ -2,7 +2,9 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"regexp"
+	"sort"
 	"testing"
 	"time"
 
@@ -94,6 +96,100 @@ func TestBuildExpertAndSquadGraph(t *testing.T) {
 	}
 	if p.plugins[0].id == "Skill" {
 		t.Fatal("snapshot skill identity inferred from name")
+	}
+	for _, plugin := range p.plugins {
+		assertCompliantPluginDocuments(t, plugin)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertCompliantPluginDocuments(t *testing.T, plugin plugRow) {
+	t.Helper()
+	var manifestValue pluginManifest
+	if err := json.Unmarshal([]byte(plugin.manifest), &manifestValue); err != nil {
+		t.Fatalf("plugin %q manifest: %v", plugin.id, err)
+	}
+	if manifestValue.Schema != "cowork-plugin-manifest-1.0.json" || manifestValue.PluginName != plugin.name || manifestValue.PluginType != plugin.typ || manifestValue.Labels == nil || manifestValue.Examples == nil {
+		t.Fatalf("plugin %q manifest is not compliant: %#v", plugin.id, manifestValue)
+	}
+	var packageValue pluginPackage
+	if err := json.Unmarshal([]byte(plugin.pkg), &packageValue); err != nil {
+		t.Fatalf("plugin %q package: %v", plugin.id, err)
+	}
+	if packageValue.Schema != "cowork-plugin-package-1.0.json" || len(packageValue.Attachments) == 0 {
+		t.Fatalf("plugin %q package is not compliant: %#v", plugin.id, packageValue)
+	}
+	paths := make([]string, 0, len(packageValue.Attachments))
+	manifestCount := 0
+	for _, attachment := range packageValue.Attachments {
+		paths = append(paths, attachment.Path)
+		if attachment.ContentType != "raw" || attachment.ContentSize != len([]byte(attachment.RawContent)) || attachment.ContentHash != hashJSON([]byte(attachment.RawContent)) {
+			t.Fatalf("plugin %q attachment invalid: %#v", plugin.id, attachment)
+		}
+		if attachment.Path == "manifest.json" {
+			manifestCount++
+			if attachment.RawContent != plugin.manifest || attachment.MIMEType != "application/json" {
+				t.Fatalf("plugin %q canonical manifest attachment mismatch", plugin.id)
+			}
+		}
+	}
+	if manifestCount != 1 || !sort.StringsAreSorted(paths) {
+		t.Fatalf("plugin %q package paths = %#v", plugin.id, paths)
+	}
+	if plugin.mhash != hashJSON([]byte(plugin.manifest)) || plugin.phash != both([]byte(plugin.manifest), []byte(plugin.pkg)) {
+		t.Fatalf("plugin %q hashes do not match canonical documents", plugin.id)
+	}
+}
+
+func TestBuildSkillAndConnectorDocuments(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Unix(100, 0).UTC()
+	mock.ExpectQuery("SELECT id,COUNT\\(\\*\\) FROM").WillReturnRows(sqlmock.NewRows([]string{"id", "count"}).AddRow("skill-1", 1).AddRow("connector-1", 1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id,name,icon_key,sort_order,created_at,updated_at,deleted_at FROM categories")).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "icon_key", "sort_order", "created_at", "updated_at", "deleted_at"}).AddRow("cat", "Category", "icon", 1, now, now, nil))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id,name,icon_key,sort_order,created_at,updated_at,deleted_at FROM expert_categories")).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "icon_key", "sort_order", "created_at", "updated_at", "deleted_at"}))
+	mock.ExpectQuery("SELECT id,name FROM skill_tags").WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(1, "Skill Tag"))
+	mock.ExpectQuery("SELECT id,name FROM expert_tags").WillReturnRows(sqlmock.NewRows([]string{"id", "name"}))
+	skillCols := []string{"id", "name", "display_name", "icon_url", "source_skill_id", "current_version_id", "description", "category_id", "tags", "owner_id", "owner_name", "creator_id", "creator_name", "space_id", "visibility", "version", "readme_content", "file_name", "file_url", "file_size", "file_sha256", "created_at", "updated_at", "is_deleted"}
+	mock.ExpectQuery("SELECT id,name,display_name").WillReturnRows(sqlmock.NewRows(skillCols).AddRow("skill-1", "canonical-skill", "Display Skill", "", "", "", "description", "cat", `[1]`, "owner", "Owner", "creator-id", "Creator", "space", "space", "1.0.0", "# Skill", "skill.zip", "https://temporary.invalid", 10, "legacy-hash", now, now, false))
+	mock.ExpectQuery("SELECT id,version,changelog,storage,changed_by,created_at FROM skill_versions").WithArgs("skill-1").WillReturnRows(sqlmock.NewRows([]string{"id", "version", "changelog", "storage", "changed_by", "created_at"}))
+	expertCols := []string{"id", "short_name", "name", "summary", "category_id", "tags", "publisher", "owner_uid", "creator_name", "created_by_type", "created_by_bot_uid", "created_by_bot_name", "space_id", "visibility", "instruction", "mcp_config", "skills_json", "created_at", "updated_at", "deleted_at"}
+	mock.ExpectQuery("SELECT id,short_name,name,summary,category_id,tags,publisher,owner_uid,creator_name,created_by_type").WillReturnRows(sqlmock.NewRows(expertCols))
+	squadCols := []string{"id", "short_name", "name", "summary", "category_id", "tags", "publisher", "owner_uid", "creator_name", "created_by_type", "created_by_bot_uid", "created_by_bot_name", "space_id", "visibility", "leader", "strategies_json", "dependencies_json", "permission", "members_json", "created_at", "updated_at", "deleted_at"}
+	mock.ExpectQuery("SELECT id,short_name,name,summary,category_id,tags,publisher,owner_uid,creator_name,created_by_type").WillReturnRows(sqlmock.NewRows(squadCols))
+	connectorCols := []string{"id", "name", "slug", "slogan", "category", "icon", "icon_version", "tags_json", "tools_json", "usage_examples_json", "faqs_json", "notes_json", "visibility", "owner_uid", "space_id", "creator_name", "created_by_type", "created_by_bot_uid", "created_by_bot_name", "transport", "config_json", "created_at", "updated_at", "deleted_at"}
+	mock.ExpectQuery("SELECT id,name,slug,slogan").WillReturnRows(sqlmock.NewRows(connectorCols).AddRow("connector-1", "Connector", "connector-slug", "slogan", "cat", "icon", 1, `["connector-tag"]`, `[{"name":"tool"}]`, `["try connector"]`, `[]`, `[]`, "space", "owner", "space", "Creator", "human", nil, nil, "stdio", `{"command":"run","env":{"TOKEN":"actual"},"headers":{"Authorization":"actual"}}`, now, now, nil))
+	p, err := New(db).build(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.plugins) != 2 {
+		t.Fatalf("plugins=%d issues=%#v", len(p.plugins), p.issues)
+	}
+	for _, plugin := range p.plugins {
+		assertCompliantPluginDocuments(t, plugin)
+		if regexp.MustCompile(`actual|temporary\\.invalid`).MatchString(plugin.pkg) {
+			t.Fatalf("sensitive or temporary value leaked: %s", plugin.pkg)
+		}
+	}
+	byType := make(map[string]plugRow, len(p.plugins))
+	for _, plugin := range p.plugins {
+		byType[plugin.typ] = plugin
+	}
+	if byType["skill"].name != "Display Skill" {
+		t.Fatalf("skill plugin name = %q", byType["skill"].name)
+	}
+	var connectorManifest pluginManifest
+	if err := json.Unmarshal([]byte(byType["connector"].manifest), &connectorManifest); err != nil {
+		t.Fatal(err)
+	}
+	if connectorManifest.Name != "connector-slug" || len(connectorManifest.Examples) != 1 || connectorManifest.Examples[0].Input != "try connector" {
+		t.Fatalf("connector manifest = %#v", connectorManifest)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

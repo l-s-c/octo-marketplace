@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 const secretPlaceholder = "__OCTO_SECRET_PLACEHOLDER__"
@@ -35,6 +37,116 @@ func hashJSON(raw []byte) string {
 }
 
 func canonical(v any) ([]byte, error) { return json.Marshal(v) }
+
+type manifestExample struct {
+	Title string `json:"title"`
+	Input string `json:"input"`
+}
+
+type pluginManifest struct {
+	Schema      string            `json:"$schema"`
+	Description string            `json:"description"`
+	Examples    []manifestExample `json:"examples"`
+	Labels      []string          `json:"labels"`
+	Name        string            `json:"name"`
+	PluginName  string            `json:"plugin_name"`
+	PluginType  string            `json:"plugin_type"`
+}
+
+type packageAttachment struct {
+	ContentHash string `json:"content_hash"`
+	ContentSize int    `json:"content_size"`
+	ContentType string `json:"content_type"`
+	MIMEType    string `json:"mime_type"`
+	Path        string `json:"path"`
+	RawContent  string `json:"raw_content"`
+}
+
+type pluginPackage struct {
+	Schema      string              `json:"$schema"`
+	Attachments []packageAttachment `json:"attachments"`
+}
+
+type rawAttachment struct {
+	path, mimeType, content string
+}
+
+func newPluginManifest(pluginName, pluginType, name, description string, labels, examples []string) pluginManifest {
+	if labels == nil {
+		labels = []string{}
+	}
+	mappedExamples := make([]manifestExample, 0, len(examples))
+	for i, input := range examples {
+		mappedExamples = append(mappedExamples, manifestExample{
+			Title: fmt.Sprintf("使用示例 %d", i+1),
+			Input: input,
+		})
+	}
+	return pluginManifest{
+		Schema:      "cowork-plugin-manifest-1.0.json",
+		PluginName:  pluginName,
+		PluginType:  pluginType,
+		Name:        name,
+		Description: description,
+		Labels:      labels,
+		Examples:    mappedExamples,
+	}
+}
+
+func packageJSON(manifestJSON []byte, extras ...rawAttachment) ([]byte, error) {
+	attachments := make([]packageAttachment, 0, len(extras)+1)
+	add := func(attachmentPath, mimeType, content string) error {
+		if !validAttachmentPath(attachmentPath) {
+			return fmt.Errorf("invalid package attachment path %q", attachmentPath)
+		}
+		raw := []byte(content)
+		attachments = append(attachments, packageAttachment{
+			Path:        attachmentPath,
+			ContentType: "raw",
+			MIMEType:    mimeType,
+			RawContent:  content,
+			ContentSize: len(raw),
+			ContentHash: hashJSON(raw),
+		})
+		return nil
+	}
+	if err := add("manifest.json", "application/json", string(manifestJSON)); err != nil {
+		return nil, err
+	}
+	for _, extra := range extras {
+		if err := add(extra.path, extra.mimeType, extra.content); err != nil {
+			return nil, err
+		}
+	}
+	sort.Slice(attachments, func(i, j int) bool { return attachments[i].Path < attachments[j].Path })
+	unique := attachments[:0]
+	for _, attachment := range attachments {
+		if len(unique) == 0 || unique[len(unique)-1].Path != attachment.Path {
+			unique = append(unique, attachment)
+			continue
+		}
+		if unique[len(unique)-1] != attachment {
+			return nil, fmt.Errorf("conflicting package attachment path %q", attachment.Path)
+		}
+	}
+	return canonical(pluginPackage{Schema: "cowork-plugin-package-1.0.json", Attachments: unique})
+}
+
+func validAttachmentPath(value string) bool {
+	if value == "" || !utf8.ValidString(value) || strings.Contains(value, "\\") || strings.HasPrefix(value, "/") {
+		return false
+	}
+	clean := path.Clean(value)
+	return clean == value && clean != "." && clean != ".." && !strings.HasPrefix(clean, "../")
+}
+
+func jsonAttachment(path string, value any) (rawAttachment, error) {
+	raw, err := canonical(value)
+	if err != nil {
+		return rawAttachment{}, err
+	}
+	return rawAttachment{path: path, mimeType: "application/json", content: string(raw)}, nil
+}
 
 func secretShaped(key string) bool {
 	key = strings.TrimSpace(key)
