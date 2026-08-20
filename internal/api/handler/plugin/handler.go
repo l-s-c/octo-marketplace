@@ -77,10 +77,10 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 }
 
 type relationRequest struct {
-	TargetPluginID string         `json:"target_plugin_id"`
-	Type           string         `json:"type"`
-	SortOrder      int            `json:"sort_order"`
-	Data           map[string]any `json:"data,omitempty"`
+	TargetPluginID string          `json:"target_plugin_id"`
+	Type           string          `json:"type"`
+	SortOrder      int             `json:"sort_order"`
+	Data           json.RawMessage `json:"data,omitempty" swaggertype:"object"`
 }
 
 type writeRequest struct {
@@ -90,17 +90,17 @@ type writeRequest struct {
 	Tags       []string               `json:"tags"`
 	Publisher  string                 `json:"publisher,omitempty"`
 	Visibility model.PluginVisibility `json:"visibility"`
-	Manifest   map[string]any         `json:"manifest"`
-	Package    map[string]any         `json:"package"`
+	Manifest   json.RawMessage        `json:"manifest" swaggertype:"object"`
+	Package    json.RawMessage        `json:"package" swaggertype:"object"`
 	Relations  []relationRequest      `json:"relations,omitempty"`
 }
 
 func (r writeRequest) serviceRequest() pluginsvc.WriteRequest {
 	relations := make([]pluginsvc.RelationRequest, len(r.Relations))
 	for i, x := range r.Relations {
-		relations[i] = pluginsvc.RelationRequest{TargetPluginID: x.TargetPluginID, Type: x.Type, SortOrder: x.SortOrder, Data: rawJSON(x.Data)}
+		relations[i] = pluginsvc.RelationRequest{TargetPluginID: x.TargetPluginID, Type: x.Type, SortOrder: x.SortOrder, Data: x.Data}
 	}
-	return pluginsvc.WriteRequest{Name: r.Name, Type: r.Type, CategoryID: r.CategoryID, Tags: rawJSON(r.Tags), Publisher: r.Publisher, Visibility: r.Visibility, Manifest: rawJSON(r.Manifest), Package: rawJSON(r.Package), Relations: relations}
+	return pluginsvc.WriteRequest{Name: r.Name, Type: r.Type, CategoryID: r.CategoryID, Tags: rawJSON(r.Tags), Publisher: r.Publisher, Visibility: r.Visibility, Manifest: r.Manifest, Package: r.Package, Relations: relations}
 }
 
 type placementRequest struct {

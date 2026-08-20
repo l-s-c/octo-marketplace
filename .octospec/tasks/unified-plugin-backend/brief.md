@@ -41,9 +41,11 @@ compatibility after cutover.
 - Existing legacy routes and tables continue to operate during backend rollout;
   no long-term dual-write or compatibility layer is introduced.
 - API success and error envelopes follow the repository OpenAPI standard.
-- The REST paths and DTOs generated in `docs/openapi/swagger.yaml` are the final
-  Plugin client contract; the architecture HTML's RPC paths are not compatibility
-  requirements.
+- The confirmed cowork-v3 design contract is authoritative for Plugin wire DTOs:
+  `plugin_name`, `plugin_type`, `manifest_json`, `plugin_json`, `relation_type`,
+  and the `{data:{plugin,relations}}` detail shape. The generated OpenAPI must
+  implement and document that contract exactly; the former shortened REST field
+  spellings are not retained as aliases.
 
 ## In scope
 
@@ -66,27 +68,29 @@ compatibility after cutover.
 
 ### Plugin API
 
-The generated OpenAPI and REST resource model are the authoritative new client
-contract. The earlier architecture HTML's RPC-style `/internal/plugins/detail`,
-`/upsert`, and related paths and DTO names are design inputs only and are
-superseded; no aliases or conversion DTOs are required. In particular:
+The confirmed cowork-v3 design artifacts are the authoritative new client
+contract. Implement their `/internal/plugins/*` facade routes and DTO names
+without adding shortened-field compatibility aliases. In particular:
 
-- Plugin CRUD uses `GET/PATCH/DELETE /plugins/{plugin_id}` and
-  `POST /plugins`.
-- Actions and history use `/plugins/{plugin_id}/duplicate`, `/publish`,
-  `/audit_logs`, `/versions`, and `/archive`.
-- Attachments use `POST /plugins/attachments` and
-  `GET /plugins/{plugin_id}/attachments/_download`.
-- Connector probing uses `POST /connectors/_probe`.
-- Placement-aware discovery uses `GET /plugins` and
-  `GET /plugin_categories`.
-- Wire fields are the OpenAPI `name`, `type`, `manifest`, and `package` fields,
-  rather than the earlier HTML's `plugin_name`, `plugin_type`, `manifest_json`,
-  and `plugin_json` spellings.
+- Detail uses `GET /internal/plugins/detail?plugin_id=...&include_relations=true`.
+- Create/update uses `POST /internal/plugins/upsert` with `{plugin,relations}`.
+- Actions/history use `/internal/plugins/duplicate`, `/publish`, `/audit_logs`,
+  and `/archive`.
+- Attachments use `/internal/plugins/attachment/upload` and
+  `/internal/plugins/attachment/download` with server-derived identity.
+- Connector probing remains `POST /connectors/_probe`.
+- Placement-aware discovery remains `GET /plugins` and
+  `GET /plugin_categories`, using `scene_code`, `plugin_type`, `q`, `page`, and
+  `page_size` as designed.
+- Wire fields use `plugin_name`, `plugin_type`, `manifest_json`, `plugin_json`,
+  and `relation_type`.
+- Manifest and Package conform to `cowork-plugin-manifest-1.0.json` and
+  `cowork-plugin-package-1.0.json`; each Package includes a canonical
+  `manifest.json` attachment identical to the outer Manifest.
 
 ## Out of scope
 
-- Frontend implementation or compatibility adapters for old page DTOs.
+- Frontend implementation or aliases for the superseded shortened REST DTOs.
 - Preserving old Expert, Squad, Skill, or MCP backend URLs after frontend cutover.
 - Removing legacy routes or dropping legacy tables in the initial backend rollout.
 - Long-term new/legacy dual-write.

@@ -1644,7 +1644,6 @@ components:
     internal_api_handler_plugin.relationRequest:
       properties:
         data:
-          additionalProperties: {}
           type: object
         sort_order:
           type: integer
@@ -1702,12 +1701,10 @@ components:
         category_id:
           type: string
         manifest:
-          additionalProperties: {}
           type: object
         name:
           type: string
         package:
-          additionalProperties: {}
           type: object
         publisher:
           type: string
