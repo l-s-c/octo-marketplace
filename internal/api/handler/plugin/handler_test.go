@@ -127,6 +127,9 @@ func TestUpsertUsesServerDerivedIdentityAndStandardEnvelope(t *testing.T) {
 	if bytes.Contains(rec.Body.Bytes(), []byte(`"code":`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"data"`)) {
 		t.Fatalf("nonstandard envelope: %s", rec.Body.String())
 	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"plugin_id":"skill:plugin-1"`)) {
+		t.Fatalf("unprefixed create response: %s", rec.Body.String())
+	}
 }
 
 func TestUpsertRejectsClientIdentityFields(t *testing.T) {
@@ -234,6 +237,24 @@ func TestListRequiresConfirmedQueryNames(t *testing.T) {
 	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins?plugin_type=skill", nil))
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"field":"scene_code"`) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDetailEncodesPluginAndRelationWireIDs(t *testing.T) {
+	space := "space-a"
+	f := &fakeService{detail: &pluginsvc.Detail{
+		Plugin:    &model.Plugin{ID: "expert-1", Type: model.PluginTypeExpert, SpaceID: &space, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)},
+		Relations: []model.PluginRelation{{ID: "rel-1", SourcePluginID: "expert-1", SourcePluginType: model.PluginTypeExpert, TargetPluginID: "skill-1", TargetPluginType: model.PluginTypeSkill, Type: "expert_skill"}},
+	}}
+	rec := httptest.NewRecorder()
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=expert:expert-1", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{`"plugin_id":"expert:expert-1"`, `"source_plugin_id":"expert:expert-1"`, `"target_plugin_id":"skill:skill-1"`} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("missing %s in %s", want, rec.Body.String())
+		}
 	}
 }
 
