@@ -113,16 +113,13 @@ func (s *Service) OpenAttachment(ctx context.Context, caller Caller, pluginID, o
 	if validateCaller(caller) != nil || s.storage == nil || strings.TrimSpace(objectKey) == "" {
 		return nil, ErrInvalidRequest
 	}
-	storageID, expectedType, err := parseWirePluginID(pluginID)
+	storageID, err := parseStorageID(pluginID)
 	if err != nil {
 		return nil, err
 	}
 	p, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
 	if err != nil {
 		return nil, mapStoreError(err)
-	}
-	if p.Type != expectedType {
-		return nil, ErrNotFound
 	}
 	files, err := s.parseArchiveFiles(ctx, p.Package, p.SpaceID)
 	if err != nil {
@@ -148,16 +145,13 @@ func (s *Service) PrepareArchive(ctx context.Context, caller Caller, pluginID, v
 	if validateCaller(caller) != nil || s.storage == nil {
 		return nil, ErrInvalidRequest
 	}
-	storageID, expectedType, err := parseWirePluginID(pluginID)
+	storageID, err := parseStorageID(pluginID)
 	if err != nil {
 		return nil, err
 	}
 	p, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
 	if err != nil {
 		return nil, mapStoreError(err)
-	}
-	if p.Type != expectedType {
-		return nil, ErrNotFound
 	}
 	pkg := p.Package
 	if strings.TrimSpace(version) != "" {

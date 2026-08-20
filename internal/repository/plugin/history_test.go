@@ -153,5 +153,5 @@ func TestPublishLocksAndValidatesPlacementCategory(t *testing.T) {
 }
 
 func ownedPluginRow(id string, scope Scope, now time.Time) *sqlmock.Rows {
-	return sqlmock.NewRows(pluginTestColumns()).AddRow(id, "Plugin", model.PluginTypeExpert, nil, []byte(`[]`), "pub", scope.CallerUID, scope.SpaceID, model.PluginVisibilityPrivate, "Creator", "human", nil, nil, []byte(`{"manifest":true}`), []byte(`{"package":true}`), "sha256:m", "sha256:p", nil, 1, now, now, nil)
+	return sqlmock.NewRows(pluginTestColumns()).AddRow(id, "Plugin", model.PluginTypeExpert, 0, nil, []byte(`[]`), "pub", scope.CallerUID, scope.SpaceID, model.PluginVisibilityPrivate, "Creator", "human", nil, nil, []byte(`{"manifest":true}`), []byte(`{"package":true}`), "sha256:m", "sha256:p", nil, 1, now, now, nil)
 }

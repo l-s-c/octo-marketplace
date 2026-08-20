@@ -36,10 +36,8 @@ func (r *Repo) DuplicateGraph(ctx context.Context, scope Scope, sourcePluginID s
 	// Complete secret preflight before generating IDs or issuing any write.
 	for _, sourceID := range order {
 		node := nodes[sourceID].plugin
-		if node.Type == model.PluginTypeConnector {
-			if err := rejectPersistedConnectorSecrets(node.Manifest, node.Package); err != nil {
-				return err
-			}
+		if err := rejectPersistedSecretValues(node.Manifest, node.Package); err != nil {
+			return err
 		}
 	}
 
@@ -92,7 +90,7 @@ func (r *Repo) DuplicateGraph(ctx context.Context, scope Scope, sourcePluginID s
 			relation.DeletedAt = nil
 			copies = append(copies, relation)
 		}
-		if err := insertRelations(ctx, tx, r.id, now, ids[sourceID], scope.CallerUID, copies); err != nil {
+		if _, err := insertRelations(ctx, tx, r.id, now, ids[sourceID], scope.CallerUID, copies); err != nil {
 			return err
 		}
 	}
@@ -192,8 +190,8 @@ ORDER BY r.sort_order,r.relation_id`, pluginID, scope.SpaceID, scope.CallerUID)
 }
 
 func insertDuplicatePlugin(ctx context.Context, tx *sql.Tx, plugin model.Plugin, now interface{}) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO plugins (plugin_id,plugin_name,plugin_type,category_id,tags_json,publisher,owner_uid,space_id,visibility,
+	_, err := tx.ExecContext(ctx, `INSERT INTO plugins (plugin_id,plugin_name,plugin_type,is_embedded,category_id,tags_json,publisher,owner_uid,space_id,visibility,
 creator_name,created_by_type,created_by_bot_uid,created_by_bot_name,manifest_json,plugin_json,manifest_hash,plugin_hash,current_version_id,status,created_at,updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, plugin.ID, plugin.Name, plugin.Type, plugin.CategoryID, string(plugin.Tags), plugin.Publisher, plugin.OwnerUID, plugin.SpaceID, plugin.Visibility, plugin.CreatorName, plugin.CreatedByType, plugin.CreatedByBotUID, plugin.CreatedByBotName, string(plugin.Manifest), string(plugin.Package), plugin.ManifestHash, plugin.PluginHash, nil, plugin.Status, now, now)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, plugin.ID, plugin.Name, plugin.Type, plugin.IsEmbedded, plugin.CategoryID, string(plugin.Tags), plugin.Publisher, plugin.OwnerUID, plugin.SpaceID, plugin.Visibility, plugin.CreatorName, plugin.CreatedByType, plugin.CreatedByBotUID, plugin.CreatedByBotName, string(plugin.Manifest), string(plugin.Package), plugin.ManifestHash, plugin.PluginHash, nil, plugin.Status, now, now)
 	return wrapped("duplicate current state", err)
 }

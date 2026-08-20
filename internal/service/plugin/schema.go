@@ -67,7 +67,11 @@ func normalizeManifest(raw json.RawMessage, outerName string, outerType model.Pl
 	return canonical, tags, nil
 }
 
-func normalizePackage(raw, canonicalManifest json.RawMessage) (json.RawMessage, error) {
+// normalizePackage validates and canonicalizes a plugin package. spaceID scopes
+// storage attachments: a storage_uri must already be an approved object key for
+// the owning Space (the same rule the archive/download readers enforce), so a
+// package can never be written in a shape its own archive endpoint rejects.
+func normalizePackage(raw, canonicalManifest json.RawMessage, spaceID string) (json.RawMessage, error) {
 	value, err := decodeJSONObject(raw)
 	if err != nil || !onlyKeys(value, "$schema", "attachments") {
 		return nil, ErrInvalidRequest
@@ -145,7 +149,8 @@ func normalizePackage(raw, canonicalManifest json.RawMessage) (json.RawMessage, 
 			if !hasStorage {
 				return nil, ErrInvalidRequest
 			}
-			if _, ok := storageURI.(string); !ok {
+			uri, ok := storageURI.(string)
+			if !ok || !safeObjectSegment.MatchString(spaceID) || !validReferencedObjectKey(uri, spaceID) {
 				return nil, ErrInvalidRequest
 			}
 		}

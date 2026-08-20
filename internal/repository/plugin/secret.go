@@ -6,7 +6,11 @@ import (
 	"strings"
 )
 
-func rejectPersistedConnectorSecrets(values ...json.RawMessage) error {
+// maxPersistedSecretScanDepth bounds re-parsing of JSON documents carried as
+// string values (attachment raw_content); deeper nesting fails closed.
+const maxPersistedSecretScanDepth = 5
+
+func rejectPersistedSecretValues(values ...json.RawMessage) error {
 	for _, raw := range values {
 		if len(bytes.TrimSpace(raw)) == 0 {
 			continue
@@ -17,14 +21,14 @@ func rejectPersistedConnectorSecrets(values ...json.RawMessage) error {
 		if err := dec.Decode(&value); err != nil {
 			return ErrUnsafeConnectorData
 		}
-		if persistedSecretValuePresent(value) {
+		if persistedSecretValuePresent(value, 0) {
 			return ErrUnsafeConnectorData
 		}
 	}
 	return nil
 }
 
-func persistedSecretValuePresent(value any) bool {
+func persistedSecretValuePresent(value any, depth int) bool {
 	switch x := value.(type) {
 	case map[string]any:
 		for key, child := range x {
@@ -35,16 +39,45 @@ func persistedSecretValuePresent(value any) bool {
 			if isPersistedSecretField(normalized) && !isPersistedSecretDeclaration(normalized) && persistedNonEmptyLiteral(child) {
 				return true
 			}
-			if persistedSecretValuePresent(child) {
+			if persistedSecretValuePresent(child, depth) {
 				return true
 			}
 		}
 	case []any:
 		for _, child := range x {
-			if persistedSecretValuePresent(child) {
+			if persistedSecretValuePresent(child, depth) {
 				return true
 			}
 		}
+	case string:
+		return persistedEmbeddedJSONHasSecret(x, depth)
+	}
+	return false
+}
+
+// persistedEmbeddedJSONHasSecret re-parses string values that carry whole JSON
+// documents so secrets in attachment raw_content cannot bypass the walk.
+func persistedEmbeddedJSONHasSecret(text string, depth int) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return false
+	}
+	if depth >= maxPersistedSecretScanDepth {
+		return true
+	}
+	dec := json.NewDecoder(strings.NewReader(trimmed))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return false
+	}
+	var extra any
+	if dec.Decode(&extra) == nil {
+		return false
+	}
+	switch value.(type) {
+	case map[string]any, []any:
+		return persistedSecretValuePresent(value, depth+1)
 	}
 	return false
 }

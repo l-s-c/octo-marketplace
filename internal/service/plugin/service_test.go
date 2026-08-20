@@ -50,16 +50,30 @@ func (f *fakeStore) GetWithRelations(_ context.Context, _ pluginrepo.Scope, id s
 	rels := append([]model.PluginRelation(nil), f.relations[id]...)
 	return &copy, rels, nil
 }
-func (f *fakeStore) Create(_ context.Context, _ pluginrepo.Scope, m pluginrepo.Mutation) error {
+func (f *fakeStore) Create(_ context.Context, _ pluginrepo.Scope, m pluginrepo.Mutation) (*pluginrepo.RelationSync, error) {
 	p := m.Plugin
 	f.create, f.createRels = &p, m.Relations
 	f.createAudit = model.PluginAuditLog{OperatorID: m.OperatorID, OperatorName: m.OperatorName, RequestID: m.RequestID, Remark: m.Remark}
-	return f.err
+	if f.err != nil {
+		return nil, f.err
+	}
+	created := make([]string, 0, len(m.Relations))
+	for i := range m.Relations {
+		if m.Relations[i].ID == "" {
+			m.Relations[i].ID = "relation-created"
+		}
+		created = append(created, m.Relations[i].ID)
+	}
+	f.createRels = m.Relations
+	return &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}, nil
 }
-func (f *fakeStore) Update(_ context.Context, _ pluginrepo.Scope, m pluginrepo.Mutation) error {
+func (f *fakeStore) Update(_ context.Context, _ pluginrepo.Scope, m pluginrepo.Mutation) (*pluginrepo.RelationSync, error) {
 	p := m.Plugin
 	f.update = &p
-	return f.err
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &pluginrepo.RelationSync{Created: []string{}, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}, nil
 }
 func (f *fakeStore) Delete(_ context.Context, s pluginrepo.Scope, id, _, _, _ string, _ *string) error {
 	f.deleteScope, f.deleteID = s, id
@@ -235,10 +249,10 @@ func TestCreateStampsTrustedIdentity(t *testing.T) {
 
 func TestCrossSpaceNotFoundPropagatesWithoutLeak(t *testing.T) {
 	f := &fakeStore{err: pluginrepo.ErrNotFound}
-	if _, err := fixedService(f).Detail(context.Background(), testCaller, "expert:plugin-other", true); !errors.Is(err, ErrNotFound) {
+	if _, err := fixedService(f).Detail(context.Background(), testCaller, "plugin-other", true); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("detail err = %v", err)
 	}
-	if err := fixedService(f).Delete(context.Background(), testCaller, "expert:plugin-other"); !errors.Is(err, ErrNotFound) {
+	if err := fixedService(f).Delete(context.Background(), testCaller, "plugin-other"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete err = %v", err)
 	}
 }
@@ -246,7 +260,7 @@ func TestCrossSpaceNotFoundPropagatesWithoutLeak(t *testing.T) {
 func TestRelationSourceTargetValidation(t *testing.T) {
 	f := &fakeStore{plugins: map[string]*model.Plugin{"skill-1": {ID: "skill-1", Type: model.PluginTypeSkill}}}
 	r := validRequest()
-	r.Relations = []RelationRequest{{TargetPluginID: "skill:skill-1", Type: "expert_skill"}}
+	r.Relations = []RelationRequest{{TargetPluginID: "skill-1", Type: "expert_skill"}}
 	if _, err := fixedService(f).Create(context.Background(), testCaller, r); err != nil {
 		t.Fatalf("valid relation: %v", err)
 	}
@@ -270,19 +284,19 @@ func TestHistoryListsPropagateExactTotalsAndNotFound(t *testing.T) {
 		versionTotal: 42,
 	}
 	svc := fixedService(f)
-	audits, auditTotal, err := svc.ListAuditLogs(context.Background(), testCaller, "expert:plugin-1", 20, 20)
+	audits, auditTotal, err := svc.ListAuditLogs(context.Background(), testCaller, "plugin-1", 20, 20)
 	if err != nil || len(audits) != 1 || auditTotal != 37 {
 		t.Fatalf("audits=%#v total=%d err=%v", audits, auditTotal, err)
 	}
-	versions, versionTotal, err := svc.ListVersions(context.Background(), testCaller, "expert:plugin-1", 20, 40)
+	versions, versionTotal, err := svc.ListVersions(context.Background(), testCaller, "plugin-1", 20, 40)
 	if err != nil || len(versions) != 1 || versionTotal != 42 {
 		t.Fatalf("versions=%#v total=%d err=%v", versions, versionTotal, err)
 	}
 	f.err = pluginrepo.ErrNotFound
-	if _, _, err := svc.ListAuditLogs(context.Background(), testCaller, "expert:foreign", 20, 0); !errors.Is(err, ErrNotFound) {
+	if _, _, err := svc.ListAuditLogs(context.Background(), testCaller, "foreign", 20, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("audit not found err=%v", err)
 	}
-	if _, _, err := svc.ListVersions(context.Background(), testCaller, "expert:foreign", 20, 0); !errors.Is(err, ErrNotFound) {
+	if _, _, err := svc.ListVersions(context.Background(), testCaller, "foreign", 20, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("version not found err=%v", err)
 	}
 }
@@ -291,7 +305,7 @@ func TestPublishUsesRepositoryContractAndReturnedVersionID(t *testing.T) {
 	f := &fakeStore{plugins: map[string]*model.Plugin{
 		"plugin-1": {ID: "plugin-1", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p"},
 	}}
-	version, err := fixedService(f).Publish(context.Background(), testCaller, "expert:plugin-1", PublishRequest{Version: "1.0.0", Placements: []PlacementRequest{{PlacementCode: "home", Visible: true}}})
+	version, err := fixedService(f).Publish(context.Background(), testCaller, "plugin-1", PublishRequest{Version: "1.0.0", Placements: []PlacementRequest{{PlacementCode: "home", Visible: true}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,11 +319,11 @@ func TestRepositoryConflictsAndInvalidPlacementsMapToServiceErrors(t *testing.T)
 		"plugin-1": {ID: "plugin-1", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},
 	}}
 	f.err = pluginrepo.ErrConflict
-	if err := fixedService(f).Delete(context.Background(), testCaller, "expert:plugin-1"); !errors.Is(err, ErrConflict) {
+	if err := fixedService(f).Delete(context.Background(), testCaller, "plugin-1"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("Delete conflict = %v, want ErrConflict", err)
 	}
 	f.err = pluginrepo.ErrInvalidPlacement
-	if _, err := fixedService(f).Publish(context.Background(), testCaller, "expert:plugin-1", PublishRequest{Version: "1.0.0"}); !errors.Is(err, ErrInvalidRequest) {
+	if _, err := fixedService(f).Publish(context.Background(), testCaller, "plugin-1", PublishRequest{Version: "1.0.0"}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("Publish invalid placement = %v, want ErrInvalidRequest", err)
 	}
 }
@@ -317,7 +331,7 @@ func TestRepositoryConflictsAndInvalidPlacementsMapToServiceErrors(t *testing.T)
 func TestDuplicatePassesIndependentRootAndAuditMetadata(t *testing.T) {
 	source := &model.Plugin{ID: "source", Name: "Source", Type: model.PluginTypeExpert, OwnerUID: "another", Visibility: model.PluginVisibilityPublic, Manifest: json.RawMessage(`{"a":1}`), Package: json.RawMessage(`{"b":2}`), Tags: json.RawMessage(`["x"]`), PluginHash: "sha256:p"}
 	f := &fakeStore{plugins: map[string]*model.Plugin{"source": source}}
-	copy, err := fixedService(f).Duplicate(context.Background(), testCaller, "expert:source", "Copy")
+	copy, err := fixedService(f).Duplicate(context.Background(), testCaller, "source", "Copy")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,5 +341,118 @@ func TestDuplicatePassesIndependentRootAndAuditMetadata(t *testing.T) {
 	f.duplicate.Manifest[0] = '['
 	if source.Manifest[0] == '[' {
 		t.Fatal("duplicate manifest aliases source manifest")
+	}
+}
+
+func expertRequestWithConfigAttachment(configJSON string) WriteRequest {
+	r := validRequest()
+	canonical := `{"$schema":"cowork-plugin-manifest-1.0.json","description":"An example plugin.","examples":[],"labels":["one","two"],"name":"example-plugin","plugin_name":"Example Plugin","plugin_type":"expert"}`
+	r.Package = json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+		`{"path":"expert/mcp.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(configJSON) + `},` +
+		`{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(canonical) + `}]}`)
+	return r
+}
+
+func TestSecretScanCoversEmbeddedAttachmentJSONForAllTypes(t *testing.T) {
+	bad := []string{
+		`{"env":{"API_TOKEN":"plain-token"}}`,
+		`{"headers":{"Authorization":"Bearer abc"}}`,
+		`{"credentials":{"CUSTOM_NAME":"plain-token"}}`,
+		`{"wrapper":` + quoted(`{"secrets":{"CUSTOM":"plain-token"}}`) + `}`,
+	}
+	for _, config := range bad {
+		r := expertRequestWithConfigAttachment(config)
+		if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, r); !errors.Is(err, ErrSecretValue) {
+			t.Fatalf("config %s: err = %v, want ErrSecretValue", config, err)
+		}
+	}
+	good := []string{
+		`{"env":{"API_TOKEN":"${API_TOKEN}","REGION":"us-east-1"},"headers":{"Accept":"application/json"}}`,
+		`{"required_secret_names":["API_TOKEN"],"transport":"stdio"}`,
+	}
+	for _, config := range good {
+		r := expertRequestWithConfigAttachment(config)
+		if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, r); err != nil {
+			t.Fatalf("config %s: %v", config, err)
+		}
+	}
+}
+
+func TestSecretScanFailsClosedOnPathologicalNesting(t *testing.T) {
+	payload := `{"note":"harmless"}`
+	for i := 0; i < maxEmbeddedSecretScanDepth+1; i++ {
+		payload = `{"nested":` + quoted(payload) + `}`
+	}
+	r := expertRequestWithConfigAttachment(payload)
+	if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, r); !errors.Is(err, ErrSecretValue) {
+		t.Fatalf("err = %v, want ErrSecretValue", err)
+	}
+}
+
+func TestDuplicateRejectsStoredSecretsForNonConnectorTypes(t *testing.T) {
+	pkg := `{"$schema":"cowork-plugin-package-1.0.json","attachments":[{"path":"expert/mcp.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(`{"env":{"API_TOKEN":"plain-token"}}`) + `}]}`
+	source := &model.Plugin{ID: "source", Name: "Source", Type: model.PluginTypeExpert, OwnerUID: "another", Visibility: model.PluginVisibilityPublic, Manifest: json.RawMessage(`{"a":1}`), Package: json.RawMessage(pkg)}
+	f := &fakeStore{plugins: map[string]*model.Plugin{"source": source}}
+	if _, err := fixedService(f).Duplicate(context.Background(), testCaller, "source", "Copy"); !errors.Is(err, ErrSecretValue) {
+		t.Fatalf("err = %v, want ErrSecretValue", err)
+	}
+	if f.duplicateID != "" {
+		t.Fatal("secret-bearing source reached DuplicateGraph")
+	}
+}
+
+func TestCreateRejectsSubmittedRelationIDs(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{"target-1": {ID: "target-1", Type: model.PluginTypeSkill}}}
+	req := validRequest()
+	req.Relations = []RelationRequest{{ID: "rel-1", TargetPluginID: "target-1", Type: "expert_skill"}}
+	if _, err := fixedService(f).Create(context.Background(), testCaller, req); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("err = %v, want ErrInvalidRequest", err)
+	}
+}
+
+func TestUpdateAcceptsRelationIDAndMatchingSourceWireID(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{
+		"plugin-1": {ID: "plugin-1", Name: "Example Plugin", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},
+		"target-1": {ID: "target-1", Type: model.PluginTypeSkill},
+	}}
+	req := validRequest()
+	req.Relations = []RelationRequest{{ID: "rel-1", SourcePluginID: "plugin-1", TargetPluginID: "target-1", Type: "expert_skill"}}
+	v, err := fixedService(f).Update(context.Background(), testCaller, "plugin-1", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v.Relations) != 1 || v.Relations[0].ID != "rel-1" {
+		t.Fatalf("relations = %#v", v.Relations)
+	}
+	if v.RelationResult == nil {
+		t.Fatal("missing relation result")
+	}
+}
+
+func TestUpdateRejectsForeignRelationSourceWireID(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{
+		"plugin-1": {ID: "plugin-1", Name: "Example Plugin", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},
+		"target-1": {ID: "target-1", Type: model.PluginTypeSkill},
+	}}
+	req := validRequest()
+	req.Relations = []RelationRequest{{SourcePluginID: "another-plugin", TargetPluginID: "target-1", Type: "expert_skill"}}
+	if _, err := fixedService(f).Update(context.Background(), testCaller, "plugin-1", req); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("err = %v, want ErrInvalidRequest", err)
+	}
+}
+
+func TestCreateReturnsRelationResultWithGeneratedIDs(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{"target-1": {ID: "target-1", Type: model.PluginTypeSkill}}}
+	req := validRequest()
+	req.Relations = []RelationRequest{{TargetPluginID: "target-1", Type: "expert_skill"}}
+	v, err := fixedService(f).Create(context.Background(), testCaller, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.RelationResult == nil || len(v.RelationResult.Created) != 1 || v.RelationResult.Created[0] != "relation-created" {
+		t.Fatalf("relation result = %#v", v.RelationResult)
+	}
+	if len(v.Relations) != 1 || v.Relations[0].ID != "relation-created" {
+		t.Fatalf("relations = %#v", v.Relations)
 	}
 }

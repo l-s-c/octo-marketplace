@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"database/sql"
+	"sort"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 )
@@ -17,23 +18,32 @@ type Mutation struct {
 	Remark       *string
 }
 
+// RelationSync reports the outcome of synchronizing a Plugin's one-level
+// relations to the submitted target state: an empty relation ID creates, a
+// known ID with changed fields updates, and live IDs absent from the submitted
+// list are soft-deleted. Relations carries the final rows with assigned IDs.
+type RelationSync struct {
+	Created   []string
+	Updated   []string
+	Deleted   []string
+	Relations []model.PluginRelation
+}
+
 // Create atomically inserts current state, one-level relations, and an audit event.
-func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) error {
+func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) (*RelationSync, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
 	now := r.now()
 	p := m.Plugin
-	if p.Type == model.PluginTypeConnector {
-		if err = rejectPersistedConnectorSecrets(p.Manifest, p.Package); err != nil {
-			return err
-		}
+	if err = rejectPersistedSecretValues(p.Manifest, p.Package); err != nil {
+		return nil, err
 	}
 	for _, relation := range m.Relations {
-		if err = rejectPersistedConnectorSecrets(relation.Data); err != nil {
-			return err
+		if err = rejectPersistedSecretValues(relation.Data); err != nil {
+			return nil, err
 		}
 	}
 	p.OwnerUID = scope.CallerUID
@@ -42,77 +52,79 @@ func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) error {
 		p.ID = r.id()
 	}
 	if err = lockPluginCategory(ctx, tx, p.CategoryID, p.Type); err != nil {
-		return err
+		return nil, err
 	}
 	if err = lockRelationTargets(ctx, tx, scope, p.Type, m.Relations); err != nil {
-		return err
+		return nil, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO plugins (plugin_id,plugin_name,plugin_type,category_id,tags_json,publisher,owner_uid,space_id,visibility,
 creator_name,created_by_type,created_by_bot_uid,created_by_bot_name,manifest_json,plugin_json,manifest_hash,plugin_hash,current_version_id,status,created_at,updated_at)
 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.OwnerUID, p.SpaceID, p.Visibility, p.CreatorName, p.CreatedByType, p.CreatedByBotUID, p.CreatedByBotName, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.CurrentVersionID, p.Status, now, now)
 	if err != nil {
-		return wrapped("create", err)
+		return nil, wrapped("create", err)
 	}
-	if err = insertRelations(ctx, tx, r.id, now, p.ID, m.OperatorID, m.Relations); err != nil {
-		return err
+	created, err := insertRelations(ctx, tx, r.id, now, p.ID, m.OperatorID, m.Relations)
+	if err != nil {
+		return nil, err
 	}
 	if err = insertAudit(ctx, tx, r.id(), now, p, "create", m, "", p.PluginHash); err != nil {
-		return err
+		return nil, err
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}, nil
 }
 
-// Update atomically updates an owned Plugin, replaces its one-level relations, and appends audit.
-func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) error {
+// Update atomically updates an owned Plugin, synchronizes its one-level
+// relations to the submitted target state, and appends audit.
+func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSync, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
 	before, err := getOwnedForUpdate(ctx, tx, scope, m.Plugin.ID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	now := r.now()
 	p := m.Plugin
-	if p.Type == model.PluginTypeConnector {
-		if err = rejectPersistedConnectorSecrets(p.Manifest, p.Package); err != nil {
-			return err
-		}
+	if err = rejectPersistedSecretValues(p.Manifest, p.Package); err != nil {
+		return nil, err
 	}
 	for _, relation := range m.Relations {
-		if err = rejectPersistedConnectorSecrets(relation.Data); err != nil {
-			return err
+		if err = rejectPersistedSecretValues(relation.Data); err != nil {
+			return nil, err
 		}
 	}
 	if p.Type != before.Type {
-		return ErrInvalidRelation
+		return nil, ErrInvalidRelation
 	}
 	if err = lockPluginCategory(ctx, tx, p.CategoryID, p.Type); err != nil {
-		return err
+		return nil, err
 	}
 	if err = lockRelationTargets(ctx, tx, scope, p.Type, m.Relations); err != nil {
-		return err
+		return nil, err
 	}
 	// getOwnedForUpdate already proved existence under lock; RowsAffected reports
 	// changed rows, so a byte-identical resubmit must not surface as not found.
 	_, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,manifest_json=?,plugin_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
 WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.Visibility, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.Status, now, p.ID, scope.CallerUID, scope.SpaceID)
 	if err != nil {
-		return wrapped("update", err)
+		return nil, wrapped("update", err)
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE plugin_relations r JOIN plugins p ON p.plugin_id=r.source_plugin_id
-SET r.deleted_at=?,r.updated_at=? WHERE r.source_plugin_id=? AND p.owner_uid=? AND p.space_id=? AND p.deleted_at IS NULL AND r.deleted_at IS NULL`, now, now, p.ID, scope.CallerUID, scope.SpaceID)
+	sync, err := syncRelations(ctx, tx, r.id, now, p.ID, m.OperatorID, m.Relations)
 	if err != nil {
-		return err
-	}
-	if err = insertRelations(ctx, tx, r.id, now, p.ID, m.OperatorID, m.Relations); err != nil {
-		return err
+		return nil, err
 	}
 	if err = insertAudit(ctx, tx, r.id(), now, p, "update", m, before.PluginHash, p.PluginHash); err != nil {
-		return err
+		return nil, err
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return sync, nil
 }
 
 // Delete soft-deletes an owned Plugin, invalidates its outgoing relation edges,
@@ -221,9 +233,6 @@ func lockRelationTargets(ctx context.Context, tx *sql.Tx, scope Scope, sourceTyp
 			}
 			return err
 		}
-		if relation.ExpectedTargetType != "" && relation.ExpectedTargetType != targetType {
-			return ErrInvalidRelation
-		}
 		if !validPersistedRelation(relation.Type, sourceType, targetType) {
 			return ErrInvalidRelation
 		}
@@ -245,22 +254,108 @@ func validPersistedRelation(relationType string, sourceType, targetType model.Pl
 	}
 }
 
-func insertRelations(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, source, creator string, rels []model.PluginRelation) error {
-	for _, x := range rels {
-		id := x.ID
-		if id == "" {
-			id = newID()
+func insertRelations(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, source, creator string, rels []model.PluginRelation) ([]string, error) {
+	created := make([]string, 0, len(rels))
+	for i := range rels {
+		if rels[i].ID == "" {
+			rels[i].ID = newID()
 		}
-		var data any
-		if len(x.Data) > 0 {
-			data = string(x.Data)
+		if err := insertRelationRow(ctx, tx, now, source, creator, rels[i]); err != nil {
+			return nil, err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO plugin_relations (relation_id,source_plugin_id,target_plugin_id,relation_type,sort_order,relation_json,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, id, source, x.TargetPluginID, x.Type, x.SortOrder, data, x.Status, creator, now, now)
-		if err != nil {
-			return wrapped("replace relations", err)
-		}
+		created = append(created, rels[i].ID)
+	}
+	return created, nil
+}
+
+func insertRelationRow(ctx context.Context, tx *sql.Tx, now interface{}, source, creator string, x model.PluginRelation) error {
+	var data any
+	if len(x.Data) > 0 {
+		data = string(x.Data)
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO plugin_relations (relation_id,source_plugin_id,target_plugin_id,relation_type,sort_order,relation_json,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, x.ID, source, x.TargetPluginID, x.Type, x.SortOrder, data, x.Status, creator, now, now)
+	if err != nil {
+		return wrapped("replace relations", err)
 	}
 	return nil
+}
+
+// syncRelations reconciles the submitted target state against the live edge set
+// under row locks: empty IDs insert, known IDs update when any field differs,
+// and live IDs missing from the submission are soft-deleted. A non-empty ID
+// that does not match a live edge of this Plugin is rejected.
+func syncRelations(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, source, creator string, desired []model.PluginRelation) (*RelationSync, error) {
+	type liveEdge struct {
+		target    string
+		typ       string
+		sortOrder int
+		data      sql.NullString
+		status    int
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations
+WHERE source_plugin_id=? AND deleted_at IS NULL ORDER BY relation_id FOR UPDATE`, source)
+	if err != nil {
+		return nil, wrapped("load relations", err)
+	}
+	live := map[string]liveEdge{}
+	for rows.Next() {
+		var id string
+		var edge liveEdge
+		if err := rows.Scan(&id, &edge.target, &edge.typ, &edge.sortOrder, &edge.data, &edge.status); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		live[id] = edge
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	sync := &RelationSync{Created: []string{}, Updated: []string{}, Deleted: []string{}}
+	for i := range desired {
+		rel := &desired[i]
+		if rel.ID == "" {
+			rel.ID = newID()
+			if err := insertRelationRow(ctx, tx, now, source, creator, *rel); err != nil {
+				return nil, err
+			}
+			sync.Created = append(sync.Created, rel.ID)
+			continue
+		}
+		edge, ok := live[rel.ID]
+		if !ok {
+			return nil, ErrInvalidRelation
+		}
+		delete(live, rel.ID)
+		sameData := (len(rel.Data) == 0 && !edge.data.Valid) || (len(rel.Data) > 0 && edge.data.Valid && edge.data.String == string(rel.Data))
+		if edge.target == rel.TargetPluginID && edge.typ == rel.Type && edge.sortOrder == rel.SortOrder && edge.status == rel.Status && sameData {
+			continue
+		}
+		var data any
+		if len(rel.Data) > 0 {
+			data = string(rel.Data)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE plugin_relations SET target_plugin_id=?,relation_type=?,sort_order=?,relation_json=?,status=?,updated_at=?
+WHERE relation_id=? AND source_plugin_id=? AND deleted_at IS NULL`, rel.TargetPluginID, rel.Type, rel.SortOrder, data, rel.Status, now, rel.ID, source); err != nil {
+			return nil, wrapped("update relation", err)
+		}
+		sync.Updated = append(sync.Updated, rel.ID)
+	}
+	leftover := make([]string, 0, len(live))
+	for id := range live {
+		leftover = append(leftover, id)
+	}
+	sort.Strings(leftover)
+	for _, id := range leftover {
+		if _, err := tx.ExecContext(ctx, `UPDATE plugin_relations SET deleted_at=?,updated_at=? WHERE relation_id=? AND source_plugin_id=? AND deleted_at IS NULL`, now, now, id, source); err != nil {
+			return nil, wrapped("delete relation", err)
+		}
+		sync.Deleted = append(sync.Deleted, id)
+	}
+	sync.Relations = desired
+	return sync, nil
 }
 func insertAudit(ctx context.Context, tx *sql.Tx, auditID string, now interface{}, p model.Plugin, action string, m Mutation, before, after string) error {
 	var bh, ah any

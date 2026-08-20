@@ -120,7 +120,6 @@ func scanPluginVersion(s interface{ Scan(...any) error }) (*model.PluginVersion,
 // PublishParams describes an immutable version and its replacement placements.
 type PublishParams struct {
 	PluginID, Version, CreatedBy, OperatorName, RequestID string
-	ExpectedPluginType                                    model.PluginType
 	Changelog                                             *string
 	Placements                                            []model.PluginPlacement
 }
@@ -137,13 +136,8 @@ func (r *Repo) Publish(ctx context.Context, scope Scope, p PublishParams) (*mode
 	if err != nil {
 		return nil, err
 	}
-	if p.ExpectedPluginType != "" && current.Type != p.ExpectedPluginType {
-		return nil, ErrNotFound
-	}
-	if current.Type == model.PluginTypeConnector {
-		if err := rejectPersistedConnectorSecrets(current.Manifest, current.Package); err != nil {
-			return nil, err
-		}
+	if err := rejectPersistedSecretValues(current.Manifest, current.Package); err != nil {
+		return nil, err
 	}
 	relations, err := loadPublishRelations(ctx, tx, scope, p.PluginID)
 	if err != nil {
@@ -250,10 +244,16 @@ FOR UPDATE`, *placement.CategoryID, pluginType, placement.PlacementCode, pluginT
 }
 
 func (r *Repo) ListPlacementCategories(ctx context.Context, scope Scope, placementCode string, typ model.PluginType) ([]model.PluginCategory, error) {
-	// Scope arguments are deliberately part of this query even though categories are global: only categories backed by a Plugin visible to this caller/Space are returned.
-	rows, err := r.db.QueryContext(ctx, `SELECT DISTINCT c.category_id,c.name,c.icon_key,c.plugin_types_json,cp.sort_order,c.status,c.created_at,c.updated_at
-FROM plugin_category_placements cp JOIN plugin_categories c ON c.category_id=cp.category_id JOIN plugin_placements pp ON pp.placement_code=cp.placement_code AND pp.category_id=c.category_id AND pp.visible=1 JOIN plugins p ON p.plugin_id=pp.plugin_id
-WHERE cp.placement_code=? AND cp.plugin_type=? AND p.plugin_type=? AND cp.visible=1 AND c.status=1 AND c.deleted_at IS NULL AND p.status=1 AND p.deleted_at IS NULL AND `+visibilitySQL+` ORDER BY cp.sort_order,c.category_id`, placementCode, typ, typ, scope.SpaceID, scope.CallerUID)
+	// Categories are placement configuration: every active category registered
+	// for this placement and plugin type is returned, backed by plugins or not.
+	// Scope only shapes plugin_count, which tallies published plugins visible to
+	// this caller/Space so counts never leak cross-Space existence.
+	rows, err := r.db.QueryContext(ctx, `SELECT c.category_id,c.name,c.icon_key,c.plugin_types_json,cp.sort_order,c.status,c.created_at,c.updated_at,
+(SELECT COUNT(DISTINCT p.plugin_id) FROM plugin_placements pp JOIN plugins p ON p.plugin_id=pp.plugin_id
+ WHERE pp.placement_code=cp.placement_code AND pp.category_id=c.category_id AND pp.visible=1
+ AND p.plugin_type=? AND p.status=1 AND p.deleted_at IS NULL AND `+visibilitySQL+`) AS plugin_count
+FROM plugin_category_placements cp JOIN plugin_categories c ON c.category_id=cp.category_id
+WHERE cp.placement_code=? AND cp.plugin_type=? AND cp.visible=1 AND c.status=1 AND c.deleted_at IS NULL ORDER BY cp.sort_order,c.category_id`, typ, scope.SpaceID, scope.CallerUID, placementCode, typ)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +262,7 @@ WHERE cp.placement_code=? AND cp.plugin_type=? AND p.plugin_type=? AND cp.visibl
 	for rows.Next() {
 		var c model.PluginCategory
 		var types []byte
-		if err := rows.Scan(&c.ID, &c.Name, &c.IconKey, &types, &c.SortOrder, &c.Status, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.IconKey, &types, &c.SortOrder, &c.Status, &c.CreatedAt, &c.UpdatedAt, &c.PluginCount); err != nil {
 			return nil, err
 		}
 		c.PluginTypes = cloneJSON(types)

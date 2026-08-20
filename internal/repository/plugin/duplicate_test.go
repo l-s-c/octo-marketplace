@@ -24,9 +24,9 @@ func TestDuplicateGraphDeepCopiesGraphAndCommits(t *testing.T) {
 	expectDuplicateNode(mock, "root", scope, pluginRow("root", "Root"), relationRows("root", "child"))
 	expectDuplicateNode(mock, "child", scope, pluginRow("child", "Child"), relationRows("child", "leaf"))
 	expectDuplicateNode(mock, "leaf", scope, pluginRow("leaf", "Leaf"), emptyRelationRows())
-	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("root-copy", "Root copy", model.PluginTypeExpert, nil, "[]", "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "{}", "{}", "sha256:m", "sha256:root", nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("child-copy", "Child", model.PluginTypeExpert, nil, "[]", "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "{}", "{}", "sha256:m", "sha256:child", nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("leaf-copy", "Leaf", model.PluginTypeExpert, nil, "[]", "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "{}", "{}", "sha256:m", "sha256:leaf", nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("root-copy", "Root copy", model.PluginTypeExpert, false, nil, "[]", "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "{}", "{}", "sha256:m", "sha256:root", nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("child-copy", "Child", model.PluginTypeExpert, false, nil, "[]", "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "{}", "{}", "sha256:m", "sha256:child", nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("leaf-copy", "Leaf", model.PluginTypeExpert, false, nil, "[]", "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "{}", "{}", "sha256:m", "sha256:leaf", nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO plugin_relations`).WithArgs("root-rel-copy", "root-copy", "child-copy", "plugin_dependency", 0, `{"role":"x"}`, 1, "caller", now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO plugin_relations`).WithArgs("child-rel-copy", "child-copy", "leaf-copy", "plugin_dependency", 0, `{"role":"x"}`, 1, "caller", now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("root-audit-copy", "root-copy", "duplicate", "caller", "Caller", "request", nil, "sha256:root", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
@@ -119,12 +119,12 @@ func expectDuplicateNode(mock sqlmock.Sqlmock, id string, scope Scope, pluginRow
 
 func pluginRow(id, name string) *sqlmock.Rows {
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
-	return sqlmock.NewRows(pluginTestColumns()).AddRow(id, name, model.PluginTypeExpert, nil, []byte(`[]`), "pub", "source-owner", "source-space", model.PluginVisibilityPublic, "Creator", "human", nil, nil, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:"+id, nil, 1, now, now, nil)
+	return sqlmock.NewRows(pluginTestColumns()).AddRow(id, name, model.PluginTypeExpert, 0, nil, []byte(`[]`), "pub", "source-owner", "source-space", model.PluginVisibilityPublic, "Creator", "human", nil, nil, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:"+id, nil, 1, now, now, nil)
 }
 
 func connectorPluginRow(id, pkg string) *sqlmock.Rows {
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
-	return sqlmock.NewRows(pluginTestColumns()).AddRow(id, "Connector", model.PluginTypeConnector, nil, []byte(`[]`), "pub", "source-owner", "source-space", model.PluginVisibilityPublic, "Creator", "human", nil, nil, []byte(`{}`), []byte(pkg), "sha256:m", "sha256:"+id, nil, 1, now, now, nil)
+	return sqlmock.NewRows(pluginTestColumns()).AddRow(id, "Connector", model.PluginTypeConnector, 0, nil, []byte(`[]`), "pub", "source-owner", "source-space", model.PluginVisibilityPublic, "Creator", "human", nil, nil, []byte(`{}`), []byte(pkg), "sha256:m", "sha256:"+id, nil, 1, now, now, nil)
 }
 
 func relationRows(source, target string) *sqlmock.Rows {

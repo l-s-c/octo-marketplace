@@ -11,7 +11,7 @@ import (
 )
 
 // ListFilter restricts a scoped Plugin listing. Sort accepts newest (default),
-// oldest, name, or placement; callers validate unsupported values.
+// oldest, updated, name, or placement; callers validate unsupported values.
 type ListFilter struct {
 	PlacementCode string
 	Type          model.PluginType
@@ -56,7 +56,7 @@ func (r *Repo) List(ctx context.Context, scope Scope, f ListFilter) ([]model.Plu
 	if f.PlacementCode != "" {
 		group = ` GROUP BY p.plugin_id`
 	}
-	q := `SELECT ` + pluginColumns + from + where + group + listOrder(f) + ` LIMIT ? OFFSET ?`
+	q := `SELECT ` + pluginSummaryColumns + from + where + group + listOrder(f) + ` LIMIT ? OFFSET ?`
 	rows, err := r.db.QueryContext(ctx, q, queryArgs...)
 	if err != nil {
 		return nil, 0, err
@@ -64,7 +64,7 @@ func (r *Repo) List(ctx context.Context, scope Scope, f ListFilter) ([]model.Plu
 	defer rows.Close()
 	var out []model.Plugin
 	for rows.Next() {
-		p, err := scanPlugin(rows)
+		p, err := scanPluginSummary(rows)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -83,7 +83,9 @@ func buildListQuery(scope Scope, f ListFilter) (string, string, []any) {
 		from += ` JOIN plugin_placements pp ON pp.plugin_id=p.plugin_id AND pp.placement_code=? AND pp.visible=1`
 		args = append(args, f.PlacementCode)
 	}
-	where := ` WHERE p.status=1 AND p.deleted_at IS NULL AND ` + visibilitySQL
+	// Embedded plugins (promoted from a parent's JSON) are parts of a parent
+	// asset: reachable via detail and relations, never listed as catalog entries.
+	where := ` WHERE p.status=1 AND p.deleted_at IS NULL AND p.is_embedded=0 AND ` + visibilitySQL
 	args = append(args, scope.SpaceID, scope.CallerUID)
 	if f.Type != "" {
 		where += ` AND p.plugin_type=?`
@@ -116,6 +118,8 @@ func listOrder(f ListFilter) string {
 	switch f.Sort {
 	case "oldest":
 		return ` ORDER BY p.created_at ASC,p.plugin_id ASC`
+	case "updated":
+		return ` ORDER BY p.updated_at DESC,p.plugin_id DESC`
 	case "name":
 		return ` ORDER BY p.plugin_name ASC,p.plugin_id ASC`
 	case "placement":
@@ -164,12 +168,26 @@ ORDER BY r.sort_order,r.relation_id`, pluginID, scope.SpaceID, scope.CallerUID)
 }
 
 func scanPlugin(s interface{ Scan(...any) error }) (*model.Plugin, error) {
+	return scanPluginRow(s, true)
+}
+
+// scanPluginSummary scans a row selected with pluginSummaryColumns; the
+// package stays nil so list pages never materialize it.
+func scanPluginSummary(s interface{ Scan(...any) error }) (*model.Plugin, error) {
+	return scanPluginRow(s, false)
+}
+
+func scanPluginRow(s interface{ Scan(...any) error }, includePackage bool) (*model.Plugin, error) {
 	var p model.Plugin
 	var category, space, botUID, botName, version sql.NullString
 	var tags, manifest, pkg []byte
 	var deleted sql.NullTime
-	err := s.Scan(&p.ID, &p.Name, &p.Type, &category, &tags, &p.Publisher, &p.OwnerUID, &space, &p.Visibility, &p.CreatorName, &p.CreatedByType, &botUID, &botName, &manifest, &pkg, &p.ManifestHash, &p.PluginHash, &version, &p.Status, &p.CreatedAt, &p.UpdatedAt, &deleted)
-	if err != nil {
+	dest := []any{&p.ID, &p.Name, &p.Type, &p.IsEmbedded, &category, &tags, &p.Publisher, &p.OwnerUID, &space, &p.Visibility, &p.CreatorName, &p.CreatedByType, &botUID, &botName, &manifest}
+	if includePackage {
+		dest = append(dest, &pkg)
+	}
+	dest = append(dest, &p.ManifestHash, &p.PluginHash, &version, &p.Status, &p.CreatedAt, &p.UpdatedAt, &deleted)
+	if err := s.Scan(dest...); err != nil {
 		return nil, err
 	}
 	p.CategoryID = nullString(category)
@@ -182,7 +200,9 @@ func scanPlugin(s interface{ Scan(...any) error }) (*model.Plugin, error) {
 	}
 	p.Tags = cloneJSON(tags)
 	p.Manifest = cloneJSON(manifest)
-	p.Package = cloneJSON(pkg)
+	if includePackage {
+		p.Package = cloneJSON(pkg)
+	}
 	return &p, nil
 }
 func cloneJSON(v []byte) []byte {

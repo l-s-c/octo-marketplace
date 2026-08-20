@@ -50,7 +50,7 @@ func TestNormalizePackageSortsAndRequiresExactCanonicalManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := json.RawMessage(`{"attachments":[{"path":"z.txt","content_type":"raw","mime_type":"text/plain","raw_content":"z"},{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(string(manifest)) + `}],"$schema":"cowork-plugin-package-1.0.json"}`)
-	got, err := normalizePackage(raw, manifest)
+	got, err := normalizePackage(raw, manifest, "space-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,8 +74,35 @@ func TestNormalizePackageRejectsInvalidSchemaAttachmentsAndManifest(t *testing.T
 		`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` + entry + `,{"path":"x","content_type":"storage","mime_type":"text/plain","storage_uri":"key","extra":true}]}`,
 	}
 	for _, raw := range tests {
-		if _, err := normalizePackage(json.RawMessage(raw), manifest); !errors.Is(err, ErrInvalidRequest) {
+		if _, err := normalizePackage(json.RawMessage(raw), manifest, "space-a"); !errors.Is(err, ErrInvalidRequest) {
 			t.Fatalf("accepted %s: %v", raw, err)
+		}
+	}
+}
+
+func TestNormalizePackageStorageURIMustMatchArchiveObjectKeyRule(t *testing.T) {
+	manifest, _, err := normalizeManifest(json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"Plugin","plugin_type":"expert","name":"internal","description":"desc"}`), "Plugin", model.PluginTypeExpert, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk := func(uri string) json.RawMessage {
+		return json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+			`{"path":"assets/icon.png","content_type":"storage","mime_type":"image/png","storage_uri":` + quoted(uri) + `},` +
+			`{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(string(manifest)) + `}]}`)
+	}
+	if _, err := normalizePackage(mk("plugins/space-a/attachments/icon-1.png"), manifest, "space-a"); err != nil {
+		t.Fatalf("approved key rejected: %v", err)
+	}
+	for _, uri := range []string{
+		"s3://octo-plugin-assets/plugins/prd-outline/assets/icon.png",
+		"plugins/space-b/attachments/icon-1.png",
+		"/plugins/space-a/attachments/icon-1.png",
+		"plugins/space-a/attachments/../escape.png",
+		"plugins/space-a/attachments/",
+		"key",
+	} {
+		if _, err := normalizePackage(mk(uri), manifest, "space-a"); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("uri %q accepted: %v", uri, err)
 		}
 	}
 }

@@ -30,6 +30,7 @@ type Plugin struct {
 	ID               string
 	Name             string
 	Type             PluginType
+	IsEmbedded       bool
 	CategoryID       *string
 	Tags             json.RawMessage
 	Publisher        string
@@ -53,20 +54,19 @@ type Plugin struct {
 
 // PluginRelation is one directed, one-level composition edge.
 type PluginRelation struct {
-	ID                 string
-	SourcePluginID     string
-	SourcePluginType   PluginType
-	TargetPluginID     string
-	TargetPluginType   PluginType
-	ExpectedTargetType PluginType
-	Type               string
-	SortOrder          int
-	Data               json.RawMessage
-	Status             int
-	CreatedBy          string
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	DeletedAt          *time.Time
+	ID               string
+	SourcePluginID   string
+	SourcePluginType PluginType
+	TargetPluginID   string
+	TargetPluginType PluginType
+	Type             string
+	SortOrder        int
+	Data             json.RawMessage
+	Status           int
+	CreatedBy        string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	DeletedAt        *time.Time
 }
 
 // PluginAuditLog is an append-only operation record.
@@ -122,6 +122,7 @@ type PluginCategory struct {
 	PluginTypes json.RawMessage
 	SortOrder   int
 	Status      int
+	PluginCount int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }

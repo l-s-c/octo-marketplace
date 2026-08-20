@@ -26,8 +26,9 @@ const (
 )
 
 var (
-	versionPattern   = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$`)
-	placementPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,127}$`)
+	versionPattern    = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$`)
+	placementPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,127}$`)
+	relationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 )
 
 func validPluginType(v model.PluginType) bool {
@@ -56,6 +57,7 @@ func validName(v string) bool {
 
 func validVersion(v string) bool       { return versionPattern.MatchString(strings.TrimSpace(v)) }
 func validPlacementCode(v string) bool { return placementPattern.MatchString(v) }
+func validRelationID(v string) bool    { return relationIDPattern.MatchString(v) }
 
 func validRelationSource(relation string, source model.PluginType) bool {
 	switch relation {
@@ -179,26 +181,37 @@ func hashJSON(canonical json.RawMessage) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// rejectConnectorSecrets rejects values likely to be credentials while allowing
+// maxEmbeddedSecretScanDepth bounds re-parsing of JSON documents carried as
+// string values (attachment raw_content). Legitimate packages nest at most one
+// document level; deeper nesting fails closed.
+const maxEmbeddedSecretScanDepth = 5
+
+// rejectSecretValues rejects values likely to be credentials while allowing
 // declarations (secret_names/required_secrets) and references (${NAME}, env://,
-// secret://, vault://). It deliberately examines both manifest and package so
-// the same invariant protects current state, immutable versions, and audits.
-func rejectConnectorSecrets(values ...json.RawMessage) error {
+// secret://, vault://). It applies to every plugin type — experts and teams
+// carry MCP config too — and examines both manifest and package so the same
+// invariant protects current state, immutable versions, and audits. String
+// values that are themselves JSON documents (attachment raw_content, where
+// connector config canonically lives) are re-parsed and scanned.
+func rejectSecretValues(values ...json.RawMessage) error {
 	for _, raw := range values {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.UseNumber()
 		var value any
 		if err := dec.Decode(&value); err != nil {
 			return ErrInvalidRequest
 		}
-		if secretValuePresent(value, nil) {
+		if secretValuePresent(value, nil, 0) {
 			return ErrSecretValue
 		}
 	}
 	return nil
 }
 
-func secretValuePresent(value any, path []string) bool {
+func secretValuePresent(value any, path []string, depth int) bool {
 	switch x := value.(type) {
 	case map[string]any:
 		for key, child := range x {
@@ -220,16 +233,42 @@ func secretValuePresent(value any, path []string) bool {
 			if isSecretField(normalizedKey) && (nonEmptyLiteral(child) || secretContainerHasValue(child, "secrets")) {
 				return true
 			}
-			if secretValuePresent(child, next) {
+			if secretValuePresent(child, next, depth) {
 				return true
 			}
 		}
 	case []any:
 		for _, child := range x {
-			if secretValuePresent(child, path) {
+			if secretValuePresent(child, path, depth) {
 				return true
 			}
 		}
+	case string:
+		return embeddedJSONHasSecret(x, path, depth)
+	}
+	return false
+}
+
+// embeddedJSONHasSecret re-parses string values that carry whole JSON documents
+// so secrets cannot be smuggled past the walk inside attachment raw_content or
+// further string-encoded layers.
+func embeddedJSONHasSecret(text string, path []string, depth int) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return false
+	}
+	if depth >= maxEmbeddedSecretScanDepth {
+		return true
+	}
+	dec := json.NewDecoder(strings.NewReader(trimmed))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil || ensureJSONEOF(dec) != nil {
+		return false
+	}
+	switch value.(type) {
+	case map[string]any, []any:
+		return secretValuePresent(value, path, depth+1)
 	}
 	return false
 }
@@ -402,9 +441,22 @@ func normalizeSecretKey(key string) string {
 	return strings.ToLower(out.String())
 }
 
+// secretDescriptorSuffixes are trailing words that describe an auth mechanism
+// rather than carry it (auth_type: "none", token_format: "jwt"); such keys hold
+// metadata, not credential values.
+var secretDescriptorSuffixes = map[string]struct{}{
+	"type": {}, "mode": {}, "method": {}, "scheme": {}, "kind": {},
+	"enabled": {}, "required": {}, "format": {}, "provider": {}, "status": {}, "version": {},
+}
+
 func isSecretField(key string) bool {
 	key = normalizeSecretKey(key)
 	parts := strings.FieldsFunc(key, func(r rune) bool { return r == '_' })
+	if len(parts) > 1 {
+		if _, descriptor := secretDescriptorSuffixes[parts[len(parts)-1]]; descriptor {
+			return false
+		}
+	}
 	for _, part := range parts {
 		switch part {
 		case "password", "passwd", "secret", "token", "bearer", "auth", "authorization", "credential", "credentials", "apikey":
@@ -415,11 +467,20 @@ func isSecretField(key string) bool {
 		strings.Contains(key, "access_key")
 }
 
+// isSecretDeclaration matches keys that declare a secret by name or reference
+// (secret_name, token_refs, required_*). The stem must itself be secret-shaped:
+// generic keys like file_name or member_ref are ordinary data, not declarations.
 func isSecretDeclaration(key string) bool {
 	key = normalizeSecretKey(key)
-	return strings.HasSuffix(key, "_name") || strings.HasSuffix(key, "_names") ||
-		strings.HasSuffix(key, "_ref") || strings.HasSuffix(key, "_refs") ||
-		strings.HasPrefix(key, "required_")
+	if strings.HasPrefix(key, "required_") {
+		return true
+	}
+	for _, suffix := range []string{"_name", "_names", "_ref", "_refs"} {
+		if strings.HasSuffix(key, suffix) {
+			return isSecretField(strings.TrimSuffix(key, suffix))
+		}
+	}
+	return false
 }
 
 func hashForTest(raw json.RawMessage) (string, error) {

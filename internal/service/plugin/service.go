@@ -40,8 +40,8 @@ type Caller struct {
 type Store interface {
 	List(context.Context, pluginrepo.Scope, pluginrepo.ListFilter) ([]model.Plugin, int64, error)
 	GetWithRelations(context.Context, pluginrepo.Scope, string) (*model.Plugin, []model.PluginRelation, error)
-	Create(context.Context, pluginrepo.Scope, pluginrepo.Mutation) error
-	Update(context.Context, pluginrepo.Scope, pluginrepo.Mutation) error
+	Create(context.Context, pluginrepo.Scope, pluginrepo.Mutation) (*pluginrepo.RelationSync, error)
+	Update(context.Context, pluginrepo.Scope, pluginrepo.Mutation) (*pluginrepo.RelationSync, error)
 	Delete(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
 	ListAudits(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginAuditLog, int64, error)
 	ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, int64, error)
@@ -113,6 +113,17 @@ type ListParams struct {
 type Detail struct {
 	Plugin    *model.Plugin
 	Relations []model.PluginRelation
+	// RelationResult reports upsert relation synchronization; nil on reads.
+	RelationResult *RelationResult
+}
+
+// RelationResult mirrors the target-state relation sync outcome on the wire:
+// empty relation_id created, known relation_id with changes updated, live
+// relations absent from the submission deleted.
+type RelationResult struct {
+	Created []string
+	Updated []string
+	Deleted []string
 }
 
 type WriteRequest struct {
@@ -128,6 +139,11 @@ type WriteRequest struct {
 }
 
 type RelationRequest struct {
+	// ID is the submitted relation_id: empty creates, a live relation's ID
+	// updates, and live relations omitted from the submission are deleted.
+	ID string
+	// SourcePluginID, when supplied, must address the Plugin being upserted.
+	SourcePluginID string
 	TargetPluginID string
 	Type           string
 	SortOrder      int
@@ -156,7 +172,7 @@ func (s *Service) List(ctx context.Context, caller Caller, p ListParams) ([]mode
 	if p.Type != "" && !validPluginType(p.Type) {
 		return nil, 0, ErrInvalidRequest
 	}
-	if p.Sort != "" && p.Sort != "newest" && p.Sort != "oldest" && p.Sort != "name" && p.Sort != "placement" {
+	if p.Sort != "" && p.Sort != "newest" && p.Sort != "oldest" && p.Sort != "updated" && p.Sort != "name" && p.Sort != "placement" {
 		return nil, 0, ErrInvalidRequest
 	}
 	if p.Sort == "placement" && strings.TrimSpace(p.PlacementCode) == "" {
@@ -173,16 +189,13 @@ func (s *Service) Detail(ctx context.Context, caller Caller, pluginID string, in
 	if validateCaller(caller) != nil {
 		return nil, ErrInvalidRequest
 	}
-	storageID, expectedType, err := parseWirePluginID(pluginID)
+	storageID, err := parseStorageID(pluginID)
 	if err != nil {
 		return nil, err
 	}
 	p, rels, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
 	if err != nil {
 		return nil, mapStoreError(err)
-	}
-	if p.Type != expectedType {
-		return nil, ErrNotFound
 	}
 	if !includeRelations {
 		rels = []model.PluginRelation{}
@@ -208,17 +221,21 @@ func (s *Service) Create(ctx context.Context, caller Caller, req WriteRequest) (
 		rels[i].SourcePluginID = p.ID
 	}
 	audit := s.audit(caller, p.ID, "create", nil, p, now)
-	if err := s.repo.Create(ctx, scope(caller), mutation(*p, rels, audit)); err != nil {
+	sync, err := s.repo.Create(ctx, scope(caller), mutation(*p, rels, audit))
+	if err != nil {
 		return nil, mapStoreError(err)
 	}
-	return &Detail{Plugin: p, Relations: rels}, nil
+	if sync != nil && sync.Relations != nil {
+		rels = sync.Relations
+	}
+	return &Detail{Plugin: p, Relations: rels, RelationResult: relationResult(sync)}, nil
 }
 
 func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, req WriteRequest) (*Detail, error) {
 	if err := validateCaller(caller); err != nil {
 		return nil, err
 	}
-	storageID, expectedType, err := parseWirePluginID(pluginID)
+	storageID, err := parseStorageID(pluginID)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +243,7 @@ func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, re
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
-	if old.Type != expectedType || old.OwnerUID != caller.UID || (old.SpaceID != nil && *old.SpaceID != caller.SpaceID) {
+	if old.OwnerUID != caller.UID || (old.SpaceID != nil && *old.SpaceID != caller.SpaceID) {
 		return nil, ErrNotFound
 	}
 	if req.Type != old.Type {
@@ -245,17 +262,38 @@ func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, re
 		rels[i].SourcePluginID = storageID
 	}
 	audit := s.audit(caller, storageID, "update", old, p, now)
-	if err := s.repo.Update(ctx, scope(caller), mutation(*p, rels, audit)); err != nil {
+	sync, err := s.repo.Update(ctx, scope(caller), mutation(*p, rels, audit))
+	if err != nil {
 		return nil, mapStoreError(err)
 	}
-	return &Detail{Plugin: p, Relations: rels}, nil
+	if sync != nil && sync.Relations != nil {
+		rels = sync.Relations
+	}
+	return &Detail{Plugin: p, Relations: rels, RelationResult: relationResult(sync)}, nil
+}
+
+func relationResult(sync *pluginrepo.RelationSync) *RelationResult {
+	if sync == nil {
+		return &RelationResult{Created: []string{}, Updated: []string{}, Deleted: []string{}}
+	}
+	out := &RelationResult{Created: sync.Created, Updated: sync.Updated, Deleted: sync.Deleted}
+	if out.Created == nil {
+		out.Created = []string{}
+	}
+	if out.Updated == nil {
+		out.Updated = []string{}
+	}
+	if out.Deleted == nil {
+		out.Deleted = []string{}
+	}
+	return out
 }
 
 func (s *Service) Delete(ctx context.Context, caller Caller, pluginID string) error {
 	if validateCaller(caller) != nil {
 		return ErrInvalidRequest
 	}
-	storageID, expectedType, err := parseWirePluginID(pluginID)
+	storageID, err := parseStorageID(pluginID)
 	if err != nil {
 		return err
 	}
@@ -263,7 +301,7 @@ func (s *Service) Delete(ctx context.Context, caller Caller, pluginID string) er
 	if err != nil {
 		return mapStoreError(err)
 	}
-	if old.Type != expectedType || old.OwnerUID != caller.UID || (old.SpaceID != nil && *old.SpaceID != caller.SpaceID) {
+	if old.OwnerUID != caller.UID || (old.SpaceID != nil && *old.SpaceID != caller.SpaceID) {
 		return ErrNotFound
 	}
 	audit := s.audit(caller, storageID, "delete", old, nil, s.now())
@@ -274,16 +312,13 @@ func (s *Service) ListAuditLogs(ctx context.Context, caller Caller, pluginID str
 	if validateCaller(caller) != nil || limit < 0 || limit > maxListLimit || offset < 0 {
 		return nil, 0, ErrInvalidRequest
 	}
-	storageID, expectedType, err := parseWirePluginID(pluginID)
+	storageID, err := parseStorageID(pluginID)
 	if err != nil {
 		return nil, 0, err
 	}
 	p, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
 	if err != nil {
 		return nil, 0, mapStoreError(err)
-	}
-	if p.Type != expectedType {
-		return nil, 0, ErrNotFound
 	}
 	items, total, err := s.repo.ListAudits(ctx, scope(caller), storageID, limit, offset)
 	for i := range items {
@@ -296,16 +331,13 @@ func (s *Service) ListVersions(ctx context.Context, caller Caller, pluginID stri
 	if validateCaller(caller) != nil || limit < 0 || limit > maxListLimit || offset < 0 {
 		return nil, 0, ErrInvalidRequest
 	}
-	storageID, expectedType, err := parseWirePluginID(pluginID)
+	storageID, err := parseStorageID(pluginID)
 	if err != nil {
 		return nil, 0, err
 	}
 	p, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
 	if err != nil {
 		return nil, 0, mapStoreError(err)
-	}
-	if p.Type != expectedType {
-		return nil, 0, ErrNotFound
 	}
 	items, total, err := s.repo.ListVersions(ctx, scope(caller), storageID, limit, offset)
 	for i := range items {
@@ -318,7 +350,7 @@ func (s *Service) Publish(ctx context.Context, caller Caller, pluginID string, r
 	if validateCaller(caller) != nil || !validVersion(req.Version) {
 		return nil, ErrInvalidRequest
 	}
-	storageID, expectedType, err := parseWirePluginID(pluginID)
+	storageID, err := parseStorageID(pluginID)
 	if err != nil {
 		return nil, err
 	}
@@ -328,20 +360,18 @@ func (s *Service) Publish(ctx context.Context, caller Caller, pluginID string, r
 		return nil, err
 	}
 	params := pluginrepo.PublishParams{
-		PluginID:           storageID,
-		ExpectedPluginType: expectedType,
-		Version:            strings.TrimSpace(req.Version),
-		CreatedBy:          caller.UID,
-		OperatorName:       caller.Name,
-		RequestID:          caller.RequestID,
-		Changelog:          trimOptional(req.Changelog),
-		Placements:         placements,
+		PluginID:     storageID,
+		Version:      strings.TrimSpace(req.Version),
+		CreatedBy:    caller.UID,
+		OperatorName: caller.Name,
+		RequestID:    caller.RequestID,
+		Changelog:    trimOptional(req.Changelog),
+		Placements:   placements,
 	}
 	version, err := s.repo.Publish(ctx, scope(caller), params)
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
-	version.PluginType = expectedType
 	return version, nil
 }
 
@@ -349,7 +379,7 @@ func (s *Service) Duplicate(ctx context.Context, caller Caller, sourcePluginID, 
 	if validateCaller(caller) != nil {
 		return nil, ErrInvalidRequest
 	}
-	storageID, expectedType, err := parseWirePluginID(sourcePluginID)
+	storageID, err := parseStorageID(sourcePluginID)
 	if err != nil {
 		return nil, err
 	}
@@ -357,13 +387,8 @@ func (s *Service) Duplicate(ctx context.Context, caller Caller, sourcePluginID, 
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
-	if source.Type != expectedType {
-		return nil, ErrNotFound
-	}
-	if source.Type == model.PluginTypeConnector {
-		if err := rejectConnectorSecrets(source.Manifest, source.Package); err != nil {
-			return nil, err
-		}
+	if err := rejectSecretValues(source.Manifest, source.Package); err != nil {
+		return nil, err
 	}
 	newName := strings.TrimSpace(name)
 	if newName == "" {
@@ -393,24 +418,13 @@ func (s *Service) buildWrite(ctx context.Context, c Caller, pluginID string, req
 	if !validName(name) || !validPluginType(req.Type) || !validVisibility(req.Visibility, c.IsSystemAdmin) {
 		return nil, nil, ErrInvalidRequest
 	}
-	manifest, tags, err := normalizeManifest(req.Manifest, name, req.Type, req.Tags)
+	docs, err := CanonicalizeDocuments(name, req.Type, req.Tags, req.Manifest, req.Package, c.SpaceID)
 	if err != nil {
 		return nil, nil, err
-	}
-	manifestHash := hashJSON(manifest)
-	pkg, err := normalizePackage(req.Package, manifest)
-	if err != nil {
-		return nil, nil, err
-	}
-	pluginHash := hashJSON(append(append(cloneJSON(manifest), '\n'), pkg...))
-	if req.Type == model.PluginTypeConnector {
-		if err := rejectConnectorSecrets(manifest, pkg); err != nil {
-			return nil, nil, err
-		}
 	}
 	spaceID := c.SpaceID
 	createdBy, botUID, botName := provenance(c)
-	p := &model.Plugin{ID: pluginID, Name: name, Type: req.Type, CategoryID: trimOptional(req.CategoryID), Tags: tags, Publisher: strings.TrimSpace(req.Publisher), OwnerUID: c.UID, SpaceID: &spaceID, Visibility: req.Visibility, CreatorName: c.Name, CreatedByType: createdBy, CreatedByBotUID: botUID, CreatedByBotName: botName, Manifest: manifest, Package: pkg, ManifestHash: manifestHash, PluginHash: pluginHash, Status: 1, CreatedAt: now, UpdatedAt: now}
+	p := &model.Plugin{ID: pluginID, Name: name, Type: req.Type, CategoryID: trimOptional(req.CategoryID), Tags: docs.Tags, Publisher: strings.TrimSpace(req.Publisher), OwnerUID: c.UID, SpaceID: &spaceID, Visibility: req.Visibility, CreatorName: c.Name, CreatedByType: createdBy, CreatedByBotUID: botUID, CreatedByBotName: botName, Manifest: docs.Manifest, Package: docs.Package, ManifestHash: docs.ManifestHash, PluginHash: docs.PluginHash, Status: 1, CreatedAt: now, UpdatedAt: now}
 	rels, err := s.buildRelations(ctx, c, p, req.Relations, now)
 	if err != nil {
 		return nil, nil, err
@@ -425,7 +439,19 @@ func (s *Service) buildRelations(ctx context.Context, c Caller, source *model.Pl
 	out := make([]model.PluginRelation, 0, len(in))
 	seen := make(map[string]struct{}, len(in))
 	for _, r := range in {
-		targetID, expectedTargetType, err := parseWirePluginID(r.TargetPluginID)
+		relationID := strings.TrimSpace(r.ID)
+		// A relation ID can only address an existing edge, so it is meaningless
+		// while the Plugin itself is being created (source.ID is still empty).
+		if relationID != "" && (source.ID == "" || !validRelationID(relationID)) {
+			return nil, ErrInvalidRequest
+		}
+		if submittedSource := strings.TrimSpace(r.SourcePluginID); submittedSource != "" {
+			sourceID, err := parseStorageID(submittedSource)
+			if err != nil || source.ID == "" || sourceID != source.ID {
+				return nil, ErrInvalidRequest
+			}
+		}
+		targetID, err := parseStorageID(r.TargetPluginID)
 		typ := strings.TrimSpace(r.Type)
 		if err != nil || targetID == source.ID || !validRelationSource(typ, source.Type) {
 			return nil, ErrInvalidRequest
@@ -439,7 +465,7 @@ func (s *Service) buildRelations(ctx context.Context, c Caller, source *model.Pl
 		if err != nil {
 			return nil, mapStoreError(err)
 		}
-		if target.Type != expectedTargetType || !validRelationTarget(typ, target.Type) {
+		if !validRelationTarget(typ, target.Type) {
 			return nil, ErrInvalidRequest
 		}
 		data, err := normalizeOptionalObject(r.Data)
@@ -447,11 +473,11 @@ func (s *Service) buildRelations(ctx context.Context, c Caller, source *model.Pl
 			return nil, err
 		}
 		if len(data) > 0 {
-			if err := rejectConnectorSecrets(data); err != nil {
+			if err := rejectSecretValues(data); err != nil {
 				return nil, err
 			}
 		}
-		out = append(out, model.PluginRelation{ID: s.id(), SourcePluginID: source.ID, SourcePluginType: source.Type, TargetPluginID: targetID, TargetPluginType: target.Type, ExpectedTargetType: expectedTargetType, Type: typ, SortOrder: r.SortOrder, Data: data, Status: 1, CreatedBy: c.UID, CreatedAt: now, UpdatedAt: now})
+		out = append(out, model.PluginRelation{ID: relationID, SourcePluginID: source.ID, SourcePluginType: source.Type, TargetPluginID: targetID, TargetPluginType: target.Type, Type: typ, SortOrder: r.SortOrder, Data: data, Status: 1, CreatedBy: c.UID, CreatedAt: now, UpdatedAt: now})
 	}
 	return out, nil
 }

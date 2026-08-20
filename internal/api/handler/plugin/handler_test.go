@@ -127,7 +127,7 @@ func TestUpsertUsesServerDerivedIdentityAndStandardEnvelope(t *testing.T) {
 	if bytes.Contains(rec.Body.Bytes(), []byte(`"code":`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"data"`)) {
 		t.Fatalf("nonstandard envelope: %s", rec.Body.String())
 	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte(`"plugin_id":"skill:plugin-1"`)) {
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"plugin_id":"plugin-1"`)) {
 		t.Fatalf("unprefixed create response: %s", rec.Body.String())
 	}
 }
@@ -148,7 +148,7 @@ func TestUpsertRejectsClientIdentityFields(t *testing.T) {
 func TestCrossSpaceNotFoundIsSanitized(t *testing.T) {
 	f := &fakeService{err: pluginsvc.ErrNotFound}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=expert:other-space", nil))
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=other-space", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -160,7 +160,7 @@ func TestCrossSpaceNotFoundIsSanitized(t *testing.T) {
 func TestInternalErrorIsSanitized(t *testing.T) {
 	f := &fakeService{err: errors.New("sql: secret DSN")}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=skill:p1", nil))
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=p1", nil))
 	if rec.Code != http.StatusInternalServerError || bytes.Contains(rec.Body.Bytes(), []byte("secret DSN")) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -183,7 +183,7 @@ func TestAttachmentUploadReturnsStableKeyAndPresignedTarget(t *testing.T) {
 func TestAttachmentDownloadStreamsSafeHeaders(t *testing.T) {
 	f := &fakeService{download: &pluginsvc.AttachmentDownload{Body: io.NopCloser(strings.NewReader("data")), Path: "dir/evil\r\nX-Test.txt", ContentType: "text/plain", Size: 4}}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/attachment/download?plugin_id=skill:p1&object_key=plugins%2Fspace-a%2Fattachments%2Fid", nil))
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/attachment/download?plugin_id=p1&object_key=plugins%2Fspace-a%2Fattachments%2Fid", nil))
 	if rec.Code != http.StatusOK || rec.Body.String() != "data" || rec.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("status=%d headers=%#v body=%q", rec.Code, rec.Header(), rec.Body.String())
 	}
@@ -195,7 +195,7 @@ func TestAttachmentDownloadStreamsSafeHeaders(t *testing.T) {
 func TestArchivePreflightErrorsRemainSanitizedJSON(t *testing.T) {
 	f := &fakeService{err: errors.New("storage path /secret/key")}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/archive?plugin_id=skill:p1", nil))
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/archive?plugin_id=p1", nil))
 	if rec.Code != http.StatusInternalServerError || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") || strings.Contains(rec.Body.String(), "/secret/key") {
 		t.Fatalf("status=%d headers=%#v body=%s", rec.Code, rec.Header(), rec.Body.String())
 	}
@@ -207,7 +207,7 @@ func TestHistoryListsUseExactRepositoryTotals(t *testing.T) {
 		url  string
 		fake *fakeService
 	}{
-		{name: "audits", url: "/api/v1/internal/plugins/audit_logs?plugin_id=skill:p1&page=2&page_size=10", fake: &fakeService{audits: []model.PluginAuditLog{{ID: "a1"}}, auditTotal: 37}},
+		{name: "audits", url: "/api/v1/internal/plugins/audit_logs?plugin_id=p1&page=2&page_size=10", fake: &fakeService{audits: []model.PluginAuditLog{{ID: "a1"}}, auditTotal: 37}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -247,11 +247,11 @@ func TestDetailEncodesPluginAndRelationWireIDs(t *testing.T) {
 		Relations: []model.PluginRelation{{ID: "rel-1", SourcePluginID: "expert-1", SourcePluginType: model.PluginTypeExpert, TargetPluginID: "skill-1", TargetPluginType: model.PluginTypeSkill, Type: "expert_skill"}},
 	}}
 	rec := httptest.NewRecorder()
-	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=expert:expert-1", nil))
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=expert-1", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	for _, want := range []string{`"plugin_id":"expert:expert-1"`, `"source_plugin_id":"expert:expert-1"`, `"target_plugin_id":"skill:skill-1"`} {
+	for _, want := range []string{`"plugin_id":"expert-1"`, `"source_plugin_id":"expert-1"`, `"target_plugin_id":"skill-1"`} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("missing %s in %s", want, rec.Body.String())
 		}
@@ -265,7 +265,7 @@ func TestDetailDefaultsRelationsAndSupportsFalse(t *testing.T) {
 	}{{query: "", want: true}, {query: "&include_relations=false", want: false}} {
 		f := &fakeService{detail: &pluginsvc.Detail{Plugin: &model.Plugin{}}}
 		rec := httptest.NewRecorder()
-		testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=skill:p1"+tc.query, nil))
+		testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/detail?plugin_id=p1"+tc.query, nil))
 		if rec.Code != http.StatusOK || f.includeRelations != tc.want {
 			t.Fatalf("query=%q status=%d include_relations=%v body=%s", tc.query, rec.Code, f.includeRelations, rec.Body.String())
 		}
@@ -297,13 +297,10 @@ func TestVersionDTOEncodesSnapshotRelationIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"plugin_id":"expert:expert-1"`, `"source_plugin_id":"expert:expert-1"`, `"target_plugin_id":"connector:connector-1"`} {
+	for _, want := range []string{`"plugin_id":"expert-1"`, `"source_plugin_id":"expert-1"`, `"target_plugin_id":"connector-1"`} {
 		if !strings.Contains(string(encoded), want) {
 			t.Fatalf("missing %s in %s", want, encoded)
 		}
-	}
-	if strings.Contains(string(encoded), `"source_plugin_id":"expert-1"`) || strings.Contains(string(encoded), `"target_plugin_id":"connector-1"`) {
-		t.Fatalf("opaque relation ID leaked: %s", encoded)
 	}
 }
 
@@ -326,7 +323,70 @@ func TestListUsesOffsetEnvelope(t *testing.T) {
 	if body.Pagination.Page != 2 || body.Pagination.PageSize != 10 {
 		t.Fatalf("body=%s", rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"plugin_id":"skill:p1"`) {
+	if !strings.Contains(rec.Body.String(), `"plugin_id":"p1"`) {
 		t.Fatalf("list returned unprefixed ID: %s", rec.Body.String())
+	}
+}
+
+func TestListItemsOmitFullPluginJSON(t *testing.T) {
+	f := &fakeService{list: []model.Plugin{{ID: "p1", Name: "One", Type: model.PluginTypeSkill, Manifest: json.RawMessage(`{"m":1}`), Package: json.RawMessage(`{"attachments":[]}`)}}}
+	rec := httptest.NewRecorder()
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/plugins?scene_code=loop&plugin_type=skill", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"plugin_json"`) {
+		t.Fatalf("list leaked plugin_json: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"manifest_json"`) {
+		t.Fatalf("list dropped manifest_json: %s", rec.Body.String())
+	}
+}
+
+func TestUpsertReturnsRelationSyncResult(t *testing.T) {
+	space := "space-a"
+	f := &fakeService{detail: &pluginsvc.Detail{
+		Plugin:         &model.Plugin{ID: "plugin-1", Name: "Demo", Type: model.PluginTypeSkill, OwnerUID: "user-1", SpaceID: &space, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)},
+		RelationResult: &pluginsvc.RelationResult{Created: []string{"rel-new"}, Updated: []string{"rel-1"}, Deleted: []string{"rel-0"}},
+	}}
+	body := []byte(`{"plugin":{"plugin_name":"Demo","plugin_type":"skill","visibility":"private","tags":[],"manifest_json":{},"plugin_json":{}},"relations":[{"relation_id":"rel-1","source_plugin_id":"plugin-1","target_plugin_id":"target-1","relation_type":"expert_skill"}]}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/plugins/upsert", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	testEngine(f).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(f.write.Relations) != 1 || f.write.Relations[0].ID != "rel-1" || f.write.Relations[0].SourcePluginID != "plugin-1" {
+		t.Fatalf("relations forwarded = %#v", f.write.Relations)
+	}
+	if !strings.Contains(rec.Body.String(), `"relation_result":{"created":["rel-new"],"updated":["rel-1"],"deleted":["rel-0"]}`) {
+		t.Fatalf("missing relation_result: %s", rec.Body.String())
+	}
+}
+
+func TestDeleteRouteSoftDeletesByBodyPluginID(t *testing.T) {
+	f := &fakeService{}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/plugins/delete", strings.NewReader(`{"plugin_id":"p1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	testEngine(f).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"deleted":true`) || f.caller.UID != "user-1" {
+		t.Fatalf("body=%s caller=%#v", rec.Body.String(), f.caller)
+	}
+}
+
+func TestVersionsRouteUsesOffsetEnvelope(t *testing.T) {
+	f := &fakeService{versions: []model.PluginVersion{{ID: "v1", PluginID: "p1", PluginType: model.PluginTypeSkill, Version: "1.0.0", Relations: json.RawMessage(`[]`)}}, versionTotal: 1}
+	rec := httptest.NewRecorder()
+	testEngine(f).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/internal/plugins/versions?plugin_id=p1", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"version":"1.0.0"`) || !strings.Contains(rec.Body.String(), `"pagination"`) {
+		t.Fatalf("body=%s", rec.Body.String())
 	}
 }

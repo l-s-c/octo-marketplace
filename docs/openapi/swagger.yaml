@@ -176,6 +176,11 @@ components:
         data:
           $ref: '#/components/schemas/internal_api_handler_plugin.attachmentUploadResponse'
       type: object
+    github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_deleteResponse:
+      properties:
+        data:
+          $ref: '#/components/schemas/internal_api_handler_plugin.deleteResponse'
+      type: object
     github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse:
       properties:
         data:
@@ -290,11 +295,21 @@ components:
         pagination:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetPagination'
       type: object
-    github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_pluginResponse:
+    github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_listItemResponse:
       properties:
         data:
           items:
-            $ref: '#/components/schemas/internal_api_handler_plugin.pluginResponse'
+            $ref: '#/components/schemas/internal_api_handler_plugin.listItemResponse'
+          type: array
+          uniqueItems: false
+        pagination:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetPagination'
+      type: object
+    github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_versionResponse:
+      properties:
+        data:
+          items:
+            $ref: '#/components/schemas/internal_api_handler_plugin.versionResponse'
           type: array
           uniqueItems: false
         pagination:
@@ -1537,6 +1552,8 @@ components:
           type: string
         name:
           type: string
+        plugin_count:
+          type: integer
         plugin_types:
           items:
             type: string
@@ -1545,10 +1562,24 @@ components:
         sort_order:
           type: integer
       type: object
+    internal_api_handler_plugin.deleteRequest:
+      properties:
+        plugin_id:
+          type: string
+      type: object
+    internal_api_handler_plugin.deleteResponse:
+      properties:
+        deleted:
+          type: boolean
+        plugin_id:
+          type: string
+      type: object
     internal_api_handler_plugin.detailResponse:
       properties:
         plugin:
           $ref: '#/components/schemas/internal_api_handler_plugin.pluginResponse'
+        relation_result:
+          $ref: '#/components/schemas/internal_api_handler_plugin.relationResultResponse'
         relations:
           items:
             $ref: '#/components/schemas/internal_api_handler_plugin.relationResponse'
@@ -1561,6 +1592,54 @@ components:
           type: string
         source_plugin_id:
           type: string
+      type: object
+    internal_api_handler_plugin.listItemResponse:
+      properties:
+        category_id:
+          type: string
+        created_at:
+          type: string
+        created_by_bot_id:
+          type: string
+        created_by_bot_name:
+          type: string
+        created_by_type:
+          type: string
+        creator_name:
+          type: string
+        current_version_id:
+          type: string
+        is_embedded:
+          type: boolean
+        manifest_hash:
+          type: string
+        manifest_json:
+          type: object
+        owner_id:
+          type: string
+        plugin_hash:
+          type: string
+        plugin_id:
+          type: string
+        plugin_name:
+          type: string
+        plugin_type:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginType'
+        publisher:
+          type: string
+        space_id:
+          type: string
+        status:
+          type: integer
+        tags:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        updated_at:
+          type: string
+        visibility:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginVisibility'
       type: object
     internal_api_handler_plugin.placementRequest:
       properties:
@@ -1589,6 +1668,8 @@ components:
           type: string
         current_version_id:
           type: string
+        is_embedded:
+          type: boolean
         manifest_hash:
           type: string
         manifest_json:
@@ -1663,10 +1744,14 @@ components:
       properties:
         data:
           type: object
+        relation_id:
+          type: string
         relation_type:
           type: string
         sort_order:
           type: integer
+        source_plugin_id:
+          type: string
         target_plugin_id:
           type: string
       type: object
@@ -1684,6 +1769,29 @@ components:
           type: string
         target_plugin_id:
           type: string
+      type: object
+    internal_api_handler_plugin.relationResultResponse:
+      description: 'RelationResult reports upsert relation target-state synchronization:
+
+        empty relation_id created, known relation_id with changes updated, live
+
+        relations omitted from the submission deleted. Absent on reads.'
+      properties:
+        created:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        deleted:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        updated:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
       type: object
     internal_api_handler_plugin.upsertRequest:
       properties:
@@ -5212,6 +5320,70 @@ paths:
       summary: List plugin audit logs
       tags:
       - plugin
+  /internal/plugins/delete:
+    post:
+      description: Soft-delete a caller-owned Plugin; live incoming relations from
+        other Plugins block deletion.
+      operationId: plugin.delete
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/internal_api_handler_plugin.deleteRequest'
+                description: Plugin ID
+                summary: body
+        description: Plugin ID
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_deleteResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: CONFLICT
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Delete plugin
+      tags:
+      - plugin
   /internal/plugins/detail:
     get:
       description: Return one Plugin and its visible one-level relations without leaking
@@ -5484,6 +5656,75 @@ paths:
       security:
       - Bearer: []
       summary: Upsert plugin
+      tags:
+      - plugin
+  /internal/plugins/versions:
+    get:
+      description: List immutable published versions of a visible Plugin using offset
+        pagination.
+      operationId: plugin.version.list
+      parameters:
+      - description: Plugin ID
+        in: query
+        name: plugin_id
+        required: true
+        schema:
+          type: string
+      - description: Page number, default 1
+        in: query
+        name: page
+        schema:
+          type: integer
+      - description: Page size, default 20, max 100
+        in: query
+        name: page_size
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_versionResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: List plugin versions
       tags:
       - plugin
   /mcp_categories:
@@ -6397,7 +6638,7 @@ paths:
           - skill
           - connector
           type: string
-      - description: Category ID
+      - description: Category ID (matches the plugin placement category in this scene)
         in: query
         name: category_id
         schema:
@@ -6414,6 +6655,7 @@ paths:
           enum:
           - newest
           - oldest
+          - updated
           - name
           - placement
           type: string
@@ -6437,7 +6679,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_pluginResponse'
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_listItemResponse'
           description: OK
         '400':
           content:

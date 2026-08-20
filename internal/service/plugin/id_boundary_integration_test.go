@@ -8,7 +8,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 )
 
-func TestDetailParsesStorageIDAndTypeChecksPrefix(t *testing.T) {
+func TestDetailPassesStorageIDToRepository(t *testing.T) {
 	store := &fakeStore{
 		plugins: map[string]*model.Plugin{
 			"opaque-1": {ID: "opaque-1", Type: model.PluginTypeSkill},
@@ -17,7 +17,7 @@ func TestDetailParsesStorageIDAndTypeChecksPrefix(t *testing.T) {
 			"opaque-1": {{SourcePluginID: "opaque-1", TargetPluginID: "connector-1", TargetPluginType: model.PluginTypeConnector}},
 		},
 	}
-	detail, err := fixedService(store).Detail(context.Background(), testCaller, "skill:opaque-1", true)
+	detail, err := fixedService(store).Detail(context.Background(), testCaller, "opaque-1", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,31 +27,28 @@ func TestDetailParsesStorageIDAndTypeChecksPrefix(t *testing.T) {
 	if len(detail.Relations) != 1 || detail.Relations[0].SourcePluginType != model.PluginTypeSkill {
 		t.Fatalf("detail relations = %#v", detail.Relations)
 	}
-
-	store.getIDs = nil
-	if _, err := fixedService(store).Detail(context.Background(), testCaller, "expert:opaque-1", true); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("mismatched prefix error = %v, want ErrNotFound", err)
-	}
 }
 
-func TestAllRowIDMethodsRejectRawIDsBeforeRepository(t *testing.T) {
+func TestAllRowIDMethodsRejectMalformedIDsBeforeRepository(t *testing.T) {
 	store := &fakeStore{}
 	svc := fixedService(store)
 	ctx := context.Background()
+	// Colon-prefixed wire IDs are a retired format and must not reach storage.
+	const badID = "expert:opaque-1"
 	checks := []struct {
 		name string
 		run  func() error
 	}{
-		{"detail", func() error { _, err := svc.Detail(ctx, testCaller, "raw-id", true); return err }},
-		{"update", func() error { _, err := svc.Update(ctx, testCaller, "raw-id", validRequest()); return err }},
-		{"delete", func() error { return svc.Delete(ctx, testCaller, "raw-id") }},
-		{"audit", func() error { _, _, err := svc.ListAuditLogs(ctx, testCaller, "raw-id", 20, 0); return err }},
-		{"versions", func() error { _, _, err := svc.ListVersions(ctx, testCaller, "raw-id", 20, 0); return err }},
+		{"detail", func() error { _, err := svc.Detail(ctx, testCaller, badID, true); return err }},
+		{"update", func() error { _, err := svc.Update(ctx, testCaller, badID, validRequest()); return err }},
+		{"delete", func() error { return svc.Delete(ctx, testCaller, badID) }},
+		{"audit", func() error { _, _, err := svc.ListAuditLogs(ctx, testCaller, badID, 20, 0); return err }},
+		{"versions", func() error { _, _, err := svc.ListVersions(ctx, testCaller, badID, 20, 0); return err }},
 		{"publish", func() error {
-			_, err := svc.Publish(ctx, testCaller, "raw-id", PublishRequest{Version: "1.0.0"})
+			_, err := svc.Publish(ctx, testCaller, badID, PublishRequest{Version: "1.0.0"})
 			return err
 		}},
-		{"duplicate", func() error { _, err := svc.Duplicate(ctx, testCaller, "raw-id", "Copy"); return err }},
+		{"duplicate", func() error { _, err := svc.Duplicate(ctx, testCaller, badID, "Copy"); return err }},
 	}
 	for _, check := range checks {
 		t.Run(check.name, func(t *testing.T) {
@@ -61,12 +58,12 @@ func TestAllRowIDMethodsRejectRawIDsBeforeRepository(t *testing.T) {
 		})
 	}
 	if len(store.getIDs) != 0 || store.deleteID != "" || store.auditID != "" || store.versionID != "" || store.publishParams.PluginID != "" || store.duplicateID != "" {
-		t.Fatalf("raw ID reached repository: %#v", store)
+		t.Fatalf("malformed ID reached repository: %#v", store)
 	}
 }
 
-func TestDetailRejectsNonRowWireIDsBeforeRepository(t *testing.T) {
-	for _, wireID := range []string{"opaque-1", " skill:opaque-1", "expert_member:team-1:member-1"} {
+func TestDetailRejectsMalformedIDsBeforeRepository(t *testing.T) {
+	for _, wireID := range []string{"", " opaque-1", "skill:opaque-1", "expert_member:team-1:member-1", ".leading-dot"} {
 		store := &fakeStore{}
 		if _, err := fixedService(store).Detail(context.Background(), testCaller, wireID, true); !errors.Is(err, ErrInvalidRequest) {
 			t.Fatalf("Detail(%q) error = %v, want ErrInvalidRequest", wireID, err)
@@ -77,7 +74,7 @@ func TestDetailRejectsNonRowWireIDsBeforeRepository(t *testing.T) {
 	}
 }
 
-func TestActionEndpointsPassOnlyOpaqueStorageIDs(t *testing.T) {
+func TestActionEndpointsPassOpaqueStorageIDs(t *testing.T) {
 	store := &fakeStore{
 		plugins: map[string]*model.Plugin{
 			"opaque-1": {ID: "opaque-1", Name: "Original", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},
@@ -88,35 +85,32 @@ func TestActionEndpointsPassOnlyOpaqueStorageIDs(t *testing.T) {
 	svc := fixedService(store)
 	ctx := context.Background()
 
-	if err := svc.Delete(ctx, testCaller, "expert:opaque-1"); err != nil {
+	if err := svc.Delete(ctx, testCaller, "opaque-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := svc.ListAuditLogs(ctx, testCaller, "expert:opaque-1", 20, 0); err != nil {
+	if _, _, err := svc.ListAuditLogs(ctx, testCaller, "opaque-1", 20, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := svc.ListVersions(ctx, testCaller, "expert:opaque-1", 20, 0); err != nil {
+	if _, _, err := svc.ListVersions(ctx, testCaller, "opaque-1", 20, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Publish(ctx, testCaller, "expert:opaque-1", PublishRequest{Version: "1.0.0"}); err != nil {
+	if _, err := svc.Publish(ctx, testCaller, "opaque-1", PublishRequest{Version: "1.0.0"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Duplicate(ctx, testCaller, "expert:opaque-1", "Copy"); err != nil {
+	if _, err := svc.Duplicate(ctx, testCaller, "opaque-1", "Copy"); err != nil {
 		t.Fatal(err)
 	}
 	if store.deleteID != "opaque-1" || store.auditID != "opaque-1" || store.versionID != "opaque-1" || store.publishParams.PluginID != "opaque-1" || store.duplicateID != "opaque-1" {
 		t.Fatalf("storage IDs: delete=%q audit=%q version=%q publish=%q duplicate=%q", store.deleteID, store.auditID, store.versionID, store.publishParams.PluginID, store.duplicateID)
 	}
-	if store.publishParams.ExpectedPluginType != model.PluginTypeExpert {
-		t.Fatalf("publish expected type = %q", store.publishParams.ExpectedPluginType)
-	}
 }
 
-func TestRelationWireTargetBecomesOpaqueAndKeepsExpectedType(t *testing.T) {
+func TestRelationTargetTypeValidatedAgainstRow(t *testing.T) {
 	store := &fakeStore{plugins: map[string]*model.Plugin{
 		"target-1": {ID: "target-1", Type: model.PluginTypeSkill},
 	}}
 	req := validRequest()
-	req.Relations = []RelationRequest{{TargetPluginID: "skill:target-1", Type: "expert_skill"}}
+	req.Relations = []RelationRequest{{TargetPluginID: "target-1", Type: "expert_skill"}}
 	if _, err := fixedService(store).Create(context.Background(), testCaller, req); err != nil {
 		t.Fatal(err)
 	}
@@ -124,13 +118,18 @@ func TestRelationWireTargetBecomesOpaqueAndKeepsExpectedType(t *testing.T) {
 		t.Fatalf("relations = %#v", store.createRels)
 	}
 	relation := store.createRels[0]
-	if relation.TargetPluginID != "target-1" || relation.ExpectedTargetType != model.PluginTypeSkill || relation.TargetPluginType != model.PluginTypeSkill {
+	if relation.TargetPluginID != "target-1" || relation.TargetPluginType != model.PluginTypeSkill {
 		t.Fatalf("persisted relation = %#v", relation)
 	}
 
+	// expert_skill must point at a skill row; a connector target is rejected
+	// from the target row's actual type, no wire prefix involved.
+	connectorStore := &fakeStore{plugins: map[string]*model.Plugin{
+		"target-2": {ID: "target-2", Type: model.PluginTypeConnector},
+	}}
 	bad := validRequest()
-	bad.Relations = []RelationRequest{{TargetPluginID: "connector:target-1", Type: "expert_skill"}}
-	if _, err := fixedService(store).Create(context.Background(), testCaller, bad); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("mismatched target prefix error = %v", err)
+	bad.Relations = []RelationRequest{{TargetPluginID: "target-2", Type: "expert_skill"}}
+	if _, err := fixedService(connectorStore).Create(context.Background(), testCaller, bad); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("mismatched target type error = %v", err)
 	}
 }
