@@ -61,6 +61,7 @@ type archiveFile struct {
 }
 
 type packageDocument struct {
+	Schema      string            `json:"$schema"`
 	Attachments []json.RawMessage `json:"attachments"`
 }
 
@@ -215,7 +216,7 @@ func (s *Service) parseArchiveFiles(ctx context.Context, raw json.RawMessage, sp
 		return nil, ErrInvalidRequest
 	}
 	var doc packageDocument
-	if err := json.Unmarshal(raw, &doc); err != nil || len(doc.Attachments) > s.maxArchiveFiles {
+	if err := json.Unmarshal(raw, &doc); err != nil || doc.Schema != pluginPackageSchema || len(doc.Attachments) > s.maxArchiveFiles {
 		return nil, ErrInvalidRequest
 	}
 	files := make([]archiveFile, 0, len(doc.Attachments))

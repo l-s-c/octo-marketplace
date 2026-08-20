@@ -69,7 +69,15 @@ func (s *artifactStorage) CopyObject(context.Context, string, string) error {
 	return errors.New("unexpected CopyObject")
 }
 
+func designPackage(body string) string {
+	if strings.HasPrefix(body, `{"$schema":`) {
+		return body
+	}
+	return strings.Replace(body, `{"attachments":`, `{"$schema":"cowork-plugin-package-1.0.json","attachments":`, 1)
+}
+
 func artifactService(pkg string, store *artifactStorage) *Service {
+	pkg = designPackage(pkg)
 	space := testCaller.SpaceID
 	repo := &fakeStore{plugins: map[string]*model.Plugin{
 		"plugin-1": {ID: "plugin-1", SpaceID: &space, Package: []byte(pkg)},
