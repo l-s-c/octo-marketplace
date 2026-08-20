@@ -141,6 +141,25 @@ func TestLockRelationTargetsRequiresActiveTarget(t *testing.T) {
 	_ = tx.Rollback()
 }
 
+func TestLockRelationTargetsValidatesExpectedWireType(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	mock.ExpectBegin()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	mock.ExpectQuery(`SELECT p.plugin_type FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL.*FOR UPDATE`).
+		WithArgs("opaque-target", scope.SpaceID, scope.CallerUID).
+		WillReturnRows(sqlmock.NewRows([]string{"plugin_type"}).AddRow(model.PluginTypeSkill))
+	err = lockRelationTargets(context.Background(), tx, scope, model.PluginTypeExpert, []model.PluginRelation{{TargetPluginID: "opaque-target", ExpectedTargetType: model.PluginTypeConnector, Type: "expert_skill"}})
+	if !errors.Is(err, ErrInvalidRelation) {
+		t.Fatalf("lockRelationTargets error = %v, want ErrInvalidRelation", err)
+	}
+	_ = tx.Rollback()
+}
+
 func TestCreateRejectsInvisibleRelationTargetBeforeWriting(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
