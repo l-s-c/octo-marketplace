@@ -256,7 +256,10 @@ func (h *Handler) List(c *gin.Context) {
 		validation(c, "plugin_type")
 		return
 	}
-	items, total, err := h.svc.List(c.Request.Context(), caller, pluginsvc.ListParams{PlacementCode: sceneCode, Type: pluginType, CategoryID: c.Query("category_id"), Keyword: c.Query("q"), Sort: c.Query("sort"), Limit: pageSize, Offset: (page - 1) * pageSize})
+	// scene_code is a required, validated contract field. Until design-approved
+	// scene placements exist, it must not silently filter every legacy Plugin.
+	_ = sceneCode
+	items, total, err := h.svc.List(c.Request.Context(), caller, pluginsvc.ListParams{Type: pluginType, CategoryID: c.Query("category_id"), Keyword: c.Query("q"), Sort: c.Query("sort"), Limit: pageSize, Offset: (page - 1) * pageSize})
 	if err != nil {
 		writeServiceError(c, err, "plugin.list")
 		return
