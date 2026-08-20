@@ -110,12 +110,19 @@ func (s *Service) InitAttachmentUpload(ctx context.Context, caller Caller, fileN
 // OpenAttachment verifies Plugin visibility, exact Package reference, approved
 // Space prefix, and stored size before opening bytes.
 func (s *Service) OpenAttachment(ctx context.Context, caller Caller, pluginID, objectKey string) (*AttachmentDownload, error) {
-	if validateCaller(caller) != nil || s.storage == nil || strings.TrimSpace(pluginID) == "" || strings.TrimSpace(objectKey) == "" {
+	if validateCaller(caller) != nil || s.storage == nil || strings.TrimSpace(objectKey) == "" {
 		return nil, ErrInvalidRequest
 	}
-	p, _, err := s.repo.GetWithRelations(ctx, scope(caller), strings.TrimSpace(pluginID))
+	storageID, expectedType, err := parseWirePluginID(pluginID)
+	if err != nil {
+		return nil, err
+	}
+	p, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
 	if err != nil {
 		return nil, mapStoreError(err)
+	}
+	if p.Type != expectedType {
+		return nil, ErrNotFound
 	}
 	files, err := s.parseArchiveFiles(ctx, p.Package, p.SpaceID)
 	if err != nil {
@@ -138,12 +145,19 @@ func (s *Service) OpenAttachment(ctx context.Context, caller Caller, pluginID, o
 // PrepareArchive resolves the current package, or the requested immutable
 // version, and validates every entry before the handler sends response headers.
 func (s *Service) PrepareArchive(ctx context.Context, caller Caller, pluginID, version string) (*Archive, error) {
-	if validateCaller(caller) != nil || s.storage == nil || strings.TrimSpace(pluginID) == "" {
+	if validateCaller(caller) != nil || s.storage == nil {
 		return nil, ErrInvalidRequest
 	}
-	p, _, err := s.repo.GetWithRelations(ctx, scope(caller), strings.TrimSpace(pluginID))
+	storageID, expectedType, err := parseWirePluginID(pluginID)
+	if err != nil {
+		return nil, err
+	}
+	p, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
 	if err != nil {
 		return nil, mapStoreError(err)
+	}
+	if p.Type != expectedType {
+		return nil, ErrNotFound
 	}
 	pkg := p.Package
 	if strings.TrimSpace(version) != "" {
