@@ -1,22 +1,19 @@
 package id
 
 import (
+	"regexp"
 	"testing"
 	"time"
 )
 
-func TestNewShapeAndAlphabet(t *testing.T) {
-	const valid = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+var canonicalUUIDv7 = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+func TestNewShapeAndUniqueness(t *testing.T) {
 	seen := make(map[string]struct{}, 1000)
 	for i := 0; i < 1000; i++ {
 		v := New()
-		if len(v) != 26 {
-			t.Fatalf("length = %d, want 26 (%q)", len(v), v)
-		}
-		for _, c := range v {
-			if !containsRune(valid, c) {
-				t.Fatalf("char %q not in Crockford alphabet (%q)", c, v)
-			}
+		if !canonicalUUIDv7.MatchString(v) {
+			t.Fatalf("not a canonical UUIDv7: %q", v)
 		}
 		if _, dup := seen[v]; dup {
 			t.Fatalf("duplicate id generated: %q", v)
@@ -31,13 +28,4 @@ func TestNewIsTimeSortable(t *testing.T) {
 	if earlier >= later {
 		t.Fatalf("expected earlier id %q < later id %q", earlier, later)
 	}
-}
-
-func containsRune(s string, r rune) bool {
-	for _, c := range s {
-		if c == r {
-			return true
-		}
-	}
-	return false
 }
