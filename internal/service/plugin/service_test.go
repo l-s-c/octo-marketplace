@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,30 +14,36 @@ import (
 )
 
 type fakeStore struct {
-	plugins       map[string]*model.Plugin
-	relations     map[string][]model.PluginRelation
-	getIDs        []string
-	create        *model.Plugin
-	createRels    []model.PluginRelation
-	createAudit   model.PluginAuditLog
-	update        *model.Plugin
-	deleteScope   pluginrepo.Scope
-	deleteID      string
-	auditID       string
-	versionID     string
-	publishParams pluginrepo.PublishParams
-	duplicateID   string
-	duplicate     model.Plugin
-	duplicateMeta pluginrepo.Mutation
-	audits        []model.PluginAuditLog
-	auditTotal    int64
-	versions      []model.PluginVersion
-	versionTotal  int64
-	err           error
+	plugins        map[string]*model.Plugin
+	relations      map[string][]model.PluginRelation
+	getIDs         []string
+	listFilter     pluginrepo.ListFilter
+	create         *model.Plugin
+	createRels     []model.PluginRelation
+	createAudit    model.PluginAuditLog
+	update         *model.Plugin
+	deleteScope    pluginrepo.Scope
+	deleteID       string
+	versionID      string
+	publishParams  pluginrepo.PublishParams
+	versions       []model.PluginVersion
+	versionTotal   int64
+	list           []model.Plugin
+	memberCounts   map[string]int
+	memberCountIDs []string
+	tags           []model.TagFilter
+	tagFilter      pluginrepo.TagListFilter
+	publishErr     error
+	err            error
 }
 
-func (f *fakeStore) List(context.Context, pluginrepo.Scope, pluginrepo.ListFilter) ([]model.Plugin, int64, error) {
-	return nil, 0, f.err
+func (f *fakeStore) List(_ context.Context, _ pluginrepo.Scope, filter pluginrepo.ListFilter) ([]model.Plugin, int64, error) {
+	f.listFilter = filter
+	return f.list, int64(len(f.list)), f.err
+}
+func (f *fakeStore) ListTags(_ context.Context, _ pluginrepo.Scope, filter pluginrepo.TagListFilter) ([]model.TagFilter, error) {
+	f.tagFilter = filter
+	return f.tags, f.err
 }
 func (f *fakeStore) GetWithRelations(_ context.Context, _ pluginrepo.Scope, id string) (*model.Plugin, []model.PluginRelation, error) {
 	f.getIDs = append(f.getIDs, id)
@@ -79,27 +87,23 @@ func (f *fakeStore) Delete(_ context.Context, s pluginrepo.Scope, id, _, _, _ st
 	f.deleteScope, f.deleteID = s, id
 	return f.err
 }
-func (f *fakeStore) ListAudits(_ context.Context, _ pluginrepo.Scope, id string, _, _ int) ([]model.PluginAuditLog, int64, error) {
-	f.auditID = id
-	return f.audits, f.auditTotal, f.err
-}
 func (f *fakeStore) ListVersions(_ context.Context, _ pluginrepo.Scope, id string, _, _ int) ([]model.PluginVersion, int64, error) {
 	f.versionID = id
 	return f.versions, f.versionTotal, f.err
 }
-func (f *fakeStore) GetVersion(_ context.Context, _ pluginrepo.Scope, pluginID, version string) (*model.PluginVersion, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	return &model.PluginVersion{PluginID: pluginID, Version: version, Package: json.RawMessage(`{"attachments":[]}`)}, nil
-}
 func (f *fakeStore) Publish(_ context.Context, _ pluginrepo.Scope, p pluginrepo.PublishParams) (*model.PluginVersion, error) {
 	f.publishParams = p
+	if f.publishErr != nil {
+		return nil, f.publishErr
+	}
 	return &model.PluginVersion{ID: "version-new", PluginID: p.PluginID, Version: p.Version, Manifest: json.RawMessage(`{"stored":true}`), Relations: json.RawMessage(`[]`), CreatedBy: p.CreatedBy}, f.err
 }
-func (f *fakeStore) DuplicateGraph(_ context.Context, _ pluginrepo.Scope, sourceID string, p model.Plugin, m pluginrepo.Mutation) error {
-	f.duplicateID, f.duplicate, f.duplicateMeta = sourceID, p, m
-	return f.err
+func (f *fakeStore) CountMemberRelations(_ context.Context, teamIDs []string) (map[string]int, error) {
+	f.memberCountIDs = teamIDs
+	if f.memberCounts == nil {
+		return map[string]int{}, f.err
+	}
+	return f.memberCounts, f.err
 }
 
 func fixedService(f *fakeStore) *Service {
@@ -122,7 +126,7 @@ func connectorRequest(config json.RawMessage) WriteRequest {
 	if err != nil {
 		panic(err)
 	}
-	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(string(canonical)) + `}]}`)
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","connector":{"type":"mcp","source":"connector.example-plugin"},"attachments":[{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(string(canonical)) + `}]}`)
 	return WriteRequest{Name: "Example Plugin", Type: model.PluginTypeConnector, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`["one","two"]`), Manifest: manifest, Package: pkg}
 }
 
@@ -157,6 +161,101 @@ func TestListRejectsUnsupportedSort(t *testing.T) {
 	}
 }
 
+func TestListFillsTeamMemberCountsAndKeepsIcons(t *testing.T) {
+	f := &fakeStore{
+		list: []model.Plugin{
+			{ID: "team-1", Type: model.PluginTypeExpertTeam},
+			{ID: "skill-1", Type: model.PluginTypeSkill, Icon: "https://cdn.example.com/icon.png"},
+		},
+		memberCounts: map[string]int{"team-1": 4},
+	}
+	items, _, err := fixedService(f).List(context.Background(), testCaller, ListParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.memberCountIDs) != 1 || f.memberCountIDs[0] != "team-1" {
+		t.Fatalf("member count lookup = %#v", f.memberCountIDs)
+	}
+	if items[0].MemberCount != 4 || items[1].MemberCount != 0 {
+		t.Fatalf("member counts = %d,%d", items[0].MemberCount, items[1].MemberCount)
+	}
+	// Without storage configured, http(s) icons pass through unchanged.
+	if items[1].IconURL != "https://cdn.example.com/icon.png" {
+		t.Fatalf("icon_url = %q", items[1].IconURL)
+	}
+}
+
+func TestCreateStoresIconAndMaterializesConnectorToolCount(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{}}
+	req := connectorRequest(json.RawMessage(`{}`))
+	req.Icon = " https://cdn.example.com/icon.png "
+	var pkg map[string]any
+	if err := json.Unmarshal(req.Package, &pkg); err != nil {
+		t.Fatal(err)
+	}
+	tools := map[string]any{"path": "connector/tools.json", "content_type": "raw", "mime_type": "application/json", "raw_content": `[{"name":"a"},{"name":"b"},{"name":"c"}]`}
+	pkg["attachments"] = append(pkg["attachments"].([]any), tools)
+	raw, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Package = raw
+	if _, err := fixedService(f).Create(context.Background(), testCaller, req); err != nil {
+		t.Fatal(err)
+	}
+	if f.create.Icon != "https://cdn.example.com/icon.png" {
+		t.Fatalf("icon = %q", f.create.Icon)
+	}
+	if f.create.ToolCount != 3 {
+		t.Fatalf("tool_count = %d", f.create.ToolCount)
+	}
+}
+
+func TestListNormalizesAndBoundsTagFilters(t *testing.T) {
+	f := &fakeStore{}
+	svc := fixedService(f)
+	if _, _, err := svc.List(context.Background(), testCaller, ListParams{Tags: []string{" a ", "", "b", "a"}}); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(f.listFilter.Tags) != 2 || f.listFilter.Tags[0] != "a" || f.listFilter.Tags[1] != "b" {
+		t.Fatalf("tags = %#v", f.listFilter.Tags)
+	}
+	over := make([]string, maxListTags+1)
+	for i := range over {
+		over[i] = "t" + strconv.Itoa(i)
+	}
+	for _, tags := range [][]string{over, {strings.Repeat("x", maxTagBytes+1)}, {"bad\xff"}} {
+		if _, _, err := svc.List(context.Background(), testCaller, ListParams{Tags: tags}); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("List(tags=%d) error = %v, want ErrInvalidRequest", len(tags), err)
+		}
+	}
+}
+
+func TestListTagsValidatesAndForwardsScopedFilter(t *testing.T) {
+	f := &fakeStore{tags: []model.TagFilter{{Name: "dev", Count: 3}}}
+	svc := fixedService(f)
+	tags, err := svc.ListTags(context.Background(), testCaller, TagListParams{PlacementCode: " default ", Type: model.PluginTypeConnector, Keyword: " de ", Mine: true, Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tags) != 1 || tags[0].Name != "dev" {
+		t.Fatalf("tags = %#v", tags)
+	}
+	want := pluginrepo.TagListFilter{PlacementCode: "default", Type: model.PluginTypeConnector, Keyword: "de", Mine: true, Limit: 5}
+	if f.tagFilter != want {
+		t.Fatalf("filter = %#v", f.tagFilter)
+	}
+	if _, err := svc.ListTags(context.Background(), testCaller, TagListParams{Type: "bogus"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("type err = %v", err)
+	}
+	if _, err := svc.ListTags(context.Background(), testCaller, TagListParams{Limit: maxListLimit + 1}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("limit err = %v", err)
+	}
+	if _, err := svc.ListTags(context.Background(), Caller{}, TagListParams{}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("caller err = %v", err)
+	}
+}
+
 func TestCreateRejectsInvalidFieldsAndJSONShapes(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -166,6 +265,10 @@ func TestCreateRejectsInvalidFieldsAndJSONShapes(t *testing.T) {
 		{"visibility", func(r *WriteRequest) { r.Visibility = "world" }},
 		{"system visibility", func(r *WriteRequest) { r.Visibility = model.PluginVisibilitySystem }},
 		{"empty name", func(r *WriteRequest) { r.Name = " " }},
+		{"javascript icon", func(r *WriteRequest) { r.Icon = "javascript:alert(1)" }},
+		{"data icon", func(r *WriteRequest) { r.Icon = "data:text/html;base64,x" }},
+		{"traversal icon", func(r *WriteRequest) { r.Icon = "icons/../../etc/passwd" }},
+		{"oversized icon", func(r *WriteRequest) { r.Icon = "https://cdn.example.com/" + strings.Repeat("x", maxIconBytes) }},
 		{"manifest array", func(r *WriteRequest) { r.Manifest = json.RawMessage(`[]`) }},
 		{"outer manifest name mismatch", func(r *WriteRequest) { r.Name = "Other" }},
 		{"outer manifest type mismatch", func(r *WriteRequest) { r.Type = model.PluginTypeSkill }},
@@ -275,27 +378,18 @@ func TestRelationSourceTargetValidation(t *testing.T) {
 	}
 }
 
-func TestHistoryListsPropagateExactTotalsAndNotFound(t *testing.T) {
+func TestVersionListPropagatesExactTotalsAndNotFound(t *testing.T) {
 	f := &fakeStore{
 		plugins:      map[string]*model.Plugin{"plugin-1": {ID: "plugin-1", Type: model.PluginTypeExpert}},
-		audits:       []model.PluginAuditLog{{ID: "audit-1"}},
-		auditTotal:   37,
 		versions:     []model.PluginVersion{{ID: "version-1"}},
 		versionTotal: 42,
 	}
 	svc := fixedService(f)
-	audits, auditTotal, err := svc.ListAuditLogs(context.Background(), testCaller, "plugin-1", 20, 20)
-	if err != nil || len(audits) != 1 || auditTotal != 37 {
-		t.Fatalf("audits=%#v total=%d err=%v", audits, auditTotal, err)
-	}
 	versions, versionTotal, err := svc.ListVersions(context.Background(), testCaller, "plugin-1", 20, 40)
 	if err != nil || len(versions) != 1 || versionTotal != 42 {
 		t.Fatalf("versions=%#v total=%d err=%v", versions, versionTotal, err)
 	}
 	f.err = pluginrepo.ErrNotFound
-	if _, _, err := svc.ListAuditLogs(context.Background(), testCaller, "foreign", 20, 0); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("audit not found err=%v", err)
-	}
 	if _, _, err := svc.ListVersions(context.Background(), testCaller, "foreign", 20, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("version not found err=%v", err)
 	}
@@ -328,27 +422,11 @@ func TestRepositoryConflictsAndInvalidPlacementsMapToServiceErrors(t *testing.T)
 	}
 }
 
-func TestDuplicatePassesIndependentRootAndAuditMetadata(t *testing.T) {
-	source := &model.Plugin{ID: "source", Name: "Source", Type: model.PluginTypeExpert, OwnerUID: "another", Visibility: model.PluginVisibilityPublic, Manifest: json.RawMessage(`{"a":1}`), Package: json.RawMessage(`{"b":2}`), Tags: json.RawMessage(`["x"]`), PluginHash: "sha256:p"}
-	f := &fakeStore{plugins: map[string]*model.Plugin{"source": source}}
-	copy, err := fixedService(f).Duplicate(context.Background(), testCaller, "source", "Copy")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if copy.ID != "plugin-new" || f.duplicate.ID != copy.ID || f.duplicateMeta.OperatorID != testCaller.UID {
-		t.Fatalf("copy=%#v duplicate=%#v metadata=%#v", copy, f.duplicate, f.duplicateMeta)
-	}
-	f.duplicate.Manifest[0] = '['
-	if source.Manifest[0] == '[' {
-		t.Fatal("duplicate manifest aliases source manifest")
-	}
-}
-
 func expertRequestWithConfigAttachment(configJSON string) WriteRequest {
 	r := validRequest()
 	canonical := `{"$schema":"cowork-plugin-manifest-1.0.json","description":"An example plugin.","examples":[],"labels":["one","two"],"name":"example-plugin","plugin_name":"Example Plugin","plugin_type":"expert"}`
 	r.Package = json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
-		`{"path":"expert/mcp.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(configJSON) + `},` +
+		`{"path":"mcp.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(configJSON) + `},` +
 		`{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(canonical) + `}]}`)
 	return r
 }
@@ -386,18 +464,6 @@ func TestSecretScanFailsClosedOnPathologicalNesting(t *testing.T) {
 	r := expertRequestWithConfigAttachment(payload)
 	if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, r); !errors.Is(err, ErrSecretValue) {
 		t.Fatalf("err = %v, want ErrSecretValue", err)
-	}
-}
-
-func TestDuplicateRejectsStoredSecretsForNonConnectorTypes(t *testing.T) {
-	pkg := `{"$schema":"cowork-plugin-package-1.0.json","attachments":[{"path":"expert/mcp.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(`{"env":{"API_TOKEN":"plain-token"}}`) + `}]}`
-	source := &model.Plugin{ID: "source", Name: "Source", Type: model.PluginTypeExpert, OwnerUID: "another", Visibility: model.PluginVisibilityPublic, Manifest: json.RawMessage(`{"a":1}`), Package: json.RawMessage(pkg)}
-	f := &fakeStore{plugins: map[string]*model.Plugin{"source": source}}
-	if _, err := fixedService(f).Duplicate(context.Background(), testCaller, "source", "Copy"); !errors.Is(err, ErrSecretValue) {
-		t.Fatalf("err = %v, want ErrSecretValue", err)
-	}
-	if f.duplicateID != "" {
-		t.Fatal("secret-bearing source reached DuplicateGraph")
 	}
 }
 
@@ -454,5 +520,19 @@ func TestCreateReturnsRelationResultWithGeneratedIDs(t *testing.T) {
 	}
 	if len(v.Relations) != 1 || v.Relations[0].ID != "relation-created" {
 		t.Fatalf("relations = %#v", v.Relations)
+	}
+}
+
+func TestSecretScanAllowsPlaceholderReferencesInMCPConfig(t *testing.T) {
+	// ${KEY} marks a user-supplied value injected at install time; both the
+	// service and repository scanners must treat it as a reference, never a
+	// stored secret. Real literals in the same containers stay rejected.
+	ok := json.RawMessage(`{"mcpServers":{"jira":{"headers":{"Authorization":"${TOKEN}"},"env":{"API_KEY":"${API_KEY}"}}}}`)
+	if err := rejectSecretValues(ok); err != nil {
+		t.Fatalf("placeholder rejected: %v", err)
+	}
+	bad := json.RawMessage(`{"mcpServers":{"jira":{"headers":{"Authorization":"Bearer real-token"}}}}`)
+	if err := rejectSecretValues(bad); !errors.Is(err, ErrSecretValue) {
+		t.Fatalf("literal accepted: %v", err)
 	}
 }

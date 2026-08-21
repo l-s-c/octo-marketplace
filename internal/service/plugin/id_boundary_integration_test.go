@@ -42,13 +42,11 @@ func TestAllRowIDMethodsRejectMalformedIDsBeforeRepository(t *testing.T) {
 		{"detail", func() error { _, err := svc.Detail(ctx, testCaller, badID, true); return err }},
 		{"update", func() error { _, err := svc.Update(ctx, testCaller, badID, validRequest()); return err }},
 		{"delete", func() error { return svc.Delete(ctx, testCaller, badID) }},
-		{"audit", func() error { _, _, err := svc.ListAuditLogs(ctx, testCaller, badID, 20, 0); return err }},
 		{"versions", func() error { _, _, err := svc.ListVersions(ctx, testCaller, badID, 20, 0); return err }},
 		{"publish", func() error {
 			_, err := svc.Publish(ctx, testCaller, badID, PublishRequest{Version: "1.0.0"})
 			return err
 		}},
-		{"duplicate", func() error { _, err := svc.Duplicate(ctx, testCaller, badID, "Copy"); return err }},
 	}
 	for _, check := range checks {
 		t.Run(check.name, func(t *testing.T) {
@@ -57,7 +55,7 @@ func TestAllRowIDMethodsRejectMalformedIDsBeforeRepository(t *testing.T) {
 			}
 		})
 	}
-	if len(store.getIDs) != 0 || store.deleteID != "" || store.auditID != "" || store.versionID != "" || store.publishParams.PluginID != "" || store.duplicateID != "" {
+	if len(store.getIDs) != 0 || store.deleteID != "" || store.versionID != "" || store.publishParams.PluginID != "" {
 		t.Fatalf("malformed ID reached repository: %#v", store)
 	}
 }
@@ -79,7 +77,6 @@ func TestActionEndpointsPassOpaqueStorageIDs(t *testing.T) {
 		plugins: map[string]*model.Plugin{
 			"opaque-1": {ID: "opaque-1", Name: "Original", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},
 		},
-		audits:   []model.PluginAuditLog{{PluginID: "opaque-1"}},
 		versions: []model.PluginVersion{{PluginID: "opaque-1"}},
 	}
 	svc := fixedService(store)
@@ -88,20 +85,14 @@ func TestActionEndpointsPassOpaqueStorageIDs(t *testing.T) {
 	if err := svc.Delete(ctx, testCaller, "opaque-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := svc.ListAuditLogs(ctx, testCaller, "opaque-1", 20, 0); err != nil {
-		t.Fatal(err)
-	}
 	if _, _, err := svc.ListVersions(ctx, testCaller, "opaque-1", 20, 0); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Publish(ctx, testCaller, "opaque-1", PublishRequest{Version: "1.0.0"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Duplicate(ctx, testCaller, "opaque-1", "Copy"); err != nil {
-		t.Fatal(err)
-	}
-	if store.deleteID != "opaque-1" || store.auditID != "opaque-1" || store.versionID != "opaque-1" || store.publishParams.PluginID != "opaque-1" || store.duplicateID != "opaque-1" {
-		t.Fatalf("storage IDs: delete=%q audit=%q version=%q publish=%q duplicate=%q", store.deleteID, store.auditID, store.versionID, store.publishParams.PluginID, store.duplicateID)
+	if store.deleteID != "opaque-1" || store.versionID != "opaque-1" || store.publishParams.PluginID != "opaque-1" {
+		t.Fatalf("storage IDs: delete=%q version=%q publish=%q", store.deleteID, store.versionID, store.publishParams.PluginID)
 	}
 }
 

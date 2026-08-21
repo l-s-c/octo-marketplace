@@ -50,7 +50,7 @@ func TestNormalizePackageSortsAndRequiresExactCanonicalManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := json.RawMessage(`{"attachments":[{"path":"z.txt","content_type":"raw","mime_type":"text/plain","raw_content":"z"},{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(string(manifest)) + `}],"$schema":"cowork-plugin-package-1.0.json"}`)
-	got, err := normalizePackage(raw, manifest, "space-a")
+	got, err := normalizePackage(raw, manifest, "space-a", model.PluginTypeExpert)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestNormalizePackageRejectsInvalidSchemaAttachmentsAndManifest(t *testing.T
 		`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` + entry + `,{"path":"x","content_type":"storage","mime_type":"text/plain","storage_uri":"key","extra":true}]}`,
 	}
 	for _, raw := range tests {
-		if _, err := normalizePackage(json.RawMessage(raw), manifest, "space-a"); !errors.Is(err, ErrInvalidRequest) {
+		if _, err := normalizePackage(json.RawMessage(raw), manifest, "space-a", model.PluginTypeExpert); !errors.Is(err, ErrInvalidRequest) {
 			t.Fatalf("accepted %s: %v", raw, err)
 		}
 	}
@@ -90,7 +90,7 @@ func TestNormalizePackageStorageURIMustMatchArchiveObjectKeyRule(t *testing.T) {
 			`{"path":"assets/icon.png","content_type":"storage","mime_type":"image/png","storage_uri":` + quoted(uri) + `},` +
 			`{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(string(manifest)) + `}]}`)
 	}
-	if _, err := normalizePackage(mk("plugins/space-a/attachments/icon-1.png"), manifest, "space-a"); err != nil {
+	if _, err := normalizePackage(mk("plugins/space-a/attachments/icon-1.png"), manifest, "space-a", model.PluginTypeExpert); err != nil {
 		t.Fatalf("approved key rejected: %v", err)
 	}
 	for _, uri := range []string{
@@ -101,7 +101,7 @@ func TestNormalizePackageStorageURIMustMatchArchiveObjectKeyRule(t *testing.T) {
 		"plugins/space-a/attachments/",
 		"key",
 	} {
-		if _, err := normalizePackage(mk(uri), manifest, "space-a"); !errors.Is(err, ErrInvalidRequest) {
+		if _, err := normalizePackage(mk(uri), manifest, "space-a", model.PluginTypeExpert); !errors.Is(err, ErrInvalidRequest) {
 			t.Fatalf("uri %q accepted: %v", uri, err)
 		}
 	}
@@ -110,4 +110,45 @@ func TestNormalizePackageStorageURIMustMatchArchiveObjectKeyRule(t *testing.T) {
 func quoted(value string) string {
 	encoded, _ := json.Marshal(value)
 	return string(encoded)
+}
+
+func TestNormalizePackageConnectorDescriptorPerType(t *testing.T) {
+	manifest, _, err := normalizeManifest(json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"Plugin","plugin_type":"connector","name":"jira","description":"desc"}`), "Plugin", model.PluginTypeConnector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk := func(connector string) json.RawMessage {
+		body := `{"$schema":"cowork-plugin-package-1.0.json",`
+		if connector != "" {
+			body += `"connector":` + connector + `,`
+		}
+		body += `"attachments":[{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(string(manifest)) + `}]}`
+		return json.RawMessage(body)
+	}
+	if _, err := normalizePackage(mk(`{"type":"mcp","source":"connector.jira"}`), manifest, "space-a", model.PluginTypeConnector); err != nil {
+		t.Fatalf("valid descriptor rejected: %v", err)
+	}
+	if _, err := normalizePackage(mk(`{"type":"cli"}`), manifest, "space-a", model.PluginTypeConnector); err != nil {
+		t.Fatalf("source should be optional: %v", err)
+	}
+	for name, connector := range map[string]string{
+		"missing":    "",
+		"bad type":   `{"type":"grpc"}`,
+		"extra key":  `{"type":"mcp","extra":1}`,
+		"non object": `"mcp"`,
+		"bad source": `{"type":"mcp","source":7}`,
+	} {
+		if _, err := normalizePackage(mk(connector), manifest, "space-a", model.PluginTypeConnector); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("%s accepted: %v", name, err)
+		}
+	}
+	// Non-connector types must not carry the descriptor at all.
+	skillManifest, _, err := normalizeManifest(json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"Plugin","plugin_type":"skill","name":"s","description":"d"}`), "Plugin", model.PluginTypeSkill, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withField := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","connector":{"type":"mcp"},"attachments":[{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(string(skillManifest)) + `}]}`)
+	if _, err := normalizePackage(withField, skillManifest, "space-a", model.PluginTypeSkill); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("skill package with connector accepted: %v", err)
+	}
 }

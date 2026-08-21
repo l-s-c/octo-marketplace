@@ -77,6 +77,15 @@ type packageAttachment struct {
 type pluginPackage struct {
 	Schema      string              `json:"$schema"`
 	Attachments []packageAttachment `json:"attachments"`
+	Connector   *packageConnector   `json:"connector,omitempty"`
+}
+
+// packageConnector is the top-level connector descriptor of connector plugin
+// packages (plugin-lib schema evolution): the connector kind plus an optional
+// source identifier.
+type packageConnector struct {
+	Source string `json:"source,omitempty"`
+	Type   string `json:"type"`
 }
 
 type rawAttachment struct {
@@ -106,6 +115,10 @@ func newPluginManifest(pluginName, pluginType, name, description string, labels,
 }
 
 func packageJSON(manifestJSON []byte, extras ...rawAttachment) ([]byte, error) {
+	return connectorPackageJSON(nil, manifestJSON, extras...)
+}
+
+func connectorPackageJSON(connector *packageConnector, manifestJSON []byte, extras ...rawAttachment) ([]byte, error) {
 	attachments := make([]packageAttachment, 0, len(extras)+1)
 	add := func(attachmentPath, mimeType, content string) error {
 		if !validAttachmentPath(attachmentPath) {
@@ -141,7 +154,7 @@ func packageJSON(manifestJSON []byte, extras ...rawAttachment) ([]byte, error) {
 			return nil, fmt.Errorf("conflicting package attachment path %q", attachment.Path)
 		}
 	}
-	return canonical(pluginPackage{Schema: "cowork-plugin-package-1.0.json", Attachments: unique})
+	return canonical(pluginPackage{Schema: "cowork-plugin-package-1.0.json", Attachments: unique, Connector: connector})
 }
 
 func validAttachmentPath(value string) bool {
@@ -165,6 +178,10 @@ func jsonAttachment(path string, value any) (rawAttachment, error) {
 // manifest/package schema rules, secret scan, canonicalization, and hash
 // formulas apply. The package embeds the service-canonical manifest bytes.
 func canonicalDocs(outerName, pluginType string, tags []string, draftManifest []byte, extras []rawAttachment, spaceID string) (*pluginsvc.CanonicalDocuments, error) {
+	return canonicalConnectorDocs(outerName, pluginType, tags, draftManifest, extras, spaceID, nil)
+}
+
+func canonicalConnectorDocs(outerName, pluginType string, tags []string, draftManifest []byte, extras []rawAttachment, spaceID string, connector *packageConnector) (*pluginsvc.CanonicalDocuments, error) {
 	if tags == nil {
 		tags = []string{}
 	}
@@ -176,7 +193,7 @@ func canonicalDocs(outerName, pluginType string, tags []string, draftManifest []
 	if err != nil {
 		return nil, fmt.Errorf("manifest rejected by service validator: %w", err)
 	}
-	pkg, err := packageJSON(manifest, extras...)
+	pkg, err := connectorPackageJSON(connector, manifest, extras...)
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +202,36 @@ func canonicalDocs(outerName, pluginType string, tags []string, draftManifest []
 		return nil, fmt.Errorf("package rejected by service validator: %w", err)
 	}
 	return docs, nil
+}
+
+// teamAgentsMarkdown renders the deterministic AGENTS.md entry document of an
+// expert_team package from its legacy squad fields. Free text only — the
+// structured install config lives in team/config.json.
+func teamAgentsMarkdown(name, summary, leader string, strategies any) string {
+	var b strings.Builder
+	b.WriteString("# " + strings.TrimSpace(name) + "\n")
+	if trimmed := strings.TrimSpace(summary); trimmed != "" {
+		b.WriteString("\n" + trimmed + "\n")
+	}
+	b.WriteString("\n## 协作方式\n")
+	if trimmed := strings.TrimSpace(leader); trimmed != "" {
+		b.WriteString("\n- Leader: " + trimmed + "\n")
+	}
+	if items, ok := strategies.([]any); ok {
+		lines := make([]string, 0, len(items))
+		for _, item := range items {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+				lines = append(lines, strings.TrimSpace(text))
+			}
+		}
+		if len(lines) > 0 {
+			b.WriteString("\n### 策略\n")
+			for i, line := range lines {
+				b.WriteString(fmt.Sprintf("%d. %s\n", i+1, line))
+			}
+		}
+	}
+	return b.String()
 }
 
 func secretShaped(key string) bool {

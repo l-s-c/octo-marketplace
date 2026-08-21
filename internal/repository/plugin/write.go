@@ -58,8 +58,8 @@ func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 		return nil, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO plugins (plugin_id,plugin_name,plugin_type,category_id,tags_json,publisher,owner_uid,space_id,visibility,
-creator_name,created_by_type,created_by_bot_uid,created_by_bot_name,manifest_json,plugin_json,manifest_hash,plugin_hash,current_version_id,status,created_at,updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.OwnerUID, p.SpaceID, p.Visibility, p.CreatorName, p.CreatedByType, p.CreatedByBotUID, p.CreatedByBotName, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.CurrentVersionID, p.Status, now, now)
+creator_name,created_by_type,created_by_bot_uid,created_by_bot_name,icon,tool_count,manifest_json,plugin_json,manifest_hash,plugin_hash,current_version_id,current_version,status,created_at,updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.OwnerUID, p.SpaceID, p.Visibility, p.CreatorName, p.CreatedByType, p.CreatedByBotUID, p.CreatedByBotName, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.CurrentVersionID, p.CurrentVersion, p.Status, now, now)
 	if err != nil {
 		return nil, wrapped("create", err)
 	}
@@ -109,10 +109,21 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	}
 	// getOwnedForUpdate already proved existence under lock; RowsAffected reports
 	// changed rows, so a byte-identical resubmit must not surface as not found.
-	_, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,manifest_json=?,plugin_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
-WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.Visibility, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.Status, now, p.ID, scope.CallerUID, scope.SpaceID)
+	_, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,icon=?,tool_count=?,manifest_json=?,plugin_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
+WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.Visibility, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.Status, now, p.ID, scope.CallerUID, scope.SpaceID)
 	if err != nil {
 		return nil, wrapped("update", err)
+	}
+	// Placements filter list pages by their own category copy; keep it in sync
+	// with the current-state category so an updated Plugin doesn't keep
+	// filtering under its old category until the next publish. A nil category
+	// on the update leaves placement categories alone — publish owns clearing
+	// per-placement configuration.
+	if p.CategoryID != nil {
+		_, err = tx.ExecContext(ctx, `UPDATE plugin_placements SET category_id=?,updated_at=? WHERE plugin_id=?`, p.CategoryID, now, p.ID)
+		if err != nil {
+			return nil, wrapped("update placements", err)
+		}
 	}
 	sync, err := syncRelations(ctx, tx, r.id, now, p.ID, m.OperatorID, m.Relations)
 	if err != nil {

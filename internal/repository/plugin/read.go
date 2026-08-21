@@ -11,12 +11,13 @@ import (
 )
 
 // ListFilter restricts a scoped Plugin listing. Sort accepts newest (default),
-// oldest, updated, name, or placement; callers validate unsupported values.
+// oldest, updated, name, placement, views, installs, downloads, or
+// comprehensive; callers validate unsupported values.
 type ListFilter struct {
 	PlacementCode string
 	Type          model.PluginType
 	CategoryID    string
-	Tag           string
+	Tags          []string
 	Keyword       string
 	Mine          bool
 	Sort          string
@@ -24,10 +25,19 @@ type ListFilter struct {
 	Offset        int
 }
 
+// pluginMetric embeds a correlated counter lookup, mirroring the expert list
+// pattern: join-free, so the placement GROUP BY stays trivially valid and
+// missing metric rows read as zero.
+func pluginMetric(column string) string {
+	return `COALESCE((SELECT rm.` + column + ` FROM resource_metrics rm WHERE rm.resource_type='plugin' AND rm.resource_id=p.plugin_id),0)`
+}
+
+var pluginMetricColumns = `,` + pluginMetric("view_count") + `,` + pluginMetric("install_count") + `,` + pluginMetric("download_count")
+
 func (r *Repo) Get(ctx context.Context, scope Scope, pluginID string) (*model.Plugin, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT `+pluginColumns+` FROM plugins p
+	row := r.db.QueryRowContext(ctx, `SELECT `+pluginColumns+pluginMetricColumns+` FROM plugins p
 WHERE p.plugin_id=? AND p.status=1 AND p.deleted_at IS NULL AND `+visibilitySQL, pluginID, scope.SpaceID, scope.CallerUID)
-	p, err := scanPlugin(row)
+	p, err := scanPluginWithMetrics(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -56,7 +66,7 @@ func (r *Repo) List(ctx context.Context, scope Scope, f ListFilter) ([]model.Plu
 	if f.PlacementCode != "" {
 		group = ` GROUP BY p.plugin_id`
 	}
-	q := `SELECT ` + pluginSummaryColumns + from + where + group + listOrder(f) + ` LIMIT ? OFFSET ?`
+	q := `SELECT ` + pluginSummaryColumns + pluginMetricColumns + from + where + group + listOrder(f) + ` LIMIT ? OFFSET ?`
 	rows, err := r.db.QueryContext(ctx, q, queryArgs...)
 	if err != nil {
 		return nil, 0, err
@@ -99,9 +109,11 @@ func buildListQuery(scope Scope, f ListFilter) (string, string, []any) {
 		}
 		args = append(args, f.CategoryID)
 	}
-	if f.Tag != "" {
+	// Tag filter is AND, matching the legacy MCP list semantics: a row must
+	// carry every selected tag, not the union that OR would surface.
+	for _, tag := range f.Tags {
 		where += ` AND JSON_CONTAINS(p.tags_json, JSON_QUOTE(?), '$')`
-		args = append(args, f.Tag)
+		args = append(args, tag)
 	}
 	if f.Keyword != "" {
 		where += ` AND p.plugin_name LIKE ? ESCAPE '!'`
@@ -115,6 +127,7 @@ func buildListQuery(scope Scope, f ListFilter) (string, string, []any) {
 }
 
 func listOrder(f ListFilter) string {
+	recent := `p.created_at DESC,p.plugin_id DESC`
 	switch f.Sort {
 	case "oldest":
 		return ` ORDER BY p.created_at ASC,p.plugin_id ASC`
@@ -122,12 +135,24 @@ func listOrder(f ListFilter) string {
 		return ` ORDER BY p.updated_at DESC,p.plugin_id DESC`
 	case "name":
 		return ` ORDER BY p.plugin_name ASC,p.plugin_id ASC`
+	case "views":
+		return ` ORDER BY ` + pluginMetric("view_count") + ` DESC,` + recent
+	case "installs":
+		return ` ORDER BY ` + pluginMetric("install_count") + ` DESC,` + recent
+	case "downloads":
+		return ` ORDER BY ` + pluginMetric("download_count") + ` DESC,` + recent
+	case "comprehensive":
+		// Mirrors the expert/skill catalog ranking (repository/expert/list.go —
+		// keep the weights in sync): installs 5×, views 1×, plus a recency boost
+		// decaying over days so fresh listings still surface.
+		return ` ORDER BY (` + pluginMetric("install_count") + ` * 5 + ` + pluginMetric("view_count") +
+			` + 20 / POW(TIMESTAMPDIFF(HOUR, p.created_at, NOW()) / 24 + 2, 1.2)) DESC,` + recent
 	case "placement":
 		if f.PlacementCode != "" {
 			return ` ORDER BY MIN(pp.sort_order) ASC,p.plugin_id ASC`
 		}
 	}
-	return ` ORDER BY p.created_at DESC,p.plugin_id DESC`
+	return ` ORDER BY ` + recent
 }
 
 func escapeLike(s string) string {
@@ -167,26 +192,68 @@ ORDER BY r.sort_order,r.relation_id`, pluginID, scope.SpaceID, scope.CallerUID)
 	return p, rels, rows.Err()
 }
 
+// CountMemberRelations returns per-team counts of live expert_team_member
+// edges whose target Plugin is itself live. Members are embedded Plugins
+// promoted with their team, so target liveness (not caller visibility) is the
+// correct predicate: a team visible to the caller never leaks counts of
+// resources outside its own graph.
+func (r *Repo) CountMemberRelations(ctx context.Context, teamIDs []string) (map[string]int, error) {
+	out := make(map[string]int, len(teamIDs))
+	if len(teamIDs) == 0 {
+		return out, nil
+	}
+	args := make([]any, 0, len(teamIDs))
+	for _, id := range teamIDs {
+		args = append(args, id)
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT r.source_plugin_id, COUNT(*) FROM plugin_relations r
+JOIN plugins t ON t.plugin_id=r.target_plugin_id AND t.status=1 AND t.deleted_at IS NULL
+WHERE r.source_plugin_id IN (`+placeholders(len(teamIDs))+`) AND r.relation_type='expert_team_member' AND r.status=1 AND r.deleted_at IS NULL
+GROUP BY r.source_plugin_id`, args...)
+	if err != nil {
+		return nil, wrapped("count member relations", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var count int
+		if err := rows.Scan(&id, &count); err != nil {
+			return nil, err
+		}
+		out[id] = count
+	}
+	return out, rows.Err()
+}
+
 func scanPlugin(s interface{ Scan(...any) error }) (*model.Plugin, error) {
-	return scanPluginRow(s, true)
+	return scanPluginRow(s, true, false)
 }
 
-// scanPluginSummary scans a row selected with pluginSummaryColumns; the
-// package stays nil so list pages never materialize it.
+// scanPluginWithMetrics scans a row selected with pluginColumns plus the
+// correlated metric counters appended by pluginMetricColumns.
+func scanPluginWithMetrics(s interface{ Scan(...any) error }) (*model.Plugin, error) {
+	return scanPluginRow(s, true, true)
+}
+
+// scanPluginSummary scans a row selected with pluginSummaryColumns plus metric
+// counters; the package stays nil so list pages never materialize it.
 func scanPluginSummary(s interface{ Scan(...any) error }) (*model.Plugin, error) {
-	return scanPluginRow(s, false)
+	return scanPluginRow(s, false, true)
 }
 
-func scanPluginRow(s interface{ Scan(...any) error }, includePackage bool) (*model.Plugin, error) {
+func scanPluginRow(s interface{ Scan(...any) error }, includePackage, includeMetrics bool) (*model.Plugin, error) {
 	var p model.Plugin
-	var category, space, botUID, botName, version sql.NullString
+	var category, space, botUID, botName, version, versionName sql.NullString
 	var tags, manifest, pkg []byte
 	var deleted sql.NullTime
-	dest := []any{&p.ID, &p.Name, &p.Type, &p.IsEmbedded, &category, &tags, &p.Publisher, &p.OwnerUID, &space, &p.Visibility, &p.CreatorName, &p.CreatedByType, &botUID, &botName, &manifest}
+	dest := []any{&p.ID, &p.Name, &p.Type, &p.IsEmbedded, &category, &tags, &p.Publisher, &p.OwnerUID, &space, &p.Visibility, &p.CreatorName, &p.CreatedByType, &botUID, &botName, &p.Icon, &p.ToolCount, &manifest}
 	if includePackage {
 		dest = append(dest, &pkg)
 	}
-	dest = append(dest, &p.ManifestHash, &p.PluginHash, &version, &p.Status, &p.CreatedAt, &p.UpdatedAt, &deleted)
+	dest = append(dest, &p.ManifestHash, &p.PluginHash, &version, &versionName, &p.Status, &p.CreatedAt, &p.UpdatedAt, &deleted)
+	if includeMetrics {
+		dest = append(dest, &p.ViewCount, &p.InstallCount, &p.DownloadCount)
+	}
 	if err := s.Scan(dest...); err != nil {
 		return nil, err
 	}
@@ -195,6 +262,7 @@ func scanPluginRow(s interface{ Scan(...any) error }, includePackage bool) (*mod
 	p.CreatedByBotUID = nullString(botUID)
 	p.CreatedByBotName = nullString(botName)
 	p.CurrentVersionID = nullString(version)
+	p.CurrentVersion = nullString(versionName)
 	if deleted.Valid {
 		p.DeletedAt = &deleted.Time
 	}

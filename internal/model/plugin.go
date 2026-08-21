@@ -41,11 +41,29 @@ type Plugin struct {
 	CreatedByType    string
 	CreatedByBotUID  *string
 	CreatedByBotName *string
+	// Icon is the stored write-canonical value: a persistent public URL or a
+	// managed storage object key. IconURL is derived at read time (presigned
+	// when Icon is an object key) and never persisted, so clients can render
+	// IconURL but must echo Icon back on updates.
+	Icon    string
+	IconURL string
+	// ToolCount is materialized from the connector/tools.json attachment on the
+	// write path because list queries never load plugin_json.
+	ToolCount int
+	// MemberCount is derived from live expert_team_member relations for list
+	// responses; it is never persisted.
+	MemberCount int
+	// View/Install/DownloadCount are read-only counters resolved from
+	// resource_metrics (resource_type "plugin"); they are never written here.
+	ViewCount        int
+	InstallCount     int
+	DownloadCount    int
 	Manifest         json.RawMessage
 	Package          json.RawMessage
 	ManifestHash     string
 	PluginHash       string
 	CurrentVersionID *string
+	CurrentVersion   *string
 	Status           int
 	CreatedAt        time.Time
 	UpdatedAt        time.Time

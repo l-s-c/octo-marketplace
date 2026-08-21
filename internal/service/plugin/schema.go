@@ -71,14 +71,19 @@ func normalizeManifest(raw json.RawMessage, outerName string, outerType model.Pl
 // storage attachments: a storage_uri must already be an approved object key for
 // the owning Space (the same rule the archive/download readers enforce), so a
 // package can never be written in a shape its own archive endpoint rejects.
-func normalizePackage(raw, canonicalManifest json.RawMessage, spaceID string) (json.RawMessage, error) {
+// typ gates the top-level connector descriptor: required for connector
+// Plugins, forbidden everywhere else.
+func normalizePackage(raw, canonicalManifest json.RawMessage, spaceID string, typ model.PluginType) (json.RawMessage, error) {
 	value, err := decodeJSONObject(raw)
-	if err != nil || !onlyKeys(value, "$schema", "attachments") {
+	if err != nil || !onlyKeys(value, "$schema", "attachments", "connector") {
 		return nil, ErrInvalidRequest
 	}
 	schema, ok := requiredString(value, "$schema")
 	if !ok || schema != packageSchema {
 		return nil, ErrInvalidRequest
+	}
+	if err := validatePackageConnector(value, typ); err != nil {
+		return nil, err
 	}
 	attachmentsValue, ok := value["attachments"]
 	if !ok {
@@ -185,6 +190,43 @@ func normalizePackage(raw, canonicalManifest json.RawMessage, spaceID string) (j
 		return nil, err
 	}
 	return canonical, nil
+}
+
+// packageConnectorTypes are the connector descriptor kinds the package schema
+// accepts (per the plugin-lib schema evolution): mcp, cli, skill-only, and the
+// OAuth2-brokered openconnector.
+var packageConnectorTypes = map[string]struct{}{
+	"mcp": {}, "cli": {}, "skill-only": {}, "openconnector": {},
+}
+
+// validatePackageConnector enforces the top-level connector descriptor:
+// connector Plugins must carry {"type": <enum>, "source"?: string}; every
+// other plugin type must omit the key entirely.
+func validatePackageConnector(value map[string]any, typ model.PluginType) error {
+	raw, exists := value["connector"]
+	if typ != model.PluginTypeConnector {
+		if exists {
+			return ErrInvalidRequest
+		}
+		return nil
+	}
+	descriptor, ok := raw.(map[string]any)
+	if !exists || !ok || !onlyKeys(descriptor, "type", "source") {
+		return ErrInvalidRequest
+	}
+	kind, ok := requiredString(descriptor, "type")
+	if !ok {
+		return ErrInvalidRequest
+	}
+	if _, valid := packageConnectorTypes[kind]; !valid {
+		return ErrInvalidRequest
+	}
+	if source, exists := descriptor["source"]; exists {
+		if _, ok := source.(string); !ok {
+			return ErrInvalidRequest
+		}
+	}
+	return nil
 }
 
 func decodeJSONObject(raw json.RawMessage) (map[string]any, error) {

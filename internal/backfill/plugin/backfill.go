@@ -403,7 +403,7 @@ func (r *Runner) skillVersions(ctx context.Context, sid, pid, currentSourceID, f
 			return nil, verRow{}, nil, fmt.Errorf("skill %q current_version_id %q does not reference its version history", sid, currentSourceID)
 		}
 		if fallbackVersion == "" {
-			fallbackVersion = "legacy"
+			fallbackVersion = "1.0.0"
 		}
 		row := mkver(DeterministicID("skillver", sid+":"+fallbackVersion), pid, fallbackVersion, "", fallbackBy, fallbackCreated, manifest, pkg)
 		issue := Issue{"info", "synthetic_skill_version", "skills", sid, "no version rows; current snapshot created"}
@@ -472,7 +472,7 @@ func snapshotSkill(parentID string, index, occurrence int, s legacySkillRef, own
 	manifest, pkg := []byte(docs.Manifest), []byte(docs.Package)
 	vid := DeterministicID("snapshotskillver", id)
 	x := plugRow{id: id, name: s.Name, typ: "skill", embedded: 1, tags: string(docs.Tags), owner: owner, space: space, visibility: visibility, creator: creator, by: by, manifest: string(manifest), pkg: string(pkg), mhash: docs.ManifestHash, phash: docs.PluginHash, versionID: vid, status: active(deleted), created: created, updated: updated, deleted: deleted}
-	return x, mkver(vid, id, "legacy", "", owner, created, manifest, pkg), nil
+	return x, mkver(vid, id, "1.0.0", "", owner, created, manifest, pkg), nil
 }
 
 func nonNilStrings(values []string) []string {
@@ -565,18 +565,14 @@ func (r *Runner) experts(ctx context.Context, cats map[string]string, dict map[i
 		draft, _ := canonical(newPluginManifest(name, "expert", name, summary, tags, nil))
 		var cfg any
 		_ = json.Unmarshal(safeMCP, &cfg)
-		mcpAttachment, _ := jsonAttachment("expert/mcp.json", cfg)
+		mcpAttachment, _ := jsonAttachment("mcp.json", cfg)
 		extras := []rawAttachment{mcpAttachment}
 		if instruction != "" {
-			extras = append(extras, rawAttachment{path: "expert/instruction.md", mimeType: "text/markdown", content: instruction})
+			extras = append(extras, rawAttachment{path: "AGENTS.md", mimeType: "text/markdown", content: instruction})
 		}
-		for _, skill := range skills {
-			key := skillPathKey(skill)
-			skillManifest := embeddedSkillManifest(skill)
-			extras = append(extras, rawAttachment{path: "skills/" + key + "/manifest.json", mimeType: "application/json", content: string(skillManifest)})
-			ref, _ := jsonAttachment("skills/"+key+"/ref.json", map[string]any{"file_name": skill.FileName, "file_size": skill.FileSize, "files": nonNilStrings(skill.Files), "object_key": skill.ObjectKey, "skill_key": key, "zip_object_key": skill.ZipObjectKey})
-			extras = append(extras, ref)
-		}
+		// Embedded skills are not copied into the expert package: each one is
+		// promoted to a standalone skill Plugin and referenced through an
+		// expert_skill relation, so related content has exactly one home.
 		docs, docErr := canonicalDocs(name, "expert", tags, draft, extras, space.String)
 		if docErr != nil {
 			p.issues = append(p.issues, Issue{"skip", "invalid_expert_documents", "experts", id, docErr.Error()})
@@ -586,7 +582,7 @@ func (r *Runner) experts(ctx context.Context, cats map[string]string, dict map[i
 		// mcp_servers, so an expert_connector relation cannot be derived; record
 		// the gap instead of fabricating an edge by content matching.
 		if string(safeMCP) != "{}" && string(safeMCP) != "null" {
-			p.issues = append(p.issues, Issue{"info", "expert_connector_unlinked", "experts", id, "inline mcp_config preserved in expert/mcp.json; legacy schema has no mcp_servers reference to materialize an expert_connector relation"})
+			p.issues = append(p.issues, Issue{"info", "expert_connector_unlinked", "experts", id, "inline mcp_config preserved in mcp.json; legacy schema has no mcp_servers reference to materialize an expert_connector relation"})
 		}
 		manifest, pkg := []byte(docs.Manifest), []byte(docs.Package)
 		vid := DeterministicID("expertver", id)
@@ -597,7 +593,7 @@ func (r *Runner) experts(ctx context.Context, cats map[string]string, dict map[i
 			manifest: string(manifest), pkg: string(pkg), mhash: docs.ManifestHash, phash: docs.PluginHash,
 			versionID: vid, status: active(deleted), created: created, updated: updated, deleted: deleted,
 		}
-		appendPlugin(p, x, mkver(vid, pid, "legacy", "", owner, created, manifest, pkg))
+		appendPlugin(p, x, mkver(vid, pid, "1.0.0", "", owner, created, manifest, pkg))
 		skillOccurrences := snapshotOccurrences(skills, skillIdentityKey)
 		for i, skill := range skills {
 			sx, sv, snapErr := snapshotSkill(pid, i, skillOccurrences[i], skill, owner, space.String, expertVisibility(visibility), creator, by, created, updated, deleted)
@@ -664,29 +660,12 @@ func (r *Runner) squads(ctx context.Context, cats map[string]string, dict map[in
 		pid := PluginID("expertteam", id)
 		draft, _ := canonical(newPluginManifest(name, "expert_team", name, summary, tags, nil))
 		teamConfig, _ := jsonAttachment("team/config.json", map[string]any{"dependencies": dependencyValue, "leader": leader, "permission": permission, "strategies": strategyValue})
-		extras := []rawAttachment{teamConfig}
-		for i, member := range members {
-			memberKey := member.MemberKey
-			if memberKey == "" {
-				memberKey = DeterministicID("memberkey", memberIdentityKey(member))
-			}
-			memberManifest, _ := canonical(newPluginManifest(member.Name, "expert", member.Name, member.Role, nil, member.UsageExamples))
-			extras = append(extras, rawAttachment{path: "members/" + memberKey + "/manifest.json", mimeType: "application/json", content: string(memberManifest)})
-			contextAttachment, _ := jsonAttachment("members/"+memberKey+"/expert/context.json", map[string]any{"is_leader": member.IsLeader, "role": member.Role, "template_id": member.TemplateID})
-			extras = append(extras, contextAttachment)
-			if member.Instruction != "" {
-				extras = append(extras, rawAttachment{path: "members/" + memberKey + "/expert/instruction.md", mimeType: "text/markdown", content: member.Instruction})
-			}
-			memberMCPAttachment, _ := jsonAttachment("members/"+memberKey+"/expert/mcp.json", memberMCP[i])
-			extras = append(extras, memberMCPAttachment)
-			for _, skill := range member.Skills {
-				skillKey := skillPathKey(skill)
-				skillManifest := embeddedSkillManifest(skill)
-				extras = append(extras, rawAttachment{path: "members/" + memberKey + "/skills/" + skillKey + "/manifest.json", mimeType: "application/json", content: string(skillManifest)})
-				ref, _ := jsonAttachment("members/"+memberKey+"/skills/"+skillKey+"/ref.json", map[string]any{"file_name": skill.FileName, "file_size": skill.FileSize, "files": nonNilStrings(skill.Files), "object_key": skill.ObjectKey, "skill_key": skillKey, "zip_object_key": skill.ZipObjectKey})
-				extras = append(extras, ref)
-			}
-		}
+		// AGENTS.md is the human-readable entry the plugin-lib layout expects;
+		// the structured install config stays in team/config.json.
+		extras := []rawAttachment{teamConfig, {path: "AGENTS.md", mimeType: "text/markdown", content: teamAgentsMarkdown(name, summary, leader, strategyValue)}}
+		// Member content is not copied into the team package: each member is a
+		// standalone snapshot Plugin referenced through an expert_team_member
+		// relation, whose relation_json carries role/is_leader/member_key.
 		docs, docErr := canonicalDocs(name, "expert_team", tags, draft, extras, space.String)
 		if docErr != nil {
 			p.issues = append(p.issues, Issue{"skip", "invalid_squad_documents", "expert_squads", id, docErr.Error()})
@@ -701,24 +680,17 @@ func (r *Runner) squads(ctx context.Context, cats map[string]string, dict map[in
 			manifest: string(manifest), pkg: string(pkg), mhash: docs.ManifestHash, phash: docs.PluginHash,
 			versionID: vid, status: active(deleted), created: created, updated: updated, deleted: deleted,
 		}
-		appendPlugin(p, x, mkver(vid, pid, "legacy", "", owner, created, manifest, pkg))
+		appendPlugin(p, x, mkver(vid, pid, "1.0.0", "", owner, created, manifest, pkg))
 		memberOccurrences := snapshotOccurrences(members, memberIdentityKey)
 		for i, member := range members {
 			memberSource := memberIdentityKey(member)
 			mid := DeterministicID("snapshotmember", fmt.Sprintf("%s:%s:%06d", pid, memberSource, memberOccurrences[i]))
 			memberDraft, _ := canonical(newPluginManifest(member.Name, "expert", member.Name, member.Role, nil, member.UsageExamples))
 			contextAttachment, _ := jsonAttachment("expert/context.json", map[string]any{"is_leader": member.IsLeader, "member_key": member.MemberKey, "role": member.Role, "template_id": member.TemplateID})
-			mcpAttachment, _ := jsonAttachment("expert/mcp.json", memberMCP[i])
+			mcpAttachment, _ := jsonAttachment("mcp.json", memberMCP[i])
 			memberExtras := []rawAttachment{contextAttachment, mcpAttachment}
 			if member.Instruction != "" {
-				memberExtras = append(memberExtras, rawAttachment{path: "expert/instruction.md", mimeType: "text/markdown", content: member.Instruction})
-			}
-			for _, skill := range member.Skills {
-				skillKey := skillPathKey(skill)
-				skillManifest := embeddedSkillManifest(skill)
-				memberExtras = append(memberExtras, rawAttachment{path: "skills/" + skillKey + "/manifest.json", mimeType: "application/json", content: string(skillManifest)})
-				ref, _ := jsonAttachment("skills/"+skillKey+"/ref.json", map[string]any{"file_name": skill.FileName, "file_size": skill.FileSize, "files": nonNilStrings(skill.Files), "object_key": skill.ObjectKey, "skill_key": skillKey, "zip_object_key": skill.ZipObjectKey})
-				memberExtras = append(memberExtras, ref)
+				memberExtras = append(memberExtras, rawAttachment{path: "AGENTS.md", mimeType: "text/markdown", content: member.Instruction})
 			}
 			memberDocs, memberErr := canonicalDocs(member.Name, "expert", nil, memberDraft, memberExtras, space.String)
 			if memberErr != nil {
@@ -734,7 +706,7 @@ func (r *Runner) squads(ctx context.Context, cats map[string]string, dict map[in
 				manifest: string(mm), pkg: string(mp), mhash: memberDocs.ManifestHash, phash: memberDocs.PluginHash,
 				versionID: mvid, status: active(deleted), created: created, updated: updated, deleted: deleted,
 			}
-			appendPlugin(p, mx, mkver(mvid, mid, "legacy", "", owner, created, mm, mp))
+			appendPlugin(p, mx, mkver(mvid, mid, "1.0.0", "", owner, created, mm, mp))
 			p.relations = append(p.relations, relation(pid, mid, "expert_team_member", i, map[string]any{"source_index": i, "member_key": member.MemberKey, "role": member.Role, "is_leader": member.IsLeader}, owner, created, updated, deleted))
 			skillOccurrences := snapshotOccurrences(member.Skills, skillIdentityKey)
 			for j, skill := range member.Skills {
@@ -783,12 +755,18 @@ func (r *Runner) mcps(ctx context.Context, p *plan) error {
 			canonicalName = n
 		}
 		draft, _ := canonical(newPluginManifest(n, "connector", canonicalName, slogan, tv, exampleValues))
-		configAttachment, _ := jsonAttachment("connector/config.json", map[string]any{"config": cfg, "transport": transport})
+		mcpDocument, mcpErr := connectorMCPDocument(safe, transport, canonicalName)
+		if mcpErr != nil {
+			p.issues = append(p.issues, Issue{"skip", "invalid_connector_config", "mcp_servers", id, mcpErr.Error()})
+			continue
+		}
+		mcpAttachment, _ := jsonAttachment("mcp.json", mcpDocument)
 		toolsAttachment, _ := jsonAttachment("connector/tools.json", tl)
 		examplesAttachment, _ := jsonAttachment("connector/examples.json", exampleValues)
 		faqsAttachment, _ := jsonAttachment("connector/faqs.json", fq)
 		notesAttachment, _ := jsonAttachment("connector/notes.json", nt)
-		docs, docErr := canonicalDocs(n, "connector", tv, draft, []rawAttachment{configAttachment, toolsAttachment, examplesAttachment, faqsAttachment, notesAttachment}, space.String)
+		descriptor := &packageConnector{Type: "mcp", Source: "connector." + canonicalName}
+		docs, docErr := canonicalConnectorDocs(n, "connector", tv, draft, []rawAttachment{mcpAttachment, toolsAttachment, examplesAttachment, faqsAttachment, notesAttachment}, space.String, descriptor)
 		if docErr != nil {
 			p.issues = append(p.issues, Issue{"skip", "invalid_connector_documents", "mcp_servers", id, docErr.Error()})
 			continue
@@ -803,7 +781,7 @@ func (r *Runner) mcps(ctx context.Context, p *plan) error {
 			mhash: docs.ManifestHash, phash: docs.PluginHash, versionID: vid,
 			status: active(d), created: c, updated: u, deleted: d,
 		})
-		p.versions = append(p.versions, mkver(vid, pid, "legacy", "", owner, c, m, pkg))
+		p.versions = append(p.versions, mkver(vid, pid, "1.0.0", "", owner, c, m, pkg))
 	}
 	return rs.Err()
 }
@@ -1011,9 +989,13 @@ func (r *Runner) apply(ctx context.Context, p plan, rep *Report) error {
 			return e
 		}
 	}
+	versionNames := make(map[string]string, len(p.versions))
+	for _, v := range p.versions {
+		versionNames[v.id] = v.version
+	}
 	for _, x := range p.plugins {
-		a := []any{x.id, x.name, x.typ, x.embedded, nstr(x.cat), x.tags, x.publisher, x.owner, nstr(x.space), x.visibility, x.creator, x.by, nstr(x.botUID), nstr(x.botName), x.manifest, x.pkg, x.mhash, x.phash, x.versionID, x.status, x.created, x.updated, ntime(x.deleted)}
-		e = applyRow(ctx, tx, rep, "plugins", "plugin_id", x.id, `SELECT COUNT(*) FROM plugins WHERE plugin_id=? AND plugin_name<=>? AND plugin_type<=>? AND is_embedded<=>? AND category_id<=>? AND tags_json<=>CAST(? AS JSON) AND publisher<=>? AND owner_uid<=>? AND space_id<=>? AND visibility<=>? AND creator_name<=>? AND created_by_type<=>? AND created_by_bot_uid<=>? AND created_by_bot_name<=>? AND manifest_json<=>CAST(? AS JSON) AND plugin_json<=>CAST(? AS JSON) AND manifest_hash<=>? AND plugin_hash<=>? AND current_version_id<=>? AND status<=>? AND created_at<=>? AND updated_at<=>? AND deleted_at<=>?`, `INSERT INTO plugins(plugin_id,plugin_name,plugin_type,is_embedded,category_id,tags_json,publisher,owner_uid,space_id,visibility,creator_name,created_by_type,created_by_bot_uid,created_by_bot_name,manifest_json,plugin_json,manifest_hash,plugin_hash,current_version_id,status,created_at,updated_at,deleted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, a, a)
+		a := []any{x.id, x.name, x.typ, x.embedded, nstr(x.cat), x.tags, x.publisher, x.owner, nstr(x.space), x.visibility, x.creator, x.by, nstr(x.botUID), nstr(x.botName), x.manifest, x.pkg, x.mhash, x.phash, x.versionID, nstr(versionNames[x.versionID]), x.status, x.created, x.updated, ntime(x.deleted)}
+		e = applyRow(ctx, tx, rep, "plugins", "plugin_id", x.id, `SELECT COUNT(*) FROM plugins WHERE plugin_id=? AND plugin_name<=>? AND plugin_type<=>? AND is_embedded<=>? AND category_id<=>? AND tags_json<=>CAST(? AS JSON) AND publisher<=>? AND owner_uid<=>? AND space_id<=>? AND visibility<=>? AND creator_name<=>? AND created_by_type<=>? AND created_by_bot_uid<=>? AND created_by_bot_name<=>? AND manifest_json<=>CAST(? AS JSON) AND plugin_json<=>CAST(? AS JSON) AND manifest_hash<=>? AND plugin_hash<=>? AND current_version_id<=>? AND current_version<=>? AND status<=>? AND created_at<=>? AND updated_at<=>? AND deleted_at<=>?`, `INSERT INTO plugins(plugin_id,plugin_name,plugin_type,is_embedded,category_id,tags_json,publisher,owner_uid,space_id,visibility,creator_name,created_by_type,created_by_bot_uid,created_by_bot_name,manifest_json,plugin_json,manifest_hash,plugin_hash,current_version_id,current_version,status,created_at,updated_at,deleted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, a, a)
 		if e != nil {
 			return e
 		}
@@ -1166,12 +1148,19 @@ func (r *Runner) verify(ctx context.Context, p plan, issues []Issue) (Counts, st
 		if e != nil {
 			return c, "", issues, e
 		}
-		if code != x.code || plugin != x.plugin || cat.String != x.cat || order != x.order {
+		// The enrich phase may fill a category the deterministic plan leaves
+		// empty (legacy connectors carry no category rows); treat that as equal
+		// and project the planned value so plan and observed hashes line up.
+		observedCat := cat.String
+		if x.cat == "" && observedCat != "" {
+			observedCat = x.cat
+		}
+		if code != x.code || plugin != x.plugin || observedCat != x.cat || order != x.order {
 			c.Conflicts++
 			issues = append(issues, Issue{"error", "placement_conflict", "plugin_placements", x.id, "placement, plugin, category, or order differs"})
 		}
 		c.Placements++
-		l = append(l, fmt.Sprintf("pp:%s:%s:%s:%s:%d", x.id, code, plugin, cat.String, order))
+		l = append(l, fmt.Sprintf("pp:%s:%s:%s:%s:%d", x.id, code, plugin, observedCat, order))
 	}
 	return c, digestLines(l), issues, nil
 }

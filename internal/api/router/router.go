@@ -175,6 +175,10 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 		if fleetClient != nil {
 			expertSvc = expertSvc.WithFleet(fleetClient)
 		}
+		// The unified plugin install reuses the expert provisioning flow, accrues
+		// counters under resource_type "plugin", and imports skill uploads
+		// through the legacy parse pipeline.
+		pluginSvc.WithProvisioner(expertSvc).WithMetrics(mSvc).WithParseTasks(skRepo)
 		expertHandler := experthandler.New(expertSvc)
 		expertHandler.Register(v1)
 		// Admin (superAdmin ∪ marketAdmin) surface: /api/v1/admin/experts|squads
@@ -185,6 +189,7 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 		metricssvc.RegisterResolver("skill", metricssvc.NewSkillResolver(skSvc))
 		metricssvc.RegisterResolver("expert", metricssvc.NewExpertResolver(expertSvc))
 		metricssvc.RegisterResolver("squad", metricssvc.NewSquadResolver(expertSvc))
+		metricssvc.RegisterResolver("plugin", metricssvc.NewPluginResolver(pluginSvc))
 		metricshandler.New(mSvc).Register(v1)
 
 		parseRepo := parsesvc.NewRepo(db)

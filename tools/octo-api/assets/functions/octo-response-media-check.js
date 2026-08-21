@@ -2,8 +2,7 @@ module.exports = (operation) => {
   if (!operation || typeof operation !== 'object') return;
 
   const byteStreams = {
-    'plugin.attachment.download': 'application/octet-stream',
-    'plugin.archive.download': 'application/zip',
+    'plugin.skill_download': 'application/zip',
   };
   const allowedSuccess = byteStreams[operation.operationId] || 'application/json';
   const errors = [];

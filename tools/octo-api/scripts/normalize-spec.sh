@@ -59,8 +59,7 @@ if os.path.exists(yaml_path):
     with open(yaml_path) as f:
         spec = yaml.safe_load(f)
     streams = {
-        '/internal/plugins/attachment/download': 'application/octet-stream',
-        '/internal/plugins/archive': 'application/zip',
+        '/plugins/download': 'application/zip',
     }
     for path_name, success_media in streams.items():
         operation = spec.get('paths', {}).get(path_name, {}).get('get')

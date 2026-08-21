@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -23,13 +24,46 @@ const (
 	maxRelations  = 200
 	maxPlacements = 100
 	maxListLimit  = 100
+	maxListTags   = 20 // bound on AND-combined tag filters per list query
+	maxIconBytes  = 512
 )
 
 var (
 	versionPattern    = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$`)
 	placementPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,127}$`)
 	relationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	// iconKeyPattern identifies storage-object-key shaped icons that the read
+	// path resolves to presigned URLs (legacy skill icons are object keys).
+	iconKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+	// iconSchemePattern matches any URI scheme prefix; only http(s) is allowed.
+	iconSchemePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
 )
+
+// validIcon accepts an empty icon, an absolute http(s) URL, a storage object
+// key, or a short text glyph (legacy MCP icons are emoji). Every other URI
+// scheme — javascript:, data:, file: — plus control characters and traversal
+// segments fail closed because icons are echoed into <img src>.
+func validIcon(v string) bool {
+	if v == "" {
+		return true
+	}
+	if len(v) > maxIconBytes || !utf8.ValidString(v) {
+		return false
+	}
+	for _, r := range v {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	if strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") {
+		u, err := url.Parse(v)
+		return err == nil && u.Host != ""
+	}
+	if iconSchemePattern.MatchString(v) {
+		return false
+	}
+	return !strings.Contains(v, "..") && !strings.Contains(v, "//")
+}
 
 func validPluginType(v model.PluginType) bool {
 	switch v {

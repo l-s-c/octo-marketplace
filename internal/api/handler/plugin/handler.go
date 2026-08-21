@@ -31,14 +31,13 @@ type Service interface {
 	Create(context.Context, pluginsvc.Caller, pluginsvc.WriteRequest) (*pluginsvc.Detail, error)
 	Update(context.Context, pluginsvc.Caller, string, pluginsvc.WriteRequest) (*pluginsvc.Detail, error)
 	Delete(context.Context, pluginsvc.Caller, string) error
-	ListAuditLogs(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginAuditLog, int64, error)
 	ListVersions(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginVersion, int64, error)
 	Publish(context.Context, pluginsvc.Caller, string, pluginsvc.PublishRequest) (*model.PluginVersion, error)
-	Duplicate(context.Context, pluginsvc.Caller, string, string) (*model.Plugin, error)
-	InitAttachmentUpload(context.Context, pluginsvc.Caller, string, string, int64) (*pluginsvc.AttachmentUpload, error)
-	OpenAttachment(context.Context, pluginsvc.Caller, string, string) (*pluginsvc.AttachmentDownload, error)
-	PrepareArchive(context.Context, pluginsvc.Caller, string, string) (*pluginsvc.Archive, error)
-	WriteArchive(context.Context, *pluginsvc.Archive, io.Writer) error
+	Install(context.Context, pluginsvc.Caller, string, pluginsvc.InstallParams) (*pluginsvc.InstallOutcome, error)
+	Import(context.Context, pluginsvc.Caller, pluginsvc.ImportParams) (*pluginsvc.Detail, error)
+	SkillMarkdown(context.Context, pluginsvc.Caller, string) (string, error)
+	OpenSkillPackage(context.Context, pluginsvc.Caller, string) (*pluginsvc.AttachmentDownload, error)
+	ListTags(context.Context, pluginsvc.Caller, pluginsvc.TagListParams) ([]model.TagFilter, error)
 }
 
 // CategoryService is separate because category listing is a read-only operation
@@ -63,17 +62,17 @@ func New(svc Service, categories ...CategoryService) *Handler {
 func (h *Handler) Register(rg *gin.RouterGroup) {
 	rg.GET("/plugins", h.List)
 	rg.GET("/plugin_categories", h.ListCategories)
-	internal := rg.Group("/internal/plugins")
-	internal.GET("/detail", h.Get)
-	internal.POST("/upsert", h.Upsert)
-	internal.POST("/delete", h.Delete)
-	internal.POST("/duplicate", h.Duplicate)
-	internal.GET("/audit_logs", h.ListAuditLogs)
-	internal.GET("/versions", h.ListVersions)
-	internal.GET("/archive", h.DownloadArchive)
-	internal.POST("/attachment/upload", h.InitAttachmentUpload)
-	internal.GET("/attachment/download", h.DownloadAttachment)
-	internal.POST("/publish", h.Publish)
+	rg.GET("/plugin_tags", h.ListTags)
+	plugins := rg.Group("/plugins")
+	plugins.GET("/detail", h.Get)
+	plugins.POST("/upsert", h.Upsert)
+	plugins.POST("/delete", h.Delete)
+	plugins.GET("/versions", h.ListVersions)
+	plugins.POST("/publish", h.Publish)
+	plugins.POST("/install", h.Install)
+	plugins.POST("/import", h.Import)
+	plugins.GET("/skill_md", h.SkillMarkdown)
+	plugins.GET("/download", h.DownloadSkillPackage)
 }
 
 type relationRequest struct {
@@ -92,6 +91,7 @@ type pluginWriteRequest struct {
 	CategoryID   *string                `json:"category_id,omitempty"`
 	Tags         []string               `json:"tags"`
 	Publisher    string                 `json:"publisher,omitempty"`
+	Icon         string                 `json:"icon,omitempty"`
 	Visibility   model.PluginVisibility `json:"visibility"`
 	ManifestJSON json.RawMessage        `json:"manifest_json" swaggertype:"object"`
 	PluginJSON   json.RawMessage        `json:"plugin_json" swaggertype:"object"`
@@ -107,7 +107,7 @@ func (r upsertRequest) serviceRequest() pluginsvc.WriteRequest {
 	for i, x := range r.Relations {
 		relations[i] = pluginsvc.RelationRequest{ID: x.RelationID, SourcePluginID: x.SourcePluginID, TargetPluginID: x.TargetPluginID, Type: x.RelationType, SortOrder: x.SortOrder, Data: x.Data}
 	}
-	return pluginsvc.WriteRequest{Name: r.Plugin.PluginName, Type: r.Plugin.PluginType, CategoryID: r.Plugin.CategoryID, Tags: rawJSON(r.Plugin.Tags), Publisher: r.Plugin.Publisher, Visibility: r.Plugin.Visibility, Manifest: r.Plugin.ManifestJSON, Package: r.Plugin.PluginJSON, Relations: relations}
+	return pluginsvc.WriteRequest{Name: r.Plugin.PluginName, Type: r.Plugin.PluginType, CategoryID: r.Plugin.CategoryID, Tags: rawJSON(r.Plugin.Tags), Publisher: r.Plugin.Publisher, Icon: r.Plugin.Icon, Visibility: r.Plugin.Visibility, Manifest: r.Plugin.ManifestJSON, Package: r.Plugin.PluginJSON, Relations: relations}
 }
 
 type placementRequest struct {
@@ -124,11 +124,6 @@ type publishRequest struct {
 	Placements []placementRequest `json:"placements,omitempty"`
 }
 
-type duplicateRequest struct {
-	SourcePluginID string `json:"source_plugin_id"`
-	PluginName     string `json:"plugin_name,omitempty"`
-}
-
 type deleteRequest struct {
 	PluginID string `json:"plugin_id"`
 }
@@ -136,20 +131,6 @@ type deleteRequest struct {
 type deleteResponse struct {
 	PluginID string `json:"plugin_id"`
 	Deleted  bool   `json:"deleted"`
-}
-
-type attachmentUploadRequest struct {
-	FileName    string `json:"file_name"`
-	FileSize    int64  `json:"file_size"`
-	ContentType string `json:"content_type,omitempty"`
-}
-
-type attachmentUploadResponse struct {
-	ObjectKey string            `json:"object_key"`
-	UploadURL string            `json:"upload_url" swaggertype:"string,uri"`
-	Method    string            `json:"method"`
-	Headers   map[string]string `json:"headers"`
-	ExpiresIn int               `json:"expires_in"`
 }
 
 type pluginResponse struct {
@@ -167,14 +148,23 @@ type pluginResponse struct {
 	CreatedByType    string                 `json:"created_by_type"`
 	CreatedByBotID   *string                `json:"created_by_bot_id,omitempty"`
 	CreatedByBotName *string                `json:"created_by_bot_name,omitempty"`
-	ManifestJSON     json.RawMessage        `json:"manifest_json" swaggertype:"object"`
-	PluginJSON       json.RawMessage        `json:"plugin_json" swaggertype:"object"`
-	ManifestHash     string                 `json:"manifest_hash"`
-	PluginHash       string                 `json:"plugin_hash"`
-	CurrentVersionID *string                `json:"current_version_id,omitempty"`
-	Status           int                    `json:"status"`
-	CreatedAt        time.Time              `json:"created_at" swaggertype:"string,date-time"`
-	UpdatedAt        time.Time              `json:"updated_at" swaggertype:"string,date-time"`
+	// Icon is the stored write-canonical value clients must echo on updates;
+	// IconURL is the resolved display URL (presigned when Icon is an object key).
+	Icon             string          `json:"icon,omitempty"`
+	IconURL          string          `json:"icon_url,omitempty"`
+	ToolCount        *int            `json:"tool_count,omitempty"`
+	ViewCount        int             `json:"view_count"`
+	InstallCount     int             `json:"install_count"`
+	DownloadCount    int             `json:"download_count"`
+	ManifestJSON     json.RawMessage `json:"manifest_json" swaggertype:"object"`
+	PluginJSON       json.RawMessage `json:"plugin_json" swaggertype:"object"`
+	ManifestHash     string          `json:"manifest_hash"`
+	PluginHash       string          `json:"plugin_hash"`
+	CurrentVersionID *string         `json:"current_version_id,omitempty"`
+	CurrentVersion   *string         `json:"current_version,omitempty"`
+	Status           int             `json:"status"`
+	CreatedAt        time.Time       `json:"created_at" swaggertype:"string,date-time"`
+	UpdatedAt        time.Time       `json:"updated_at" swaggertype:"string,date-time"`
 }
 
 // listItemResponse is the list-page projection: it carries the manifest for
@@ -194,10 +184,18 @@ type listItemResponse struct {
 	CreatedByType    string                 `json:"created_by_type"`
 	CreatedByBotID   *string                `json:"created_by_bot_id,omitempty"`
 	CreatedByBotName *string                `json:"created_by_bot_name,omitempty"`
+	Icon             string                 `json:"icon,omitempty"`
+	IconURL          string                 `json:"icon_url,omitempty"`
+	ToolCount        *int                   `json:"tool_count,omitempty"`
+	MemberCount      *int                   `json:"member_count,omitempty"`
+	ViewCount        int                    `json:"view_count"`
+	InstallCount     int                    `json:"install_count"`
+	DownloadCount    int                    `json:"download_count"`
 	ManifestJSON     json.RawMessage        `json:"manifest_json" swaggertype:"object"`
 	ManifestHash     string                 `json:"manifest_hash"`
 	PluginHash       string                 `json:"plugin_hash"`
 	CurrentVersionID *string                `json:"current_version_id,omitempty"`
+	CurrentVersion   *string                `json:"current_version,omitempty"`
 	Status           int                    `json:"status"`
 	CreatedAt        time.Time              `json:"created_at" swaggertype:"string,date-time"`
 	UpdatedAt        time.Time              `json:"updated_at" swaggertype:"string,date-time"`
@@ -225,21 +223,6 @@ type relationResultResponse struct {
 	Created []string `json:"created"`
 	Updated []string `json:"updated"`
 	Deleted []string `json:"deleted"`
-}
-
-type auditLogResponse struct {
-	AuditLogID       string          `json:"audit_log_id"`
-	PluginID         string          `json:"plugin_id"`
-	Action           string          `json:"action"`
-	OperatorID       string          `json:"operator_id"`
-	OperatorName     string          `json:"operator_name"`
-	RequestID        string          `json:"request_id"`
-	BeforeHash       *string         `json:"before_hash,omitempty"`
-	AfterHash        *string         `json:"after_hash,omitempty"`
-	ManifestSnapshot json.RawMessage `json:"manifest_snapshot,omitempty" swaggertype:"object"`
-	PluginSnapshot   json.RawMessage `json:"plugin_snapshot,omitempty" swaggertype:"object"`
-	Remark           *string         `json:"remark,omitempty"`
-	CreatedAt        time.Time       `json:"created_at" swaggertype:"string,date-time"`
 }
 
 type versionResponse struct {
@@ -276,8 +259,10 @@ type categoryResponse struct {
 // @Param scene_code query string true "Marketplace scene code"
 // @Param plugin_type query string true "Plugin type" Enums(expert,expert_team,skill,connector)
 // @Param category_id query string false "Category ID (matches the plugin placement category in this scene)"
+// @Param tag query []string false "Tag filters; repeatable or comma-separated, a plugin must carry every tag" collectionFormat(multi)
+// @Param mode query string false "List mode; mine restricts to plugins owned by the caller" Enums(mine)
 // @Param q query string false "Plugin name search query"
-// @Param sort query string false "Sort order" Enums(newest,oldest,updated,name,placement)
+// @Param sort query string false "Sort order" Enums(newest,oldest,updated,name,placement,views,installs,downloads,comprehensive)
 // @Param page query int false "Page number, default 1"
 // @Param page_size query int false "Page size, default 20, max 100"
 // @Success 200 {object} apiresponse.OffsetList[listItemResponse]
@@ -308,7 +293,12 @@ func (h *Handler) List(c *gin.Context) {
 		validation(c, "plugin_type")
 		return
 	}
-	items, total, err := h.svc.List(c.Request.Context(), caller, pluginsvc.ListParams{PlacementCode: sceneCode, Type: pluginType, CategoryID: c.Query("category_id"), Keyword: c.Query("q"), Sort: c.Query("sort"), Limit: pageSize, Offset: (page - 1) * pageSize})
+	mode := c.Query("mode")
+	if mode != "" && mode != "mine" {
+		validation(c, "mode")
+		return
+	}
+	items, total, err := h.svc.List(c.Request.Context(), caller, pluginsvc.ListParams{PlacementCode: sceneCode, Type: pluginType, CategoryID: c.Query("category_id"), Tags: splitQuery(c.QueryArray("tag")), Keyword: c.Query("q"), Mine: mode == "mine", Sort: c.Query("sort"), Limit: pageSize, Offset: (page - 1) * pageSize})
 	if err != nil {
 		writeServiceError(c, err, "plugin.list")
 		return
@@ -336,7 +326,7 @@ func (h *Handler) List(c *gin.Context) {
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /internal/plugins/detail [get]
+// @Router /plugins/detail [get]
 func (h *Handler) Get(c *gin.Context) {
 	caller, ok := caller(c)
 	if !ok {
@@ -377,7 +367,7 @@ func (h *Handler) Get(c *gin.Context) {
 // @Failure 409 {object} apiresponse.Error "CONFLICT"
 // @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /internal/plugins/upsert [post]
+// @Router /plugins/upsert [post]
 func (h *Handler) Upsert(c *gin.Context) {
 	caller, ok := caller(c)
 	if !ok {
@@ -404,47 +394,6 @@ func (h *Handler) Upsert(c *gin.Context) {
 	apiresponse.OK(c, detailDTO(v))
 }
 
-// ListAuditLogs godoc
-// @Summary List plugin audit logs
-// @Description List append-only audit records for a caller-owned Plugin in the current Space using offset pagination.
-// @Tags plugin
-// @ID plugin.audit_log.list
-// @Accept json
-// @Produce json
-// @Security Bearer
-// @Param plugin_id query string true "Plugin ID"
-// @Param page query int false "Page number, default 1"
-// @Param page_size query int false "Page size, default 20, max 100"
-// @Success 200 {object} apiresponse.OffsetList[auditLogResponse]
-// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
-// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
-// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
-// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
-// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /internal/plugins/audit_logs [get]
-func (h *Handler) ListAuditLogs(c *gin.Context) {
-	caller, ok := caller(c)
-	if !ok {
-		unauthorized(c)
-		return
-	}
-	page, size, ok := pagination(c)
-	if !ok {
-		validation(c, "pagination")
-		return
-	}
-	items, total, err := h.svc.ListAuditLogs(c.Request.Context(), caller, c.Query("plugin_id"), size, (page-1)*size)
-	if err != nil {
-		writeServiceError(c, err, "plugin.audit_log.list")
-		return
-	}
-	out := make([]auditLogResponse, len(items))
-	for i, x := range items {
-		out[i] = auditDTO(x)
-	}
-	apiresponse.Offset(c, out, int(total), page, size)
-}
-
 // Delete godoc
 // @Summary Delete plugin
 // @Description Soft-delete a caller-owned Plugin; live incoming relations from other Plugins block deletion.
@@ -461,7 +410,7 @@ func (h *Handler) ListAuditLogs(c *gin.Context) {
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 409 {object} apiresponse.Error "CONFLICT"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /internal/plugins/delete [post]
+// @Router /plugins/delete [post]
 func (h *Handler) Delete(c *gin.Context) {
 	caller, ok := caller(c)
 	if !ok {
@@ -496,7 +445,7 @@ func (h *Handler) Delete(c *gin.Context) {
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /internal/plugins/versions [get]
+// @Router /plugins/versions [get]
 func (h *Handler) ListVersions(c *gin.Context) {
 	caller, ok := caller(c)
 	if !ok {
@@ -537,7 +486,7 @@ func (h *Handler) ListVersions(c *gin.Context) {
 // @Failure 409 {object} apiresponse.Error "CONFLICT"
 // @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /internal/plugins/publish [post]
+// @Router /plugins/publish [post]
 func (h *Handler) Publish(c *gin.Context) {
 	caller, ok := caller(c)
 	if !ok {
@@ -558,161 +507,6 @@ func (h *Handler) Publish(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, apiresponse.Data[versionResponse]{Data: versionDTO(*v)})
-}
-
-// Duplicate godoc
-// @Summary Duplicate plugin
-// @Description Clone a visible Plugin and its relation graph into a new private Plugin owned by the caller.
-// @Tags plugin
-// @ID plugin.duplicate
-// @Accept json
-// @Produce json
-// @Security Bearer
-// @Param body body duplicateRequest true "Source Plugin ID and optional Plugin name"
-// @Success 201 {object} apiresponse.Data[pluginResponse]
-// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
-// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
-// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
-// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
-// @Failure 409 {object} apiresponse.Error "CONFLICT"
-// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
-// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /internal/plugins/duplicate [post]
-func (h *Handler) Duplicate(c *gin.Context) {
-	caller, ok := caller(c)
-	if !ok {
-		unauthorized(c)
-		return
-	}
-	var req duplicateRequest
-	if !decode(c, &req) {
-		return
-	}
-	v, err := h.svc.Duplicate(c.Request.Context(), caller, req.SourcePluginID, req.PluginName)
-	if err != nil {
-		writeServiceError(c, err, "plugin.duplicate")
-		return
-	}
-	apiresponse.Created(c, pluginDTO(v))
-}
-
-// InitAttachmentUpload godoc
-// @Summary Initialize plugin attachment upload
-// @Description Create a server-scoped object key and short-lived PUT target without modifying a Plugin.
-// @Tags plugin
-// @ID plugin.attachment.create
-// @Accept json
-// @Produce json
-// @Security Bearer
-// @Param body body attachmentUploadRequest true "Attachment metadata"
-// @Success 200 {object} apiresponse.Data[attachmentUploadResponse]
-// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
-// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
-// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
-// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
-// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
-// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /internal/plugins/attachment/upload [post]
-func (h *Handler) InitAttachmentUpload(c *gin.Context) {
-	caller, ok := caller(c)
-	if !ok {
-		unauthorized(c)
-		return
-	}
-	var req attachmentUploadRequest
-	if !decode(c, &req) {
-		return
-	}
-	result, err := h.svc.InitAttachmentUpload(c.Request.Context(), caller, req.FileName, req.ContentType, req.FileSize)
-	if err != nil {
-		writeServiceError(c, err, "plugin.attachment.create")
-		return
-	}
-	headers := make(map[string]string, len(result.Headers))
-	for key, values := range result.Headers {
-		if len(values) > 0 {
-			headers[key] = values[0]
-		}
-	}
-	apiresponse.OK(c, attachmentUploadResponse{ObjectKey: result.ObjectKey, UploadURL: result.UploadURL, Method: http.MethodPut, Headers: headers, ExpiresIn: result.ExpiresIn})
-}
-
-// DownloadAttachment godoc
-// @Summary Download plugin attachment
-// @Description Stream an object referenced by the visible Plugin Package after enforcing its managed Space prefix.
-// @Tags plugin
-// @ID plugin.attachment.download
-// @Accept json
-// @Produce application/octet-stream
-// @Security Bearer
-// @Param plugin_id query string true "Plugin ID"
-// @Param object_key query string true "Package-referenced object key"
-// @Success 200 {file} binary "Attachment bytes"
-// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
-// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
-// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
-// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
-// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /internal/plugins/attachment/download [get]
-func (h *Handler) DownloadAttachment(c *gin.Context) {
-	caller, ok := caller(c)
-	if !ok {
-		unauthorized(c)
-		return
-	}
-	result, err := h.svc.OpenAttachment(c.Request.Context(), caller, c.Query("plugin_id"), c.Query("object_key"))
-	if err != nil {
-		writeServiceError(c, err, "plugin.attachment.download")
-		return
-	}
-	defer result.Body.Close()
-	c.Header("Content-Type", result.ContentType)
-	c.Header("Content-Disposition", contentDisposition(result.Path))
-	c.Header("Content-Length", strconv.FormatInt(result.Size, 10))
-	c.Header("X-Content-Type-Options", "nosniff")
-	c.Status(http.StatusOK)
-	if _, err := io.CopyN(c.Writer, result.Body, result.Size); err != nil {
-		logging.Error("plugin_attachment_stream_failed", logging.ErrorField(err))
-	}
-}
-
-// DownloadArchive godoc
-// @Summary Download plugin archive
-// @Description Build and stream a bounded ZIP from the current or requested immutable Plugin Package.
-// @Tags plugin
-// @ID plugin.archive.download
-// @Accept json
-// @Produce application/zip
-// @Security Bearer
-// @Param plugin_id query string true "Plugin ID"
-// @Param version query string false "Immutable Plugin version"
-// @Success 200 {file} binary "Plugin ZIP archive"
-// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
-// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
-// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
-// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
-// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
-// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /internal/plugins/archive [get]
-func (h *Handler) DownloadArchive(c *gin.Context) {
-	caller, ok := caller(c)
-	if !ok {
-		unauthorized(c)
-		return
-	}
-	pluginID := c.Query("plugin_id")
-	archive, err := h.svc.PrepareArchive(c.Request.Context(), caller, pluginID, c.Query("version"))
-	if err != nil {
-		writeServiceError(c, err, "plugin.archive.download")
-		return
-	}
-	c.Header("Content-Type", "application/zip")
-	c.Header("Content-Disposition", contentDisposition(pluginID+".zip"))
-	c.Header("X-Content-Type-Options", "nosniff")
-	c.Status(http.StatusOK)
-	if err := h.svc.WriteArchive(c.Request.Context(), archive, c.Writer); err != nil {
-		logging.Error("plugin_archive_stream_failed", logging.ErrorField(err))
-	}
 }
 
 // ListCategories godoc
@@ -761,6 +555,57 @@ func (h *Handler) ListCategories(c *gin.Context) {
 		out[i] = categoryResponse{CategoryID: x.ID, Name: x.Name, IconKey: x.IconKey, PluginTypes: stringSlice(x.PluginTypes), SortOrder: x.SortOrder, PluginCount: x.PluginCount}
 	}
 	apiresponse.OK(c, out)
+}
+
+// ListTags godoc
+// @Summary List plugin tags
+// @Description Aggregate free-form tags from Plugins visible to the caller (same visible set as GET /plugins), ordered by descending plugin count with alphabetical tie-break.
+// @Tags plugin
+// @ID plugin_tag.list
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param scene_code query string false "Restrict aggregation to Plugins visible in a marketplace scene"
+// @Param plugin_type query string false "Plugin type" Enums(expert,expert_team,skill,connector)
+// @Param q query string false "Fuzzy tag search (substring)"
+// @Param mode query string false "Scope: mine restricts aggregation to caller-owned records"
+// @Param limit query int false "Max items returned; default 50, max 100"
+// @Success 200 {object} apiresponse.Data[[]model.TagFilter]
+// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
+// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
+// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
+// @Router /plugin_tags [get]
+func (h *Handler) ListTags(c *gin.Context) {
+	caller, ok := caller(c)
+	if !ok {
+		unauthorized(c)
+		return
+	}
+	limit := 0
+	if raw := c.Query("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err == nil && parsed > 0 {
+			limit = min(parsed, 100)
+		}
+	}
+	mode := c.Query("mode")
+	if mode != "" && mode != "mine" {
+		validation(c, "mode")
+		return
+	}
+	tags, err := h.svc.ListTags(c.Request.Context(), caller, pluginsvc.TagListParams{
+		PlacementCode: strings.TrimSpace(c.Query("scene_code")),
+		Type:          model.PluginType(c.Query("plugin_type")),
+		Keyword:       strings.TrimSpace(c.Query("q")),
+		Mine:          mode == "mine",
+		Limit:         limit,
+	})
+	if err != nil {
+		writeServiceError(c, err, "plugin_tag.list")
+		return
+	}
+	apiresponse.OK(c, tags)
 }
 
 func caller(c *gin.Context) (pluginsvc.Caller, bool) {
@@ -817,6 +662,21 @@ func unauthorized(c *gin.Context) {
 func validation(c *gin.Context, field string) {
 	apiresponse.Fail(c, http.StatusBadRequest, errcode.BadRequest, "request validation failed", map[string]any{"field": field, "reason": "invalid"}, "Correct the request and try again.")
 }
+
+// splitQuery flattens repeated query values and comma-joined values into one
+// trimmed list, mirroring the legacy market list endpoints so both wire styles
+// (?tag=a&tag=b and ?tag=a,b) filter identically.
+func splitQuery(values []string) []string {
+	var result []string
+	for _, value := range values {
+		for _, item := range strings.Split(value, ",") {
+			if item = strings.TrimSpace(item); item != "" {
+				result = append(result, item)
+			}
+		}
+	}
+	return result
+}
 func writeServiceError(c *gin.Context, err error, operation string) {
 	switch {
 	case errors.Is(err, pluginsvc.ErrInvalidRequest), errors.Is(err, pluginsvc.ErrSecretValue):
@@ -835,13 +695,30 @@ func pluginDTO(p *model.Plugin) pluginResponse {
 	if p == nil {
 		return pluginResponse{}
 	}
-	return pluginResponse{PluginID: p.ID, PluginName: p.Name, PluginType: p.Type, IsEmbedded: p.IsEmbedded, CategoryID: p.CategoryID, Tags: stringSlice(p.Tags), Publisher: p.Publisher, OwnerID: p.OwnerUID, SpaceID: p.SpaceID, Visibility: p.Visibility, CreatorName: p.CreatorName, CreatedByType: p.CreatedByType, CreatedByBotID: p.CreatedByBotUID, CreatedByBotName: p.CreatedByBotName, ManifestJSON: normalizedObjectRaw(p.Manifest), PluginJSON: normalizedObjectRaw(p.Package), ManifestHash: p.ManifestHash, PluginHash: p.PluginHash, CurrentVersionID: p.CurrentVersionID, Status: p.Status, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
+	return pluginResponse{PluginID: p.ID, PluginName: p.Name, PluginType: p.Type, IsEmbedded: p.IsEmbedded, CategoryID: p.CategoryID, Tags: stringSlice(p.Tags), Publisher: p.Publisher, OwnerID: p.OwnerUID, SpaceID: p.SpaceID, Visibility: p.Visibility, CreatorName: p.CreatorName, CreatedByType: p.CreatedByType, CreatedByBotID: p.CreatedByBotUID, CreatedByBotName: p.CreatedByBotName, Icon: p.Icon, IconURL: p.IconURL, ToolCount: connectorCount(p), ViewCount: p.ViewCount, InstallCount: p.InstallCount, DownloadCount: p.DownloadCount, ManifestJSON: normalizedObjectRaw(p.Manifest), PluginJSON: normalizedObjectRaw(p.Package), ManifestHash: p.ManifestHash, PluginHash: p.PluginHash, CurrentVersionID: p.CurrentVersionID, CurrentVersion: p.CurrentVersion, Status: p.Status, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
 }
 func listItemDTO(p *model.Plugin) listItemResponse {
 	if p == nil {
 		return listItemResponse{}
 	}
-	return listItemResponse{PluginID: p.ID, PluginName: p.Name, PluginType: p.Type, IsEmbedded: p.IsEmbedded, CategoryID: p.CategoryID, Tags: stringSlice(p.Tags), Publisher: p.Publisher, OwnerID: p.OwnerUID, SpaceID: p.SpaceID, Visibility: p.Visibility, CreatorName: p.CreatorName, CreatedByType: p.CreatedByType, CreatedByBotID: p.CreatedByBotUID, CreatedByBotName: p.CreatedByBotName, ManifestJSON: normalizedObjectRaw(p.Manifest), ManifestHash: p.ManifestHash, PluginHash: p.PluginHash, CurrentVersionID: p.CurrentVersionID, Status: p.Status, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
+	return listItemResponse{PluginID: p.ID, PluginName: p.Name, PluginType: p.Type, IsEmbedded: p.IsEmbedded, CategoryID: p.CategoryID, Tags: stringSlice(p.Tags), Publisher: p.Publisher, OwnerID: p.OwnerUID, SpaceID: p.SpaceID, Visibility: p.Visibility, CreatorName: p.CreatorName, CreatedByType: p.CreatedByType, CreatedByBotID: p.CreatedByBotUID, CreatedByBotName: p.CreatedByBotName, Icon: p.Icon, IconURL: p.IconURL, ToolCount: connectorCount(p), MemberCount: teamMemberCount(p), ViewCount: p.ViewCount, InstallCount: p.InstallCount, DownloadCount: p.DownloadCount, ManifestJSON: normalizedObjectRaw(p.Manifest), ManifestHash: p.ManifestHash, PluginHash: p.PluginHash, CurrentVersionID: p.CurrentVersionID, CurrentVersion: p.CurrentVersion, Status: p.Status, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
+}
+
+// connectorCount and teamMemberCount emit typed counts only for the plugin
+// type they describe, so a zero on other types reads as absent, not empty.
+func connectorCount(p *model.Plugin) *int {
+	if p.Type != model.PluginTypeConnector {
+		return nil
+	}
+	count := p.ToolCount
+	return &count
+}
+func teamMemberCount(p *model.Plugin) *int {
+	if p.Type != model.PluginTypeExpertTeam {
+		return nil
+	}
+	count := p.MemberCount
+	return &count
 }
 func detailDTO(d *pluginsvc.Detail) detailResponse {
 	if d == nil {
@@ -860,9 +737,6 @@ func detailDTO(d *pluginsvc.Detail) detailResponse {
 		out.RelationResult = &relationResultResponse{Created: d.RelationResult.Created, Updated: d.RelationResult.Updated, Deleted: d.RelationResult.Deleted}
 	}
 	return out
-}
-func auditDTO(x model.PluginAuditLog) auditLogResponse {
-	return auditLogResponse{AuditLogID: x.ID, PluginID: x.PluginID, Action: x.Action, OperatorID: x.OperatorID, OperatorName: x.OperatorName, RequestID: x.RequestID, BeforeHash: x.BeforeHash, AfterHash: x.AfterHash, ManifestSnapshot: x.ManifestSnapshot, PluginSnapshot: x.PluginSnapshot, Remark: x.Remark, CreatedAt: x.CreatedAt}
 }
 func versionDTO(x model.PluginVersion) versionResponse {
 	return versionResponse{VersionID: x.ID, PluginID: x.PluginID, Version: x.Version, Manifest: x.Manifest, Package: x.Package, ManifestHash: x.ManifestHash, PluginHash: x.PluginHash, Relations: versionRelationSlice(x.Relations), Changelog: x.Changelog, CreatedBy: x.CreatedBy, CreatedAt: x.CreatedAt}

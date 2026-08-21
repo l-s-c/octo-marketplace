@@ -197,6 +197,34 @@ type agentProvisionSpec struct {
 	Skills      []model.SkillRef
 }
 
+// ProvisionAgentSpec is the externally-buildable form of agentProvisionSpec:
+// the unified plugin install maps plugin_json attachments onto it. Field-for-
+// field identical so the conversion is a struct cast.
+type ProvisionAgentSpec struct {
+	Name        string
+	Summary     string
+	Instruction string
+	MCPConfig   string
+	Skills      []model.SkillRef
+}
+
+// ProvisionAgentFromSpec provisions one Loop agent from an externally built
+// spec with InstallExpert's exact semantics: aggregate install timeout, shared
+// file budget, and atomic rollback of everything created on failure. It bumps
+// no metrics counter — the caller owns attribution.
+func (s *Service) ProvisionAgentFromSpec(ctx context.Context, in InstallInput, spec ProvisionAgentSpec) (string, error) {
+	if s.fleet == nil {
+		return "", ErrFleetNotConfigured
+	}
+	if strings.TrimSpace(in.WorkspaceID) == "" || strings.TrimSpace(in.RuntimeID) == "" {
+		return "", ErrInvalidRequest
+	}
+	ctx, cancel := context.WithTimeout(ctx, installTimeout)
+	defer cancel()
+	agentID, _, err := s.provisionAgent(ctx, in, agentProvisionSpec(spec), &fileBudget{remaining: maxSkillFilesPerInstall}, nil)
+	return agentID, err
+}
+
 // provisionAgent creates one Loop agent (seeded with the instruction +
 // mcp_config), creates one workspace skill per packaged skill, then binds those
 // skills to the agent. It is atomic: on any failure after the agent exists it

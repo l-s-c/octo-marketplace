@@ -51,6 +51,38 @@ func (s *Service) InstallSquad(ctx context.Context, caller Caller, squadID strin
 	if err != nil {
 		return InstallSquadResult{}, err
 	}
+	result, err := s.provisionSquad(ctx, in, m)
+	if err != nil {
+		return InstallSquadResult{}, err
+	}
+
+	// Only the squad's own counter is bumped — member experts are self-contained
+	// snapshots inside the squad, so a squad install never inflates expert counts.
+	s.trackInstall(ctx, "squad", squadID)
+	return result, nil
+}
+
+// ProvisionSquadFromSpec provisions an externally built squad model (the
+// unified plugin install maps plugin_json + relations onto it) with
+// InstallSquad's exact semantics: aggregate timeout, shared file budget,
+// full rollback on partial failure. It bumps no metrics counter.
+func (s *Service) ProvisionSquadFromSpec(ctx context.Context, in InstallInput, m *model.Squad) (InstallSquadResult, error) {
+	if s.fleet == nil {
+		return InstallSquadResult{}, ErrFleetNotConfigured
+	}
+	if strings.TrimSpace(in.WorkspaceID) == "" || strings.TrimSpace(in.RuntimeID) == "" {
+		return InstallSquadResult{}, ErrInvalidRequest
+	}
+	ctx, cancel := context.WithTimeout(ctx, installTimeout)
+	defer cancel()
+	return s.provisionSquad(ctx, in, m)
+}
+
+// provisionSquad is the shared squad provisioning body: install each member as
+// a Loop agent, form the squad led by the leader member, write dispatch
+// strategies as instructions, attach the rest, rolling everything back on any
+// failure.
+func (s *Service) provisionSquad(ctx context.Context, in InstallInput, m *model.Squad) (InstallSquadResult, error) {
 	if len(m.Members) == 0 {
 		return InstallSquadResult{}, ErrInvalidRequest
 	}
@@ -129,9 +161,6 @@ func (s *Service) InstallSquad(ctx context.Context, caller Caller, squadID strin
 		}
 	}
 
-	// Only the squad's own counter is bumped — member experts are self-contained
-	// snapshots inside the squad, so a squad install never inflates expert counts.
-	s.trackInstall(ctx, "squad", squadID)
 	return InstallSquadResult{SquadID: fleetSquadID, LeaderAgentID: leaderAgentID}, nil
 }
 

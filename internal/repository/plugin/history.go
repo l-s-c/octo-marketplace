@@ -10,65 +10,6 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-func (r *Repo) ListAudits(ctx context.Context, scope Scope, pluginID string, limit, offset int) ([]model.PluginAuditLog, int64, error) {
-	var exists int
-	if err := r.db.QueryRowContext(ctx, `SELECT 1 FROM plugins p WHERE p.plugin_id=? AND p.owner_uid=? AND p.space_id=? AND p.deleted_at IS NULL`, pluginID, scope.CallerUID, scope.SpaceID).Scan(&exists); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, 0, ErrNotFound
-		}
-		return nil, 0, err
-	}
-	var total int64
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_audit_logs a JOIN plugins p ON p.plugin_id=a.plugin_id WHERE a.plugin_id=? AND p.owner_uid=? AND p.space_id=? AND p.deleted_at IS NULL`, pluginID, scope.CallerUID, scope.SpaceID).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	if limit <= 0 {
-		limit = 20
-	}
-	if limit > 100 {
-		limit = 100
-	}
-	rows, err := r.db.QueryContext(ctx, `SELECT a.audit_log_id,a.plugin_id,a.action,a.operator_id,a.operator_name,a.request_id,a.before_hash,a.after_hash,a.manifest_snapshot_json,a.plugin_snapshot_json,a.remark,a.created_at
-FROM plugin_audit_logs a JOIN plugins p ON p.plugin_id=a.plugin_id WHERE a.plugin_id=? AND p.owner_uid=? AND p.space_id=? AND p.deleted_at IS NULL ORDER BY a.created_at DESC,a.audit_log_id DESC LIMIT ? OFFSET ?`, pluginID, scope.CallerUID, scope.SpaceID, limit, max(offset, 0))
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-	var out []model.PluginAuditLog
-	for rows.Next() {
-		var a model.PluginAuditLog
-		var before, after, remark sql.NullString
-		var manifest, pkg []byte
-		if err := rows.Scan(&a.ID, &a.PluginID, &a.Action, &a.OperatorID, &a.OperatorName, &a.RequestID, &before, &after, &manifest, &pkg, &remark, &a.CreatedAt); err != nil {
-			return nil, 0, err
-		}
-		a.BeforeHash = nullString(before)
-		a.AfterHash = nullString(after)
-		a.Remark = nullString(remark)
-		a.ManifestSnapshot = cloneJSON(manifest)
-		a.PluginSnapshot = cloneJSON(pkg)
-		out = append(out, a)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, err
-	}
-	return out, total, nil
-}
-
-func (r *Repo) GetVersion(ctx context.Context, scope Scope, pluginID, version string) (*model.PluginVersion, error) {
-	if _, err := r.Get(ctx, scope, pluginID); err != nil {
-		return nil, err
-	}
-	row := r.db.QueryRowContext(ctx, `SELECT v.version_id,v.plugin_id,v.version,v.manifest_json,v.plugin_json,v.manifest_hash,v.plugin_hash,v.relations_json,v.changelog,v.created_by,v.created_at
-FROM plugin_versions v JOIN plugins p ON p.plugin_id=v.plugin_id
-WHERE v.plugin_id=? AND v.version=? AND p.status=1 AND p.deleted_at IS NULL AND `+visibilitySQL, pluginID, version, scope.SpaceID, scope.CallerUID)
-	v, err := scanPluginVersion(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	return v, err
-}
-
 func (r *Repo) ListVersions(ctx context.Context, scope Scope, pluginID string, limit, offset int) ([]model.PluginVersion, int64, error) {
 	if _, err := r.Get(ctx, scope, pluginID); err != nil {
 		return nil, 0, err
@@ -181,7 +122,7 @@ func (r *Repo) Publish(ctx context.Context, scope Scope, p PublishParams) (*mode
 			return nil, err
 		}
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE plugins SET current_version_id=?,updated_at=? WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, version.ID, now, p.PluginID, scope.CallerUID, scope.SpaceID)
+	res, err := tx.ExecContext(ctx, `UPDATE plugins SET current_version_id=?,current_version=?,updated_at=? WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, version.ID, version.Version, now, p.PluginID, scope.CallerUID, scope.SpaceID)
 	if err != nil {
 		return nil, err
 	}

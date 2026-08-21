@@ -36,7 +36,7 @@ func CanonicalizeDocuments(name string, typ model.PluginType, tags, manifest, pk
 	if err != nil {
 		return nil, err
 	}
-	p, err := normalizePackage(pkg, m, spaceID)
+	p, err := normalizePackage(pkg, m, spaceID, typ)
 	if err != nil {
 		return nil, err
 	}
@@ -50,4 +50,69 @@ func CanonicalizeDocuments(name string, typ model.PluginType, tags, manifest, pk
 		ManifestHash: hashJSON(m),
 		PluginHash:   hashJSON(append(append(cloneJSON(m), '\n'), p...)),
 	}, nil
+}
+
+// RejectSecretValues runs the write-path secret scan over raw documents.
+// Exported so out-of-band writers (the repackage migration) apply the same
+// invariant before persisting rewritten packages via direct SQL.
+func RejectSecretValues(values ...json.RawMessage) error {
+	return rejectSecretValues(values...)
+}
+
+// rawAttachmentContent returns the raw_content of one inline package
+// attachment; storage attachments and missing paths report false.
+func rawAttachmentContent(pkg json.RawMessage, path string) (string, bool) {
+	var doc struct {
+		Attachments []struct {
+			Path        string `json:"path"`
+			ContentType string `json:"content_type"`
+			RawContent  string `json:"raw_content"`
+		} `json:"attachments"`
+	}
+	if json.Unmarshal(pkg, &doc) != nil {
+		return "", false
+	}
+	for _, attachment := range doc.Attachments {
+		if attachment.Path == path && attachment.ContentType == "raw" {
+			return attachment.RawContent, true
+		}
+	}
+	return "", false
+}
+
+// storageAttachmentKey returns the storage_uri of one storage-backed package
+// attachment.
+func storageAttachmentKey(pkg json.RawMessage, path string) (string, bool) {
+	var doc struct {
+		Attachments []struct {
+			Path        string `json:"path"`
+			ContentType string `json:"content_type"`
+			StorageURI  string `json:"storage_uri"`
+		} `json:"attachments"`
+	}
+	if json.Unmarshal(pkg, &doc) != nil {
+		return "", false
+	}
+	for _, attachment := range doc.Attachments {
+		if attachment.Path == path && attachment.ContentType == "storage" {
+			return attachment.StorageURI, true
+		}
+	}
+	return "", false
+}
+
+// ConnectorToolCount counts the entries of the canonical connector/tools.json
+// raw attachment. Tools metadata is optional display data, so a missing or
+// malformed attachment counts as zero instead of failing the write. Exported
+// so the backfill enrichment recomputes counts through the same rule.
+func ConnectorToolCount(pkg json.RawMessage) int {
+	raw, ok := rawAttachmentContent(pkg, "connector/tools.json")
+	if !ok {
+		return 0
+	}
+	var tools []json.RawMessage
+	if json.Unmarshal([]byte(raw), &tools) != nil {
+		return 0
+	}
+	return len(tools)
 }

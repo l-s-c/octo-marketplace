@@ -9,6 +9,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/id"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
@@ -43,11 +44,10 @@ type Store interface {
 	Create(context.Context, pluginrepo.Scope, pluginrepo.Mutation) (*pluginrepo.RelationSync, error)
 	Update(context.Context, pluginrepo.Scope, pluginrepo.Mutation) (*pluginrepo.RelationSync, error)
 	Delete(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
-	ListAudits(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginAuditLog, int64, error)
 	ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, int64, error)
-	GetVersion(context.Context, pluginrepo.Scope, string, string) (*model.PluginVersion, error)
 	Publish(context.Context, pluginrepo.Scope, pluginrepo.PublishParams) (*model.PluginVersion, error)
-	DuplicateGraph(context.Context, pluginrepo.Scope, string, model.Plugin, pluginrepo.Mutation) error
+	CountMemberRelations(context.Context, []string) (map[string]int, error)
+	ListTags(context.Context, pluginrepo.Scope, pluginrepo.TagListFilter) ([]model.TagFilter, error)
 }
 
 var _ Store = (*pluginrepo.Repo)(nil)
@@ -55,11 +55,13 @@ var _ Store = (*pluginrepo.Repo)(nil)
 type Service struct {
 	repo               Store
 	storage            storage.Storage
+	provisioner        Provisioner
+	metrics            InstallTracker
+	parseTasks         ParseTaskStore
 	id                 func() string
 	now                func() time.Time
 	maxAttachmentBytes int64
 	maxArchiveBytes    int64
-	maxArchiveFiles    int
 }
 
 func New(repo Store, stores ...storage.Storage) *Service {
@@ -69,7 +71,6 @@ func New(repo Store, stores ...storage.Storage) *Service {
 		now:                func() time.Time { return time.Now().UTC() },
 		maxAttachmentBytes: defaultMaxAttachmentBytes,
 		maxArchiveBytes:    defaultMaxArchiveBytes,
-		maxArchiveFiles:    defaultMaxArchiveFiles,
 	}
 	if len(stores) > 0 {
 		s.storage = stores[0]
@@ -102,7 +103,7 @@ type ListParams struct {
 	PlacementCode string
 	Type          model.PluginType
 	CategoryID    string
-	Tag           string
+	Tags          []string
 	Keyword       string
 	Mine          bool
 	Sort          string
@@ -132,6 +133,9 @@ type WriteRequest struct {
 	CategoryID *string
 	Tags       json.RawMessage
 	Publisher  string
+	// Icon is a persistent public URL or a managed storage object key; it is
+	// display metadata kept outside the content-addressed manifest.
+	Icon       string
 	Visibility model.PluginVisibility
 	Manifest   json.RawMessage
 	Package    json.RawMessage
@@ -172,7 +176,9 @@ func (s *Service) List(ctx context.Context, caller Caller, p ListParams) ([]mode
 	if p.Type != "" && !validPluginType(p.Type) {
 		return nil, 0, ErrInvalidRequest
 	}
-	if p.Sort != "" && p.Sort != "newest" && p.Sort != "oldest" && p.Sort != "updated" && p.Sort != "name" && p.Sort != "placement" {
+	switch p.Sort {
+	case "", "newest", "oldest", "updated", "name", "placement", "views", "installs", "downloads", "comprehensive":
+	default:
 		return nil, 0, ErrInvalidRequest
 	}
 	if p.Sort == "placement" && strings.TrimSpace(p.PlacementCode) == "" {
@@ -181,8 +187,140 @@ func (s *Service) List(ctx context.Context, caller Caller, p ListParams) ([]mode
 	if p.Limit < 0 || p.Limit > maxListLimit || p.Offset < 0 {
 		return nil, 0, ErrInvalidRequest
 	}
-	items, total, err := s.repo.List(ctx, scope(caller), pluginrepo.ListFilter{PlacementCode: strings.TrimSpace(p.PlacementCode), Type: p.Type, CategoryID: strings.TrimSpace(p.CategoryID), Tag: strings.TrimSpace(p.Tag), Keyword: strings.TrimSpace(p.Keyword), Mine: p.Mine, Sort: strings.TrimSpace(p.Sort), Limit: p.Limit, Offset: p.Offset})
-	return items, total, mapStoreError(err)
+	tags, err := normalizeListTags(p.Tags)
+	if err != nil {
+		return nil, 0, err
+	}
+	items, total, err := s.repo.List(ctx, scope(caller), pluginrepo.ListFilter{PlacementCode: strings.TrimSpace(p.PlacementCode), Type: p.Type, CategoryID: strings.TrimSpace(p.CategoryID), Tags: tags, Keyword: strings.TrimSpace(p.Keyword), Mine: p.Mine, Sort: strings.TrimSpace(p.Sort), Limit: p.Limit, Offset: p.Offset})
+	if err != nil {
+		return nil, 0, mapStoreError(err)
+	}
+	if err := s.fillMemberCounts(ctx, items); err != nil {
+		return nil, 0, mapStoreError(err)
+	}
+	for i := range items {
+		items[i].IconURL = s.resolveIcon(ctx, items[i].Icon)
+	}
+	return items, total, nil
+}
+
+// TagListParams drives the aggregated tag suggestions; the visible set mirrors
+// List so callers only see tags on Plugins they could open.
+type TagListParams struct {
+	PlacementCode string
+	Type          model.PluginType
+	Keyword       string
+	Mine          bool
+	Limit         int
+}
+
+func (s *Service) ListTags(ctx context.Context, caller Caller, p TagListParams) ([]model.TagFilter, error) {
+	if err := validateCaller(caller); err != nil {
+		return nil, err
+	}
+	if p.Type != "" && !validPluginType(p.Type) {
+		return nil, ErrInvalidRequest
+	}
+	if p.Limit < 0 || p.Limit > maxListLimit {
+		return nil, ErrInvalidRequest
+	}
+	tags, err := s.repo.ListTags(ctx, scope(caller), pluginrepo.TagListFilter{
+		PlacementCode: strings.TrimSpace(p.PlacementCode),
+		Type:          p.Type,
+		Keyword:       strings.TrimSpace(p.Keyword),
+		Mine:          p.Mine,
+		Limit:         p.Limit,
+	})
+	if err != nil {
+		return nil, mapStoreError(err)
+	}
+	return tags, nil
+}
+
+// fillMemberCounts derives list-only member counts for expert teams in one
+// batched relation query instead of persisting a column that upsert, relation
+// sync, and delete would each have to keep consistent.
+func (s *Service) fillMemberCounts(ctx context.Context, items []model.Plugin) error {
+	var teamIDs []string
+	for i := range items {
+		if items[i].Type == model.PluginTypeExpertTeam {
+			teamIDs = append(teamIDs, items[i].ID)
+		}
+	}
+	if len(teamIDs) == 0 {
+		return nil
+	}
+	counts, err := s.repo.CountMemberRelations(ctx, teamIDs)
+	if err != nil {
+		return err
+	}
+	for i := range items {
+		items[i].MemberCount = counts[items[i].ID]
+	}
+	return nil
+}
+
+// iconNamespaces are the only storage roots resolveIcon will presign: the
+// legacy icon upload endpoints generate keys under them. Icon is a
+// caller-writable field, so presigning arbitrary key shapes would hand out
+// signed URLs for unrelated objects (e.g. another Space's attachments).
+var iconNamespaces = []string{"icons/", "mcp-icons/"}
+
+func presignableIconKey(icon string) bool {
+	if !iconKeyPattern.MatchString(icon) || strings.Contains(icon, "..") {
+		return false
+	}
+	for _, namespace := range iconNamespaces {
+		if strings.HasPrefix(icon, namespace) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveIcon turns a stored icon object key into a time-limited display URL
+// while passing persistent http(s) URLs and text glyphs (legacy emoji icons)
+// through unchanged. Only known icon namespaces are presigned; resolution
+// failures keep the raw value, matching the legacy skill icon behavior.
+func (s *Service) resolveIcon(ctx context.Context, icon string) string {
+	if icon == "" {
+		return ""
+	}
+	if strings.HasPrefix(icon, "http://") || strings.HasPrefix(icon, "https://") || s.storage == nil || !presignableIconKey(icon) {
+		return icon
+	}
+	if resolved, err := s.storage.PresignGet(ctx, icon, time.Hour); err == nil {
+		return resolved
+	}
+	return icon
+}
+
+// normalizeListTags trims, deduplicates, and bounds the AND-combined tag
+// filters so a request cannot inflate the query with unbounded predicates.
+func normalizeListTags(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, tag := range raw {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		if !utf8.ValidString(tag) || len(tag) > maxTagBytes {
+			return nil, ErrInvalidRequest
+		}
+		if _, dup := seen[tag]; dup {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	if len(out) > maxListTags {
+		return nil, ErrInvalidRequest
+	}
+	return out, nil
 }
 
 func (s *Service) Detail(ctx context.Context, caller Caller, pluginID string, includeRelations bool) (*Detail, error) {
@@ -197,6 +335,7 @@ func (s *Service) Detail(ctx context.Context, caller Caller, pluginID string, in
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
+	p.IconURL = s.resolveIcon(ctx, p.Icon)
 	if !includeRelations {
 		rels = []model.PluginRelation{}
 	} else {
@@ -308,25 +447,6 @@ func (s *Service) Delete(ctx context.Context, caller Caller, pluginID string) er
 	return mapStoreError(s.repo.Delete(ctx, scope(caller), storageID, audit.OperatorID, audit.OperatorName, audit.RequestID, audit.Remark))
 }
 
-func (s *Service) ListAuditLogs(ctx context.Context, caller Caller, pluginID string, limit, offset int) ([]model.PluginAuditLog, int64, error) {
-	if validateCaller(caller) != nil || limit < 0 || limit > maxListLimit || offset < 0 {
-		return nil, 0, ErrInvalidRequest
-	}
-	storageID, err := parseStorageID(pluginID)
-	if err != nil {
-		return nil, 0, err
-	}
-	p, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
-	if err != nil {
-		return nil, 0, mapStoreError(err)
-	}
-	items, total, err := s.repo.ListAudits(ctx, scope(caller), storageID, limit, offset)
-	for i := range items {
-		items[i].PluginType = p.Type
-	}
-	return items, total, mapStoreError(err)
-}
-
 func (s *Service) ListVersions(ctx context.Context, caller Caller, pluginID string, limit, offset int) ([]model.PluginVersion, int64, error) {
 	if validateCaller(caller) != nil || limit < 0 || limit > maxListLimit || offset < 0 {
 		return nil, 0, ErrInvalidRequest
@@ -375,44 +495,6 @@ func (s *Service) Publish(ctx context.Context, caller Caller, pluginID string, r
 	return version, nil
 }
 
-func (s *Service) Duplicate(ctx context.Context, caller Caller, sourcePluginID, name string) (*model.Plugin, error) {
-	if validateCaller(caller) != nil {
-		return nil, ErrInvalidRequest
-	}
-	storageID, err := parseStorageID(sourcePluginID)
-	if err != nil {
-		return nil, err
-	}
-	source, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
-	if err != nil {
-		return nil, mapStoreError(err)
-	}
-	if err := rejectSecretValues(source.Manifest, source.Package); err != nil {
-		return nil, err
-	}
-	newName := strings.TrimSpace(name)
-	if newName == "" {
-		newName = source.Name + " copy"
-	}
-	if !validName(newName) {
-		return nil, ErrInvalidRequest
-	}
-	now := s.now()
-	spaceID := caller.SpaceID
-	copy := *source
-	copy.ID, copy.Name = s.id(), newName
-	copy.OwnerUID, copy.SpaceID, copy.CreatorName = caller.UID, &spaceID, caller.Name
-	copy.CreatedByType, copy.CreatedByBotUID, copy.CreatedByBotName = provenance(caller)
-	copy.Visibility, copy.CurrentVersionID = model.PluginVisibilityPrivate, nil
-	copy.CreatedAt, copy.UpdatedAt, copy.DeletedAt = now, now, nil
-	copy.Manifest, copy.Package, copy.Tags = cloneJSON(source.Manifest), cloneJSON(source.Package), cloneJSON(source.Tags)
-	audit := s.audit(caller, copy.ID, "duplicate", nil, &copy, now)
-	if err := s.repo.DuplicateGraph(ctx, scope(caller), storageID, copy, mutation(copy, nil, audit)); err != nil {
-		return nil, mapStoreError(err)
-	}
-	return &copy, nil
-}
-
 func (s *Service) buildWrite(ctx context.Context, c Caller, pluginID string, req WriteRequest, now time.Time) (*model.Plugin, []model.PluginRelation, error) {
 	name := strings.TrimSpace(req.Name)
 	if !validName(name) || !validPluginType(req.Type) || !validVisibility(req.Visibility, c.IsSystemAdmin) {
@@ -422,9 +504,17 @@ func (s *Service) buildWrite(ctx context.Context, c Caller, pluginID string, req
 	if err != nil {
 		return nil, nil, err
 	}
+	icon := strings.TrimSpace(req.Icon)
+	if !validIcon(icon) {
+		return nil, nil, ErrInvalidRequest
+	}
+	toolCount := 0
+	if req.Type == model.PluginTypeConnector {
+		toolCount = ConnectorToolCount(docs.Package)
+	}
 	spaceID := c.SpaceID
 	createdBy, botUID, botName := provenance(c)
-	p := &model.Plugin{ID: pluginID, Name: name, Type: req.Type, CategoryID: trimOptional(req.CategoryID), Tags: docs.Tags, Publisher: strings.TrimSpace(req.Publisher), OwnerUID: c.UID, SpaceID: &spaceID, Visibility: req.Visibility, CreatorName: c.Name, CreatedByType: createdBy, CreatedByBotUID: botUID, CreatedByBotName: botName, Manifest: docs.Manifest, Package: docs.Package, ManifestHash: docs.ManifestHash, PluginHash: docs.PluginHash, Status: 1, CreatedAt: now, UpdatedAt: now}
+	p := &model.Plugin{ID: pluginID, Name: name, Type: req.Type, CategoryID: trimOptional(req.CategoryID), Tags: docs.Tags, Publisher: strings.TrimSpace(req.Publisher), OwnerUID: c.UID, SpaceID: &spaceID, Visibility: req.Visibility, CreatorName: c.Name, CreatedByType: createdBy, CreatedByBotUID: botUID, CreatedByBotName: botName, Icon: icon, IconURL: s.resolveIcon(ctx, icon), ToolCount: toolCount, Manifest: docs.Manifest, Package: docs.Package, ManifestHash: docs.ManifestHash, PluginHash: docs.PluginHash, Status: 1, CreatedAt: now, UpdatedAt: now}
 	rels, err := s.buildRelations(ctx, c, p, req.Relations, now)
 	if err != nil {
 		return nil, nil, err

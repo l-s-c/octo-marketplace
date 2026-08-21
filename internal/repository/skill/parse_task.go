@@ -85,6 +85,16 @@ func (r *Repo) MarkParseTaskConsumed(ctx context.Context, id, ownerID, spaceID, 
 	return nil
 }
 
+// ReleaseConsumedParseTask returns a consumed task to success so a failed
+// downstream import (which consumes the task before writing its own rows) can
+// be retried. Best-effort compensation: releasing an already-released task is
+// a no-op.
+func (r *Repo) ReleaseConsumedParseTask(ctx context.Context, id string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE parse_tasks SET status = 'success' WHERE id = ? AND status = 'consumed'`, id)
+	return err
+}
+
 // UpdateSkillAndConsumeTask updates a skill, inserts a new version record,
 // and marks the parse task as consumed within a single transaction, preventing
 // duplicate reupload consumption.
