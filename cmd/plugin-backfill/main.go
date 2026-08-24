@@ -15,9 +15,11 @@ import (
 
 func main() {
 	var mode, dsn, phase string
+	var runMigrations bool
 	flag.StringVar(&mode, "mode", "dry-run", "dry-run, apply, or verify")
 	flag.StringVar(&phase, "phase", "plan", "plan (deterministic historical backfill), enrich (icons, connector categories, tool counts, metrics migration), or repackage (migrate stored packages to the plugin-lib layout)")
 	flag.StringVar(&dsn, "dsn", os.Getenv("MYSQL_DSN"), "MySQL DSN (default MYSQL_DSN)")
+	flag.BoolVar(&runMigrations, "migrate", false, "run the embedded schema migrations (same set marketplace-api applies at startup) before the data phase; lets the standalone image prepare a database ahead of the service deploy")
 	flag.Parse()
 	if dsn == "" {
 		fatal(fmt.Errorf("MYSQL_DSN or -dsn is required"))
@@ -27,6 +29,13 @@ func main() {
 		fatal(e)
 	}
 	defer db.Close()
+	if runMigrations {
+		applied, err := marketdb.RunMigrations(db)
+		if err != nil {
+			fatal(fmt.Errorf("schema migrations: %w", err))
+		}
+		fmt.Fprintf(os.Stderr, "schema migrations applied: %d\n", applied)
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	enc := json.NewEncoder(os.Stdout)

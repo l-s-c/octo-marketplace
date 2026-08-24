@@ -49,7 +49,10 @@ data phases above do NOT — run them explicitly right after deploying a new bac
 
 1. Back up `plugins`, `plugin_versions`, `plugin_audit_logs`, `plugin_relations`
    (`repackage` rewrites hashes one-way).
-2. Deploy and start the new marketplace-api (schema auto-migrates).
+2. Make sure the schema is current. Either deploy the new marketplace-api first
+   (it auto-migrates at startup), or run the standalone image with `-migrate`,
+   which applies the same embedded migration set under the same database lock —
+   this lets the migration image go out and be verified BEFORE the service.
 3. Run the data phases against the same database:
    - fresh environment: `plan` apply → verify, then `enrich` apply → verify;
    - previously-deployed environment: `enrich` apply → verify (if pending), then
@@ -71,8 +74,9 @@ docker build -f Dockerfile.backfill -t plugin-backfill:<tag> .
 # Read-only default (repackage dry-run):
 docker run --rm -e MYSQL_DSN='<dsn>' plugin-backfill:<tag>
 
-# Explicit phases:
-docker run --rm -e MYSQL_DSN='<dsn>' plugin-backfill:<tag> -phase=enrich    -mode=apply
+# Explicit phases (add -migrate on the first call to bring the schema current
+# when the new marketplace-api has not been deployed yet):
+docker run --rm -e MYSQL_DSN='<dsn>' plugin-backfill:<tag> -migrate -phase=enrich -mode=apply
 docker run --rm -e MYSQL_DSN='<dsn>' plugin-backfill:<tag> -phase=repackage -mode=apply
 docker run --rm -e MYSQL_DSN='<dsn>' plugin-backfill:<tag> -phase=repackage -mode=verify
 ```
