@@ -1,9 +1,14 @@
 FROM docker.m.daocloud.io/golang:1.25-alpine AS builder
 WORKDIR /app
-# Dependencies (including the private codex.mlamp.cn plugin lib) are vendored,
-# so the build needs no network or git credentials.
+# The private codex.mlamp.cn plugin lib is fetched over anonymous HTTPS at build
+# time (GOPRIVATE skips the public proxy/sumdb; GIT_TERMINAL_PROMPT=0 makes git
+# fail fast instead of prompting for credentials). git is needed for the fetch.
+RUN apk add --no-cache git
+ENV GOPRIVATE=codex.mlamp.cn GIT_TERMINAL_PROMPT=0
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -mod=vendor -o /bin/marketplace-api ./cmd/marketplace-api
+RUN CGO_ENABLED=0 go build -o /bin/marketplace-api ./cmd/marketplace-api
 
 FROM docker.m.daocloud.io/alpine:3.21
 ENV TZ=Asia/Shanghai

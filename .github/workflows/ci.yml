@@ -15,6 +15,10 @@ concurrency:
 
 env:
   GO_VERSION: "1.25.x"
+  # The plugin lib lives on a private host; fetch it directly over anonymous
+  # HTTPS (skip the public proxy/sumdb) and never prompt for git credentials.
+  GOPRIVATE: codex.mlamp.cn
+  GIT_TERMINAL_PROMPT: "0"
 
 jobs:
   verify:

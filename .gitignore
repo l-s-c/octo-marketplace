@@ -94,3 +94,6 @@ dist-ele/
 icon.icns
 icons.iconset
 octo-web
+vendor/
+.worktrees/
+cowork-v3-arch/

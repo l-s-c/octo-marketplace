@@ -3,6 +3,7 @@ module github.com/Mininglamp-OSS/octo-marketplace
 go 1.25.0
 
 require (
+	codex.mlamp.cn/dmwork/octo-plugin-lib v1.0.1
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/alicebob/miniredis/v2 v2.37.0
 	github.com/aws/aws-sdk-go-v2 v1.42.1
@@ -20,7 +21,6 @@ require (
 )
 
 require (
-	codex.mlamp.cn/dmwork/octo-plugin-lib v1.0.1 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.14 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.30 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.30 // indirect
