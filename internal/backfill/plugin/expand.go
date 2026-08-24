@@ -16,6 +16,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	libplugin "codex.mlamp.cn/dmwork/octo-plugin-lib/plugin"
@@ -157,7 +158,7 @@ func (r *Runner) pluginTypesAndSpaces(ctx context.Context) (types, spaces map[st
 }
 
 func (r *Runner) expandPlugins(ctx context.Context, exp SkillExpander, apply bool, spaces map[string]string, p *expandPlan) error {
-	rows, err := r.db.QueryContext(ctx, `SELECT plugin_id, manifest_json, plugin_json, plugin_hash FROM plugins WHERE plugin_type='skill' ORDER BY plugin_id`)
+	rows, err := r.db.QueryContext(ctx, `SELECT plugin_id, manifest_json, plugin_json, plugin_hash FROM plugins WHERE plugin_type='skill'`)
 	if err != nil {
 		return err
 	}
@@ -199,7 +200,7 @@ func (r *Runner) expandPlugins(ctx context.Context, exp SkillExpander, apply boo
 }
 
 func (r *Runner) expandVersions(ctx context.Context, exp SkillExpander, apply bool, types, spaces map[string]string, p *expandPlan) error {
-	rows, err := r.db.QueryContext(ctx, `SELECT version_id, plugin_id, manifest_json, plugin_json, plugin_hash FROM plugin_versions ORDER BY version_id`)
+	rows, err := r.db.QueryContext(ctx, `SELECT version_id, plugin_id, manifest_json, plugin_json, plugin_hash FROM plugin_versions`)
 	if err != nil {
 		return err
 	}
@@ -245,7 +246,9 @@ func (r *Runner) expandVersions(ctx context.Context, exp SkillExpander, apply bo
 // expanded snapshot pair, and each row's before_hash becomes the previous row's
 // after_hash.
 func (r *Runner) expandAudits(ctx context.Context, exp SkillExpander, apply bool, types, spaces map[string]string, p *expandPlan) error {
-	rows, err := r.db.QueryContext(ctx, `SELECT audit_log_id, plugin_id, manifest_snapshot_json, plugin_snapshot_json, before_hash, after_hash FROM plugin_audit_logs ORDER BY plugin_id, created_at, audit_log_id`)
+	// Order in Go rather than SQL: after expansion the snapshot JSON columns are
+	// large, and a server-side filesort over them can exhaust the sort buffer.
+	rows, err := r.db.QueryContext(ctx, `SELECT audit_log_id, plugin_id, manifest_snapshot_json, plugin_snapshot_json, before_hash, after_hash, created_at FROM plugin_audit_logs`)
 	if err != nil {
 		return err
 	}
@@ -254,11 +257,12 @@ func (r *Runner) expandAudits(ctx context.Context, exp SkillExpander, apply bool
 		id, pluginID          string
 		manifest, pkg         []byte
 		beforeHash, afterHash *string
+		createdAt             string
 	}
 	var todo []work
 	for rows.Next() {
 		var w work
-		if err := rows.Scan(&w.id, &w.pluginID, &w.manifest, &w.pkg, &w.beforeHash, &w.afterHash); err != nil {
+		if err := rows.Scan(&w.id, &w.pluginID, &w.manifest, &w.pkg, &w.beforeHash, &w.afterHash, &w.createdAt); err != nil {
 			return err
 		}
 		todo = append(todo, w)
@@ -266,6 +270,16 @@ func (r *Runner) expandAudits(ctx context.Context, exp SkillExpander, apply bool
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	// Per-plugin chain order: created_at, then audit_log_id as a stable tiebreak.
+	sort.SliceStable(todo, func(i, j int) bool {
+		if todo[i].pluginID != todo[j].pluginID {
+			return todo[i].pluginID < todo[j].pluginID
+		}
+		if todo[i].createdAt != todo[j].createdAt {
+			return todo[i].createdAt < todo[j].createdAt
+		}
+		return todo[i].id < todo[j].id
+	})
 
 	lastHash := map[string]string{}
 	for _, w := range todo {

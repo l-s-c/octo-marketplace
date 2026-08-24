@@ -56,9 +56,6 @@ var extMIME = map[string]string{
 // rooted paths that spilled to storage (for logging). On any error every object
 // written so far is deleted.
 func (s *Service) buildSkillAttachmentTree(ctx context.Context, spaceID, pluginID string, zipData, skillMDOverride []byte) (attachments []map[string]any, uploaded, spilled []string, err error) {
-	if !safeObjectSegment.MatchString(spaceID) {
-		return nil, nil, nil, ErrInvalidRequest
-	}
 	entries, code, _ := parse.ExtractSkillTree(bytes.NewReader(zipData), int64(len(zipData)), s.maxArchiveBytes, s.maxAttachmentBytes, 0)
 	if code != "" {
 		return nil, nil, nil, ErrInvalidRequest
@@ -121,6 +118,12 @@ func (s *Service) buildSkillAttachmentTree(ctx context.Context, spaceID, pluginI
 			att["raw_content"] = string(it.bytes)
 			budget += size
 		} else {
+			// A storage attachment needs a valid managed prefix; an all-text skill
+			// never reaches here, so it can be expanded even without a Space.
+			if !safeObjectSegment.MatchString(spaceID) {
+				s.deleteObjects(ctx, uploaded...)
+				return nil, nil, nil, ErrInvalidRequest
+			}
 			key := deterministicSkillObjectKey(spaceID, pluginID, it.path)
 			contentType := "application/octet-stream"
 			if it.isText {
@@ -218,15 +221,12 @@ func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID stri
 
 	var newAtts []map[string]any
 	if key, ok := s.legacyZipKey(p, ref); ok {
-		// Rebuilding a tree from the zip re-uploads binary files, which requires a
-		// valid managed-prefix Space; the no-zip collapse below does not.
-		if !safeObjectSegment.MatchString(spaceID) {
-			return nil, false, ErrInvalidRequest
-		}
 		zipData, err := s.getObjectBytes(ctx, key, s.maxArchiveBytes)
 		if err != nil {
 			return nil, false, err
 		}
+		// buildSkillAttachmentTree requires a valid Space only if a file must be
+		// uploaded to storage; an all-text package expands without one.
 		atts, _, _, err := s.buildSkillAttachmentTree(ctx, spaceID, pluginID, zipData, nil)
 		if err != nil {
 			return nil, false, err
