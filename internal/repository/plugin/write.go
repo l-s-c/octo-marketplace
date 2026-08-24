@@ -251,15 +251,17 @@ func lockRelationTargets(ctx context.Context, tx *sql.Tx, scope Scope, sourceTyp
 	return nil
 }
 
+// validPersistedRelation mirrors the octo-plugin-lib endpoint matrix exactly
+// (expert_team_expert: expert_team -> expert, expert_skill: expert -> skill,
+// expert_connector: expert -> connector) as the last write-path gate.
 func validPersistedRelation(relationType string, sourceType, targetType model.PluginType) bool {
 	switch relationType {
 	case "expert_team_expert":
 		return sourceType == model.PluginTypeExpertTeam && targetType == model.PluginTypeExpert
 	case "expert_skill":
-		return (sourceType == model.PluginTypeExpert || sourceType == model.PluginTypeExpertTeam) && targetType == model.PluginTypeSkill
+		return sourceType == model.PluginTypeExpert && targetType == model.PluginTypeSkill
 	case "expert_connector":
-		validSource := sourceType == model.PluginTypeExpert || sourceType == model.PluginTypeExpertTeam || sourceType == model.PluginTypeConnector
-		return validSource && (targetType == model.PluginTypeSkill || targetType == model.PluginTypeConnector)
+		return sourceType == model.PluginTypeExpert && targetType == model.PluginTypeConnector
 	default:
 		return false
 	}

@@ -677,7 +677,7 @@ func (r *Runner) squads(ctx context.Context, cats map[string]string, dict map[in
 		// permission; membership and leadership live in relations.
 		extras := []rawAttachment{{path: "AGENTS.md", mimeType: "text/markdown", content: teamAgentsMarkdown(name, summary, leader, strategyValue, dependencyValue, permission)}}
 		// Member content is not copied into the team package: each member is a
-		// standalone snapshot Plugin referenced through an expert_team_member
+		// standalone snapshot Plugin referenced through an expert_team_expert
 		// relation, whose relation_json carries role/is_leader/member_key.
 		docs, docErr := canonicalDocs(name, "expert_team", tags, draft, extras, space.String)
 		if docErr != nil {

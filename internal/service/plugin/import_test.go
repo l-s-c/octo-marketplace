@@ -226,7 +226,7 @@ func TestImportReleasesTaskAndDeletesObjectsWhenCreateFails(t *testing.T) {
 	}
 }
 
-func TestSkillMarkdownPrefersInlineAndFallsBackToLegacyObject(t *testing.T) {
+func TestSkillMarkdownPrefersRefObjectAndFallsBackToInline(t *testing.T) {
 	space := "space-a"
 	inlinePkg := packageWith(rawAtt("SKILL.md", "# inline doc"))
 	legacyPkg := packageWith(rawAtt("skill/ref.json", `{"object_key":"skills/legacy/SKILL.md","zip_object_key":"skills/legacy/skill.zip","file_name":"pack.zip"}`))
@@ -356,5 +356,32 @@ func TestImportUpdatePublishFailureKeepsCommittedObjects(t *testing.T) {
 	}
 	if len(tasks.released) != 1 {
 		t.Fatalf("task released = %#v", tasks.released)
+	}
+}
+
+func TestSkillMarkdownRefObjectWinsOverInlineStub(t *testing.T) {
+	space := "space-a"
+	// Snapshot layout: inline SKILL.md is a stub; the authoritative document
+	// lives behind the ref pointer and must win.
+	pkg := packageWith(
+		rawAtt("SKILL.md", "# stub"),
+		rawAtt("skill/ref.json", `{"object_key":"squads/team-1/members/member_01/skills/0.md"}`),
+	)
+	store := &fakeStore{plugins: map[string]*model.Plugin{
+		"snap-1": {ID: "snap-1", Name: "Snap", Type: model.PluginTypeSkill, SpaceID: &space, Package: pkg},
+	}}
+	blobs := &importStorage{objects: map[string][]byte{
+		"squads/team-1/members/member_01/skills/0.md": []byte("# full doc"),
+	}}
+	content, err := New(store, blobs).SkillMarkdown(context.Background(), testCaller, "snap-1")
+	if err != nil || content != "# full doc" {
+		t.Fatalf("content=%q err=%v", content, err)
+	}
+	// A trusted pointer whose object is missing falls back to the inline text
+	// instead of failing the read.
+	blobs.objects = map[string][]byte{}
+	content, err = New(store, blobs).SkillMarkdown(context.Background(), testCaller, "snap-1")
+	if err != nil || content != "# stub" {
+		t.Fatalf("fallback content=%q err=%v", content, err)
 	}
 }

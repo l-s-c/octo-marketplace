@@ -531,3 +531,37 @@ func TestSecretScanAllowsPlaceholderReferencesInMCPConfig(t *testing.T) {
 		t.Fatalf("literal accepted: %v", err)
 	}
 }
+
+func TestValidRelationTypeMirrorsLibEndpointMatrix(t *testing.T) {
+	valid := []struct {
+		relation string
+		source   model.PluginType
+		target   model.PluginType
+	}{
+		{"expert_team_expert", model.PluginTypeExpertTeam, model.PluginTypeExpert},
+		{"expert_skill", model.PluginTypeExpert, model.PluginTypeSkill},
+		{"expert_connector", model.PluginTypeExpert, model.PluginTypeConnector},
+	}
+	for _, tt := range valid {
+		if !validRelationType(tt.relation, tt.source, tt.target) {
+			t.Fatalf("%s %s->%s rejected", tt.relation, tt.source, tt.target)
+		}
+	}
+	invalid := []struct {
+		relation string
+		source   model.PluginType
+		target   model.PluginType
+	}{
+		{"expert_team_member", model.PluginTypeExpertTeam, model.PluginTypeExpert}, // retired name
+		{"plugin_dependency", model.PluginTypeExpert, model.PluginTypeSkill},       // dropped enum
+		{"expert_skill", model.PluginTypeExpertTeam, model.PluginTypeSkill},        // teams reach skills via members
+		{"expert_skill", model.PluginTypeExpert, model.PluginTypeConnector},
+		{"expert_team_expert", model.PluginTypeExpert, model.PluginTypeExpert},
+		{"garbage", model.PluginTypeExpert, model.PluginTypeSkill},
+	}
+	for _, tt := range invalid {
+		if validRelationType(tt.relation, tt.source, tt.target) {
+			t.Fatalf("%s %s->%s accepted", tt.relation, tt.source, tt.target)
+		}
+	}
+}

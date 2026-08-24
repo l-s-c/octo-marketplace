@@ -1,7 +1,7 @@
 // Plugin install maps a unified expert / expert_team Plugin onto the Loop
 // provisioning flow owned by the expert service: attachments become the agent
 // spec, expert_skill relations become packaged skill references, and
-// expert_team_member relations become squad members. Fleet authorizes every
+// expert_team_expert relations become squad members. Fleet authorizes every
 // call as the end user (forwarded token), so this layer does not re-check
 // workspace membership or runtime access.
 
@@ -127,7 +127,7 @@ func (s *Service) agentSpecFromPlugin(ctx context.Context, caller Caller, detail
 
 // squadFromPlugin materializes one expert_team Plugin into the squad model the
 // expert provisioner consumes: leader and strategies from team/config.json,
-// members from expert_team_member relations (relation_json carries role,
+// members from expert_team_expert relations (relation_json carries role,
 // is_leader, and member_key), each member's spec from its own Plugin.
 func (s *Service) squadFromPlugin(ctx context.Context, caller Caller, detail *Detail) (*model.Squad, error) {
 	p := detail.Plugin
