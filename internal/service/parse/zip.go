@@ -201,6 +201,7 @@ func ExtractSkillTree(ra io.ReaderAt, size, maxZipSize, maxFileSize int64, maxFi
 	}
 
 	var totalSize uint64
+	var actualSize int64
 	skillMDCount := 0
 	entries := make([]SkillEntry, 0, len(zr.File))
 	for _, f := range zr.File {
@@ -226,6 +227,14 @@ func ExtractSkillTree(ra io.ReaderAt, size, maxZipSize, maxFileSize int64, maxFi
 		data, err := readZipFileLimited(f, maxFileSize)
 		if err != nil {
 			return nil, "INVALID_ZIP", "cannot read entry " + f.Name + ": " + err.Error()
+		}
+		// Bound the ACTUAL decompressed bytes held in memory, not just the
+		// archive's declared sizes: a bomb can declare tiny per-entry sizes (so
+		// the declared total passes above) yet decompress to maxFileSize each,
+		// which across maxFiles entries would otherwise pin tens of GB.
+		actualSize += int64(len(data))
+		if actualSize > maxExtractedSize {
+			return nil, "FILE_TOO_LARGE", fmt.Sprintf("extracted content exceeds %dMB limit", maxExtractedSize/(1024*1024))
 		}
 		entries = append(entries, SkillEntry{Path: f.Name, Bytes: data, IsText: utf8.Valid(data)})
 	}

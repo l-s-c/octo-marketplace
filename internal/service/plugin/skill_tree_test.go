@@ -84,7 +84,7 @@ func TestBuildSkillAttachmentTreeClassifiesAndRoots(t *testing.T) {
 	if !ok || logo.ContentType != "storage" || logo.MIMEType != "image/png" {
 		t.Fatalf("binary file should be storage: %#v", logo)
 	}
-	wantKey := deterministicSkillObjectKey("space-a", "plug-1", "assets/logo.png")
+	wantKey := deterministicSkillObjectKey("space-a", "plug-1", "assets/logo.png", binary)
 	if logo.StorageURI != wantKey {
 		t.Fatalf("storage_uri = %q want %q", logo.StorageURI, wantKey)
 	}

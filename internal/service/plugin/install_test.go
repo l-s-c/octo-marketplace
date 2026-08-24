@@ -59,7 +59,7 @@ func rawAtt(path, content string) string {
 
 func installFixture() *fakeStore {
 	space := "space-a"
-	skillPkg := packageWith(rawAtt("skill/ref.json", `{"file_name":"pack.zip","file_size":9,"files":["a.md"],"object_key":"legacy/skill.md","zip_object_key":"legacy/pack.zip"}`))
+	skillPkg := packageWith(rawAtt("skill/ref.json", `{"file_name":"pack.zip","file_size":9,"files":["a.md"],"object_key":"plugins/space-a/attachments/skill.md","zip_object_key":"plugins/space-a/attachments/pack.zip"}`))
 	expertPkg := packageWith(rawAtt("AGENTS.md", "do the work"), rawAtt("mcp.json", `{"mcpServers":{}}`))
 	teamPkg := packageWith(rawAtt("AGENTS.md", "# Team\n\n## 协作方式\n1. first\n2. second"))
 	return &fakeStore{
@@ -94,7 +94,7 @@ func TestInstallExpertBuildsSpecFromAttachmentsAndRelations(t *testing.T) {
 	if spec.Name != "Alice" || spec.Summary != "expert summary" || spec.Instruction != "do the work" || spec.MCPConfig != `{"mcpServers":{}}` {
 		t.Fatalf("spec = %#v", spec)
 	}
-	if len(spec.Skills) != 1 || spec.Skills[0].Name != "Deploy" || spec.Skills[0].ObjectKey != "legacy/skill.md" || spec.Skills[0].ZipObjectKey != "legacy/pack.zip" {
+	if len(spec.Skills) != 1 || spec.Skills[0].Name != "Deploy" || spec.Skills[0].ObjectKey != "plugins/space-a/attachments/skill.md" || spec.Skills[0].ZipObjectKey != "plugins/space-a/attachments/pack.zip" {
 		t.Fatalf("skills = %#v", spec.Skills)
 	}
 	if tracker.typ != "plugin" || tracker.id != "expert-1" {
@@ -132,8 +132,37 @@ func TestInstallTeamBuildsSquadModelFromAgentsDocAndMembers(t *testing.T) {
 	if member.Name != "Alice" || member.Role != "leader" || !member.IsLeader || member.MemberKey != "m1" || member.Instruction != "do the work" {
 		t.Fatalf("member = %#v", member)
 	}
-	if len(member.Skills) != 1 || member.Skills[0].ZipObjectKey != "legacy/pack.zip" {
+	if len(member.Skills) != 1 || member.Skills[0].ZipObjectKey != "plugins/space-a/attachments/pack.zip" {
 		t.Fatalf("member skills = %#v", member.Skills)
+	}
+}
+
+// TestInstallDropsForgedCrossSpaceSkillRef proves a caller-forged skill/ref.json
+// pointing outside the plugin's own Space is not handed to the provisioner: the
+// object/zip keys are dropped, so no cross-Space or arbitrary bucket object is
+// fetched during install.
+func TestInstallDropsForgedCrossSpaceSkillRef(t *testing.T) {
+	space := "space-a"
+	forged := packageWith(rawAtt("skill/ref.json", `{"file_name":"x.zip","object_key":"plugins/space-b/attachments/loot.md","zip_object_key":"experts/other/skill.zip"}`))
+	f := &fakeStore{
+		plugins: map[string]*model.Plugin{
+			"expert-1": {ID: "expert-1", Name: "Alice", Type: model.PluginTypeExpert, OwnerUID: "user-1", SpaceID: &space, Manifest: json.RawMessage(`{"description":"x"}`), Package: packageWith(rawAtt("AGENTS.md", "w"))},
+			"skill-1":  {ID: "skill-1", Name: "Deploy", Type: model.PluginTypeSkill, OwnerUID: "user-1", SpaceID: &space, Manifest: json.RawMessage(`{}`), Package: forged},
+		},
+		relations: map[string][]model.PluginRelation{
+			"expert-1": {{ID: "r1", SourcePluginID: "expert-1", TargetPluginID: "skill-1", TargetPluginType: model.PluginTypeSkill, Type: "expert_skill", Status: 1}},
+		},
+	}
+	prov := &fakeProvisioner{}
+	svc := fixedService(f).WithProvisioner(prov).WithMetrics(&fakeTracker{})
+	if _, err := svc.Install(context.Background(), testCaller, "expert-1", InstallParams{WorkspaceID: "ws", RuntimeID: "rt", Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(prov.agentSpec.Skills) != 1 {
+		t.Fatalf("skills = %#v", prov.agentSpec.Skills)
+	}
+	if prov.agentSpec.Skills[0].ObjectKey != "" || prov.agentSpec.Skills[0].ZipObjectKey != "" {
+		t.Fatalf("forged cross-Space keys must be dropped, got %#v", prov.agentSpec.Skills[0])
 	}
 }
 

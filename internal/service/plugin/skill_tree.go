@@ -124,7 +124,7 @@ func (s *Service) buildSkillAttachmentTree(ctx context.Context, spaceID, pluginI
 				s.deleteObjects(ctx, uploaded...)
 				return nil, nil, nil, ErrInvalidRequest
 			}
-			key := deterministicSkillObjectKey(spaceID, pluginID, it.path)
+			key := deterministicSkillObjectKey(spaceID, pluginID, it.path, it.bytes)
 			contentType := "application/octet-stream"
 			if it.isText {
 				contentType = attachmentMIME(it.path, true)
@@ -156,11 +156,16 @@ func rootRelative(p, dir string) string {
 }
 
 // deterministicSkillObjectKey derives a stable managed-prefix object key for a
-// skill file from (pluginID, rootedPath). Re-running import/expand for the same
-// plugin overwrites the same key, keeping plugin_json bytes reproducible.
-func deterministicSkillObjectKey(spaceID, pluginID, rootedPath string) string {
-	sum := sha256.Sum256([]byte(pluginID + "\x00" + rootedPath))
-	name := "skill-" + pluginID + "-" + hex.EncodeToString(sum[:])[:16]
+// skill file from (pluginID, rootedPath, content). Including a content digest
+// makes the key content-addressed: identical bytes dedupe to one object, and
+// two versions whose file at the same path differs get distinct keys instead of
+// silently overwriting each other. Re-running import/expand for unchanged bytes
+// overwrites the same key, keeping plugin_json reproducible.
+func deterministicSkillObjectKey(spaceID, pluginID, rootedPath string, content []byte) string {
+	sum := sha256.New()
+	sum.Write([]byte(pluginID + "\x00" + rootedPath + "\x00"))
+	sum.Write(content)
+	name := "skill-" + pluginID + "-" + hex.EncodeToString(sum.Sum(nil))[:16]
 	if ext := path.Ext(rootedPath); ext != "" && len(ext) <= 12 && safeExtension(ext) {
 		name += strings.ToLower(ext)
 	}
@@ -220,7 +225,7 @@ func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID stri
 	ref := s.skillRef(p)
 
 	var newAtts []map[string]any
-	if key, ok := s.legacyZipKey(p, ref); ok {
+	if key, ok := s.migrationZipKey(p, ref); ok {
 		zipData, err := s.getObjectBytes(ctx, key, s.maxArchiveBytes)
 		if err != nil {
 			return nil, false, err
@@ -235,7 +240,7 @@ func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID stri
 	} else {
 		// No stored zip: collapse to a single SKILL.md attachment.
 		md, ok := rawAttachmentContent(pkg, "SKILL.md")
-		if !ok && trustedArtifactKey(ref.ObjectKey, p.SpaceID) {
+		if !ok && migrationArtifactKey(ref.ObjectKey, p.SpaceID) {
 			if data, err := s.getObjectBytes(ctx, ref.ObjectKey, s.maxAttachmentBytes); err == nil {
 				md, ok = string(data), true
 			}

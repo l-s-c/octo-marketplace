@@ -238,51 +238,65 @@ func TestImportReleasesTaskAndDeletesObjectsWhenCreateFails(t *testing.T) {
 	}
 }
 
-func TestSkillMarkdownPrefersRefObjectAndFallsBackToInline(t *testing.T) {
+func TestSkillMarkdownTrustsOnlyOwnSpaceRefObjects(t *testing.T) {
 	space := "space-a"
 	inlinePkg := packageWith(rawAtt("SKILL.md", "# inline doc"))
-	legacyPkg := packageWith(rawAtt("skill/ref.json", `{"object_key":"skills/legacy/SKILL.md","zip_object_key":"skills/legacy/skill.zip","file_name":"pack.zip"}`))
-	// Embedded member skills migrated from squads keep their objects under the
-	// legacy squads/ root — the same read-only trust class as skills//experts/.
-	squadPkg := packageWith(rawAtt("skill/ref.json", `{"object_key":"squads/team-1/members/member_01/skills/0.md"}`))
+	// Own-Space ref object is trusted and served over the inline stub.
+	ownPkg := packageWith(
+		rawAtt("SKILL.md", "# own stub"),
+		rawAtt("skill/ref.json", `{"object_key":"plugins/space-a/attachments/own.md","zip_object_key":"plugins/space-a/attachments/own.zip","file_name":"pack.zip"}`),
+	)
+	// Legacy-root ref object is NOT trusted on the caller path (served only after
+	// expand-skills rewrites it into an own-Space tree); the read must fall back
+	// to the inline SKILL.md, never fetch the shared legacy-root object.
+	legacyPkg := packageWith(
+		rawAtt("SKILL.md", "# legacy stub"),
+		rawAtt("skill/ref.json", `{"object_key":"skills/legacy/SKILL.md","zip_object_key":"skills/legacy/skill.zip","file_name":"pack.zip"}`),
+	)
 	store := &fakeStore{plugins: map[string]*model.Plugin{
 		"inline-1": {ID: "inline-1", Name: "Inline", Type: model.PluginTypeSkill, SpaceID: &space, Package: inlinePkg},
+		"own-1":    {ID: "own-1", Name: "Own", Type: model.PluginTypeSkill, SpaceID: &space, Package: ownPkg},
 		"legacy-1": {ID: "legacy-1", Name: "Legacy", Type: model.PluginTypeSkill, SpaceID: &space, Package: legacyPkg},
-		"squad-1":  {ID: "squad-1", Name: "Member", Type: model.PluginTypeSkill, SpaceID: &space, Package: squadPkg},
 	}}
 	blobs := &importStorage{objects: map[string][]byte{
-		"skills/legacy/SKILL.md":                      []byte("# legacy doc"),
-		"skills/legacy/skill.zip":                     []byte("zip-bytes"),
-		"squads/team-1/members/member_01/skills/0.md": []byte("# member doc"),
+		"plugins/space-a/attachments/own.md":  []byte("# own doc"),
+		"plugins/space-a/attachments/own.zip": []byte("own-zip"),
+		"skills/legacy/SKILL.md":              []byte("# legacy doc"),
+		"skills/legacy/skill.zip":             []byte("zip-bytes"),
 	}}
 	svc := New(store, blobs)
 
-	content, err := svc.SkillMarkdown(context.Background(), testCaller, "inline-1")
-	if err != nil || content != "# inline doc" {
+	if content, err := svc.SkillMarkdown(context.Background(), testCaller, "inline-1"); err != nil || content != "# inline doc" {
 		t.Fatalf("inline = %q err=%v", content, err)
 	}
-	content, err = svc.SkillMarkdown(context.Background(), testCaller, "legacy-1")
-	if err != nil || content != "# legacy doc" {
-		t.Fatalf("legacy = %q err=%v", content, err)
+	// Own-Space ref object wins over the inline stub.
+	if content, err := svc.SkillMarkdown(context.Background(), testCaller, "own-1"); err != nil || content != "# own doc" {
+		t.Fatalf("own = %q err=%v", content, err)
 	}
-	content, err = svc.SkillMarkdown(context.Background(), testCaller, "squad-1")
-	if err != nil || content != "# member doc" {
-		t.Fatalf("squad = %q err=%v", content, err)
+	// Legacy-root object is never fetched — the inline stub is served instead.
+	if content, err := svc.SkillMarkdown(context.Background(), testCaller, "legacy-1"); err != nil || content != "# legacy stub" {
+		t.Fatalf("legacy must fall back to inline, got %q err=%v", content, err)
 	}
 
-	download, err := svc.OpenSkillPackage(context.Background(), testCaller, "legacy-1")
+	// Own-Space zip streams; the legacy-root zip must NOT be streamed.
+	dl, err := svc.OpenSkillPackage(context.Background(), testCaller, "own-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if download.FileName != "pack.zip" {
-		t.Fatalf("download = %#v", download)
+	var ownZip bytes.Buffer
+	if err := dl.Write(&ownZip); err != nil || ownZip.String() != "own-zip" {
+		t.Fatalf("own zip = %q err=%v", ownZip.String(), err)
 	}
-	var zipBuf bytes.Buffer
-	if err := download.Write(&zipBuf); err != nil {
+	legacyDL, err := svc.OpenSkillPackage(context.Background(), testCaller, "legacy-1")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if zipBuf.String() != "zip-bytes" {
-		t.Fatalf("streamed legacy zip = %q", zipBuf.String())
+	var legacyZip bytes.Buffer
+	if err := legacyDL.Write(&legacyZip); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(legacyZip.String(), "zip-bytes") {
+		t.Fatalf("legacy-root zip must not be streamed; got %q", legacyZip.String())
 	}
 }
 
@@ -386,16 +400,17 @@ func TestImportUpdatePublishFailureKeepsCommittedObjects(t *testing.T) {
 func TestSkillMarkdownRefObjectWinsOverInlineStub(t *testing.T) {
 	space := "space-a"
 	// Snapshot layout: inline SKILL.md is a stub; the authoritative document
-	// lives behind the ref pointer and must win.
+	// lives behind an OWN-SPACE ref pointer and must win. (Legacy-root pointers
+	// are no longer trusted on the caller path — see the own-Space rule.)
 	pkg := packageWith(
 		rawAtt("SKILL.md", "# stub"),
-		rawAtt("skill/ref.json", `{"object_key":"squads/team-1/members/member_01/skills/0.md"}`),
+		rawAtt("skill/ref.json", `{"object_key":"plugins/space-a/attachments/full.md"}`),
 	)
 	store := &fakeStore{plugins: map[string]*model.Plugin{
 		"snap-1": {ID: "snap-1", Name: "Snap", Type: model.PluginTypeSkill, SpaceID: &space, Package: pkg},
 	}}
 	blobs := &importStorage{objects: map[string][]byte{
-		"squads/team-1/members/member_01/skills/0.md": []byte("# full doc"),
+		"plugins/space-a/attachments/full.md": []byte("# full doc"),
 	}}
 	content, err := New(store, blobs).SkillMarkdown(context.Background(), testCaller, "snap-1")
 	if err != nil || content != "# full doc" {

@@ -230,8 +230,17 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin) model
 	hasRef := false
 	if raw, ok := rawAttachmentContent(p.Package, "skill/ref.json"); ok && json.Unmarshal([]byte(raw), &legacy) == nil {
 		hasRef = true
-		ref.ObjectKey = legacy.ObjectKey
-		ref.ZipObjectKey = legacy.ZipObjectKey
+		// skill/ref.json is caller-writable, so its object keys are honored only
+		// when they sit in the plugin's own managed Space prefix; a forged
+		// cross-Space or arbitrary bucket key is dropped rather than fetched by
+		// the provisioner. Legacy backfilled skills resolve once expand-skills has
+		// rewritten them into own-Space trees.
+		if trustedArtifactKey(legacy.ObjectKey, p.SpaceID) {
+			ref.ObjectKey = legacy.ObjectKey
+		}
+		if trustedArtifactKey(legacy.ZipObjectKey, p.SpaceID) {
+			ref.ZipObjectKey = legacy.ZipObjectKey
+		}
 		ref.FileName = legacy.FileName
 		ref.FileSize = legacy.FileSize
 		ref.Files = legacy.Files

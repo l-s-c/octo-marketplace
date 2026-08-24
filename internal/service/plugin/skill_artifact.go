@@ -198,6 +198,19 @@ func (s *Service) legacyZipKey(p *model.Plugin, ref skillRefDocument) (string, b
 	return "", false
 }
 
+// migrationZipKey mirrors legacyZipKey but additionally trusts the read-only
+// legacy roots. It is used ONLY by ExpandSkillPackage (the server-driven
+// expand-skills migration), never on a caller-facing request.
+func (s *Service) migrationZipKey(p *model.Plugin, ref skillRefDocument) (string, bool) {
+	if managed, ok := storageAttachmentKey(p.Package, "skill/package.zip"); ok && p.SpaceID != nil && validReferencedObjectKey(managed, *p.SpaceID) {
+		return managed, true
+	}
+	if migrationArtifactKey(ref.zipKey(), p.SpaceID) {
+		return ref.zipKey(), true
+	}
+	return "", false
+}
+
 // writeSkillZip assembles a zip from the attachment tree in sorted-path order
 // with a fixed modification time (stable output). Raw attachments write their
 // inline bytes; storage attachments stream the referenced object, but only when
@@ -257,27 +270,45 @@ func (s *Service) trackDownload(ctx context.Context, pluginID string) {
 	}
 }
 
-// trustedArtifactKey validates an object key read from persisted plugin_json
-// before it is fetched. skill/ref.json is caller-writable through upsert, so
-// pointers are only honored inside two namespaces: the plugin's OWN managed
-// Space prefix (import-created artifacts), or the legacy read-only roots the
-// deterministic backfill migrated — skills/ (top-level skills), experts/ and
-// squads/ (embedded member skills) — which the unified write path can never
-// produce objects under. Everything else — notably another Space's managed
-// prefix — fails closed.
-func trustedArtifactKey(key string, spaceID *string) bool {
+// artifactKeyShape rejects an object key on the syntactic grounds shared by
+// every trust check: empty/oversized, backslash/NUL/?/# , a scheme (`://`), a
+// leading slash, or a non-idempotent path.Clean. It says nothing about which
+// namespace the key is allowed in — the caller-facing and migration resolvers
+// add that.
+func artifactKeyShape(key string) bool {
 	if key == "" || len(key) > 512 || strings.ContainsAny(key, "\\\x00?#") || strings.Contains(key, "://") || strings.HasPrefix(key, "/") {
 		return false
 	}
 	clean := path.Clean(key)
-	if clean != key || clean == "." || strings.HasPrefix(clean, "../") {
+	return clean == key && clean != "." && !strings.HasPrefix(clean, "../")
+}
+
+// trustedArtifactKey validates an object key read from persisted plugin_json
+// before a CALLER-FACING fetch (skill_md, download, install). skill/ref.json is
+// caller-writable through upsert, so a pointer is honored only when it sits in
+// the plugin's OWN managed Space prefix — every other key, including another
+// Space's managed prefix and the shared legacy roots, fails closed. Legacy
+// backfilled skills are served only after `-phase=expand-skills` rewrites them
+// into own-Space attachment trees; until then their legacy-root pointer is not
+// trusted (skill_md falls back to the inline SKILL.md).
+func trustedArtifactKey(key string, spaceID *string) bool {
+	if !artifactKeyShape(key) {
 		return false
 	}
-	if spaceID != nil && safeObjectSegment.MatchString(*spaceID) && strings.HasPrefix(key, approvedAttachmentPrefix(*spaceID)) {
+	return spaceID != nil && safeObjectSegment.MatchString(*spaceID) && strings.HasPrefix(key, approvedAttachmentPrefix(*spaceID))
+}
+
+// migrationArtifactKey is the trust check for the one-time, server-driven
+// expand-skills migration ONLY. In addition to the plugin's own managed prefix
+// it trusts the read-only legacy roots the deterministic backfill migrated
+// (skills/, experts/, squads/), because expanding a legacy skill means reading
+// exactly those objects. It is never used on a caller-facing request path, so a
+// forged legacy-root pointer cannot be fetched through skill_md/download/install.
+func migrationArtifactKey(key string, spaceID *string) bool {
+	if trustedArtifactKey(key, spaceID) {
 		return true
 	}
-	// The managed root outside the plugin's own Space is never trusted.
-	if strings.HasPrefix(key, "plugins/") {
+	if !artifactKeyShape(key) || strings.HasPrefix(key, "plugins/") {
 		return false
 	}
 	return strings.HasPrefix(key, "skills/") || strings.HasPrefix(key, "experts/") || strings.HasPrefix(key, "squads/")
