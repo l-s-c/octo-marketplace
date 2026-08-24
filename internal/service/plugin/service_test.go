@@ -17,8 +17,10 @@ type fakeStore struct {
 	plugins        map[string]*model.Plugin
 	relations      map[string][]model.PluginRelation
 	getIDs         []string
+	listScope      pluginrepo.Scope
 	listFilter     pluginrepo.ListFilter
 	create         *model.Plugin
+	createScope    pluginrepo.Scope
 	createRels     []model.PluginRelation
 	createAudit    model.PluginAuditLog
 	update         *model.Plugin
@@ -37,7 +39,8 @@ type fakeStore struct {
 	err            error
 }
 
-func (f *fakeStore) List(_ context.Context, _ pluginrepo.Scope, filter pluginrepo.ListFilter) ([]model.Plugin, int64, error) {
+func (f *fakeStore) List(_ context.Context, s pluginrepo.Scope, filter pluginrepo.ListFilter) ([]model.Plugin, int64, error) {
+	f.listScope = s
 	f.listFilter = filter
 	return f.list, int64(len(f.list)), f.err
 }
@@ -58,9 +61,9 @@ func (f *fakeStore) GetWithRelations(_ context.Context, _ pluginrepo.Scope, id s
 	rels := append([]model.PluginRelation(nil), f.relations[id]...)
 	return &copy, rels, nil
 }
-func (f *fakeStore) Create(_ context.Context, _ pluginrepo.Scope, m pluginrepo.Mutation) (*pluginrepo.RelationSync, error) {
+func (f *fakeStore) Create(_ context.Context, s pluginrepo.Scope, m pluginrepo.Mutation) (*pluginrepo.RelationSync, error) {
 	p := m.Plugin
-	f.create, f.createRels = &p, m.Relations
+	f.create, f.createRels, f.createScope = &p, m.Relations, s
 	f.createAudit = model.PluginAuditLog{OperatorID: m.OperatorID, OperatorName: m.OperatorName, RequestID: m.RequestID, Remark: m.Remark}
 	if f.err != nil {
 		return nil, f.err

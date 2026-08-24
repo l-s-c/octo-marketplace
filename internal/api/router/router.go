@@ -144,7 +144,12 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 
 		pluginSvc := pluginsvc.New(pluginRepo, store)
 		pluginSvc.SetArtifactLimits(int64(storageCfg.MaxMB) << 20)
-		pluginhandler.New(pluginSvc, pluginsvc.NewCategories(pluginRepo)).Register(v1)
+		pluginCats := pluginsvc.NewCategories(pluginRepo)
+		pluginhandler.New(pluginSvc, pluginCats).Register(v1)
+		// Admin surface: /api/v1/admin/plugins(+/plugin_categories), cross-Space
+		// management of system connectors and global skills/experts, gated by the
+		// admin authenticator.
+		pluginhandler.NewAdmin(pluginSvc, pluginCats).RegisterAdmin(r, adminAuth)
 
 		catSvc := categorysvc.New(catRepo, skRepo)
 		skSvc := skillsvc.New(skRepo, catRepo, store, generateID)
