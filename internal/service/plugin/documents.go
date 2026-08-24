@@ -1,13 +1,18 @@
 package plugin
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 
+	libplugin "codex.mlamp.cn/dmwork/octo-plugin-lib/plugin"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 )
 
-// CanonicalDocuments carries API-canonical plugin documents and their hashes.
+// CanonicalDocuments carries contract-canonical plugin documents and their
+// hashes. Canonicalization, schema validation, per-type file rules, and the
+// plugin_hash formula all come from octo-plugin-lib; the marketplace adds only
+// host-owned rules on top (secret scan, storage-key scoping, tags==labels).
 type CanonicalDocuments struct {
 	Manifest     json.RawMessage
 	Package      json.RawMessage
@@ -16,47 +21,93 @@ type CanonicalDocuments struct {
 	PluginHash   string
 }
 
-// CanonicalizeManifest validates and canonicalizes a manifest with the exact
-// rules the write API applies, returning the canonical manifest and tags.
-// Exposed so out-of-band writers (the legacy backfill) share one validator
-// instead of reimplementing it and drifting.
+// CanonicalizeManifest validates a manifest through the octo-plugin-lib
+// contract and returns its canonical bytes plus the canonical tags derived
+// from the host tags==labels invariant. Exposed so out-of-band writers (the
+// legacy backfill, import) share one validator instead of drifting.
 func CanonicalizeManifest(name string, typ model.PluginType, tags, manifest json.RawMessage) (json.RawMessage, json.RawMessage, error) {
 	trimmed := strings.TrimSpace(name)
 	if !validName(trimmed) || !validPluginType(typ) {
 		return nil, nil, ErrInvalidRequest
 	}
-	return normalizeManifest(manifest, trimmed, typ, tags)
+	if len(manifest) == 0 || len(manifest) > maxJSONBytes {
+		return nil, nil, ErrInvalidRequest
+	}
+	decoded, err := libplugin.DecodeManifest(manifest)
+	if err != nil {
+		return nil, nil, ErrInvalidRequest
+	}
+	// The outer row fields are authoritative; the manifest must agree with
+	// them exactly (same rule libplugin.ValidatePlugin applies to full rows).
+	if decoded.PluginName != trimmed || string(decoded.PluginType) != string(typ) {
+		return nil, nil, ErrInvalidRequest
+	}
+	canonical, err := libplugin.CanonicalJSON(manifest)
+	if err != nil {
+		return nil, nil, ErrInvalidRequest
+	}
+	// Host invariant: the plugins.tags_json column mirrors manifest labels.
+	normalizedTags, err := normalizeTags(tags)
+	if err != nil {
+		return nil, nil, err
+	}
+	labels := decoded.Labels
+	if labels == nil {
+		labels = []string{}
+	}
+	canonicalLabels, err := canonicalJSONValue(labels)
+	if err != nil || !bytes.Equal(canonicalLabels, normalizedTags) {
+		return nil, nil, ErrInvalidRequest
+	}
+	return canonical, normalizedTags, nil
 }
 
-// CanonicalizeDocuments validates a manifest/package pair, enforces the secret
-// invariant for every plugin type, and returns canonical bytes plus the API
-// hash formulas (plugin_hash = sha256(manifest + "\n" + package)).
+// CanonicalizeDocuments validates a manifest/package pair through the
+// octo-plugin-lib contract (canonical form, per-type file rules, connector
+// descriptor, hash), then applies the host-only rules: secret scan, approved
+// storage-key scoping, and size caps. plugin_hash uses the lib formula
+// sha256(canonicalManifest || canonicalPackage); manifest_hash stays a
+// host-only column over the canonical manifest.
 func CanonicalizeDocuments(name string, typ model.PluginType, tags, manifest, pkg json.RawMessage, spaceID string) (*CanonicalDocuments, error) {
 	m, t, err := CanonicalizeManifest(name, typ, tags, manifest)
 	if err != nil {
 		return nil, err
 	}
-	p, err := normalizePackage(pkg, m, spaceID, typ)
+	if len(pkg) == 0 || len(pkg) > maxJSONBytes {
+		return nil, ErrInvalidRequest
+	}
+	p, err := libplugin.CanonicalJSON(pkg)
 	if err != nil {
-		return nil, err
+		return nil, ErrInvalidRequest
+	}
+	decoded, err := libplugin.DecodePackage(libplugin.Type(typ), p)
+	if err != nil {
+		return nil, ErrInvalidRequest
+	}
+	// Host rule: storage attachments may only reference this Space's managed
+	// prefix; the lib treats storage_uri as an opaque host-private string.
+	for _, attachment := range decoded.Attachments {
+		if attachment.ContentType != libplugin.ContentStorage {
+			continue
+		}
+		if !safeObjectSegment.MatchString(spaceID) || !validReferencedObjectKey(attachment.StorageURI, spaceID) {
+			return nil, ErrInvalidRequest
+		}
 	}
 	if err := rejectSecretValues(m, p); err != nil {
 		return nil, err
+	}
+	hash, err := libplugin.ComputePluginHash(m, p)
+	if err != nil {
+		return nil, ErrInvalidRequest
 	}
 	return &CanonicalDocuments{
 		Manifest:     m,
 		Package:      p,
 		Tags:         t,
 		ManifestHash: hashJSON(m),
-		PluginHash:   hashJSON(append(append(cloneJSON(m), '\n'), p...)),
+		PluginHash:   hash,
 	}, nil
-}
-
-// RejectSecretValues runs the write-path secret scan over raw documents.
-// Exported so out-of-band writers (the repackage migration) apply the same
-// invariant before persisting rewritten packages via direct SQL.
-func RejectSecretValues(values ...json.RawMessage) error {
-	return rejectSecretValues(values...)
 }
 
 // rawAttachmentContent returns the raw_content of one inline package
@@ -99,6 +150,13 @@ func storageAttachmentKey(pkg json.RawMessage, path string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// RejectSecretValues runs the write-path secret scan over raw documents.
+// Exported so out-of-band writers (the repackage migration) apply the same
+// invariant before persisting rewritten packages via direct SQL.
+func RejectSecretValues(values ...json.RawMessage) error {
+	return rejectSecretValues(values...)
 }
 
 // ConnectorToolCount counts the entries of the canonical connector/tools.json

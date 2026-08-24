@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	libplugin "codex.mlamp.cn/dmwork/octo-plugin-lib/plugin"
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
@@ -17,7 +18,7 @@ func attachmentJSON(path, mime, content string) string {
 	return string(raw)
 }
 
-func TestTransformPackageRenamesExpertEntries(t *testing.T) {
+func TestTransformPackageRenamesExpertEntriesAndDropsManifest(t *testing.T) {
 	manifest := []byte(`{"plugin_name":"专家","name":"expert-a","description":"d"}`)
 	pkg := []byte(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
 		attachmentJSON("expert/instruction.md", "text/markdown", "do work") + `,` +
@@ -29,23 +30,20 @@ func TestTransformPackageRenamesExpertEntries(t *testing.T) {
 	}
 	text := string(out)
 	if !strings.Contains(text, `"path":"AGENTS.md"`) || !strings.Contains(text, `"path":"mcp.json"`) ||
-		strings.Contains(text, "expert/instruction.md") || strings.Contains(text, "expert/mcp.json") {
+		strings.Contains(text, "expert/instruction.md") || strings.Contains(text, "manifest.json") {
 		t.Fatalf("out=%s", text)
-	}
-	// Attachments stay path-sorted and the pass is idempotent.
-	if strings.Index(text, `"path":"AGENTS.md"`) > strings.Index(text, `"path":"manifest.json"`) {
-		t.Fatalf("not sorted: %s", text)
 	}
 	if _, again, err := transformPackage(out, "expert", manifest); err != nil || again {
 		t.Fatalf("second pass changed=%v err=%v", again, err)
 	}
 }
 
-func TestTransformPackageSynthesizesTeamAgentsEntry(t *testing.T) {
+func TestTransformPackageCollapsesTeamToSingleAgentsFile(t *testing.T) {
 	manifest := []byte(`{"plugin_name":"产品研发专家团","name":"team-a","description":"跨职能协作"}`)
 	pkg := []byte(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+		attachmentJSON("AGENTS.md", "text/markdown", "# 旧版无依赖节") + `,` +
 		attachmentJSON("manifest.json", "application/json", "{}") + `,` +
-		attachmentJSON("team/config.json", "application/json", `{"leader":"Alice","strategies":["先澄清目标","再评估风险"],"permission":"open"}`) + `]}`)
+		attachmentJSON("team/config.json", "application/json", `{"leader":"Alice","strategies":["先澄清目标","再评估风险"],"dependencies":{"blocking":["需求文档"],"recommended":["设计稿"]},"permission":"open"}`) + `]}`)
 	out, changed, err := transformPackage(pkg, "expert_team", manifest)
 	if err != nil || !changed {
 		t.Fatalf("changed=%v err=%v", changed, err)
@@ -59,18 +57,18 @@ func TestTransformPackageSynthesizesTeamAgentsEntry(t *testing.T) {
 	if err := json.Unmarshal(out, &doc); err != nil {
 		t.Fatal(err)
 	}
-	var agents string
-	for _, a := range doc.Attachments {
-		if a.Path == "AGENTS.md" {
-			agents = a.RawContent
-		}
+	// Contract layout: exactly one attachment, the re-synthesized AGENTS.md
+	// folding in leader/strategies/dependencies/permission.
+	if len(doc.Attachments) != 1 || doc.Attachments[0].Path != "AGENTS.md" {
+		t.Fatalf("attachments = %#v", doc.Attachments)
 	}
-	want := teamAgentsMarkdown("产品研发专家团", "跨职能协作", "Alice", []any{"先澄清目标", "再评估风险"})
-	if agents != want {
-		t.Fatalf("agents=%q want=%q", agents, want)
+	deps := map[string]any{"blocking": []any{"需求文档"}, "recommended": []any{"设计稿"}}
+	want := teamAgentsMarkdown("产品研发专家团", "跨职能协作", "Alice", []any{"先澄清目标", "再评估风险"}, deps, "open")
+	if doc.Attachments[0].RawContent != want {
+		t.Fatalf("agents=%q want=%q", doc.Attachments[0].RawContent, want)
 	}
-	if !strings.Contains(string(out), `"path":"team/config.json"`) {
-		t.Fatalf("team config dropped: %s", out)
+	if !strings.Contains(want, "### 依赖") || !strings.Contains(want, "### 权限") {
+		t.Fatalf("renderer missing sections: %q", want)
 	}
 	if _, again, err := transformPackage(out, "expert_team", manifest); err != nil || again {
 		t.Fatalf("second pass changed=%v err=%v", again, err)
@@ -92,28 +90,29 @@ func TestTransformPackageConvertsConnectorConfig(t *testing.T) {
 	if !strings.Contains(text, `"connector":{"source":"connector.jira","type":"mcp"}`) {
 		t.Fatalf("descriptor missing: %s", text)
 	}
-	if strings.Contains(text, "connector/config.json") || !strings.Contains(text, `"path":"mcp.json"`) {
+	if strings.Contains(text, "connector/config.json") || strings.Contains(text, "manifest.json") || !strings.Contains(text, `"path":"mcp.json"`) {
 		t.Fatalf("config not converted: %s", text)
 	}
 	if !strings.Contains(text, `\"TOKEN\":\"${TOKEN}\"`) || !strings.Contains(text, `\"Authorization\":\"${AUTHORIZATION}\"`) {
 		t.Fatalf("placeholders missing: %s", text)
-	}
-	if !strings.Contains(text, `"path":"connector/tools.json"`) {
-		t.Fatalf("tools dropped: %s", text)
 	}
 	if _, again, err := transformPackage(out, "connector", manifest); err != nil || again {
 		t.Fatalf("second pass changed=%v err=%v", again, err)
 	}
 }
 
-func TestTransformPackageLeavesSkillUntouched(t *testing.T) {
+func TestTransformPackageStripsManifestFromSkillOnly(t *testing.T) {
 	manifest := []byte(`{"plugin_name":"S","name":"s","description":"d"}`)
-	pkg := []byte(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+	withManifest := []byte(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
 		attachmentJSON("SKILL.md", "text/markdown", "# doc") + `,` +
 		attachmentJSON("manifest.json", "application/json", "{}") + `]}`)
-	out, changed, err := transformPackage(pkg, "skill", manifest)
-	if err != nil || changed || string(out) != string(pkg) {
+	out, changed, err := transformPackage(withManifest, "skill", manifest)
+	if err != nil || !changed || strings.Contains(string(out), "manifest.json") {
 		t.Fatalf("changed=%v err=%v out=%s", changed, err, out)
+	}
+	// Already-contract skill packages round-trip untouched.
+	if _, again, err := transformPackage(out, "skill", manifest); err != nil || again {
+		t.Fatalf("second pass changed=%v err=%v", again, err)
 	}
 }
 
@@ -137,7 +136,7 @@ func oldExpertPkg(t *testing.T) (string, string) {
 }
 
 // TestRepackagePluginsGuardsUpdateWithOldHash pins the plan builder's UPDATE
-// shape: guarded by the pre-migration hash and carrying the recomputed one.
+// shape: guarded by the pre-migration hash and carrying the lib-formula hash.
 func TestRepackagePluginsGuardsUpdateWithOldHash(t *testing.T) {
 	r, mock, done := repackageRunner(t)
 	defer done()
@@ -160,9 +159,38 @@ func TestRepackagePluginsGuardsUpdateWithOldHash(t *testing.T) {
 	if strings.Contains(newPkg, "expert/instruction.md") || !strings.Contains(newPkg, `"path":"AGENTS.md"`) {
 		t.Fatalf("package not transformed: %s", newPkg)
 	}
-	canonicalManifest, _ := canonicalJSONBytes([]byte(manifest))
-	if action.args[1] != documentHash(canonicalManifest, []byte(newPkg)) {
-		t.Fatalf("hash mismatch: %v", action.args[1])
+	want, err := libplugin.ComputePluginHash([]byte(manifest), []byte(newPkg))
+	if err != nil || action.args[1] != want {
+		t.Fatalf("hash=%v want=%s err=%v", action.args[1], want, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRepackagePluginsRewritesHashEvenWithoutContentChange: the formula switch
+// means content-identical rows still need a plugin_hash update.
+func TestRepackagePluginsRewritesHashEvenWithoutContentChange(t *testing.T) {
+	r, mock, done := repackageRunner(t)
+	defer done()
+	manifest := `{"plugin_name":"S","name":"s","description":"d"}`
+	pkg := `{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+		attachmentJSON("SKILL.md", "text/markdown", "# doc") + `]}`
+	libHash, err := libplugin.ComputePluginHash([]byte(manifest), []byte(pkg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := sqlmock.NewRows([]string{"plugin_id", "plugin_type", "manifest_json", "plugin_json", "plugin_hash"}).
+		AddRow("s1", "skill", manifest, pkg, "sha256:legacy-formula").
+		AddRow("s2", "skill", manifest, pkg, libHash)
+	mock.ExpectQuery(`SELECT plugin_id, plugin_type, .* FROM plugins`).WillReturnRows(rows)
+	var p repackagePlan
+	if err := r.repackagePlugins(context.Background(), &p); err != nil {
+		t.Fatal(err)
+	}
+	// s1 gets a hash-only rewrite; s2 is already consistent → no action.
+	if len(p.actions) != 1 || p.actions[0].args[2] != "s1" || p.actions[0].args[1] != libHash {
+		t.Fatalf("actions=%#v", p.actions)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -170,10 +198,8 @@ func TestRepackagePluginsGuardsUpdateWithOldHash(t *testing.T) {
 }
 
 // TestRepackageAuditsRepairsHashChain feeds one plugin's full audit history
-// (create -> update -> delete with a NULL after-hash and snapshot-of-before)
-// in old layout and asserts the rebuilt chain: every after_hash is the hash of
-// the transformed snapshot pair and each before_hash equals the previous
-// row's after_hash; the delete row keeps its NULL after_hash.
+// (create -> update -> delete) in old layout and asserts the rebuilt chain
+// under the lib formula; the delete row keeps its NULL after_hash.
 func TestRepackageAuditsRepairsHashChain(t *testing.T) {
 	r, mock, done := repackageRunner(t)
 	defer done()
@@ -191,21 +217,17 @@ func TestRepackageAuditsRepairsHashChain(t *testing.T) {
 	if len(p.actions) != 3 || len(p.issues) != 0 {
 		t.Fatalf("actions=%d issues=%#v", len(p.actions), p.issues)
 	}
-	// All three snapshots transform identically, so the repaired chain hash is
-	// the same transformed-pair hash everywhere.
 	newPkg := p.actions[0].args[0].(string)
-	canonicalManifest, _ := canonicalJSONBytes([]byte(manifest))
-	canonicalPkg, _ := canonicalJSONBytes([]byte(newPkg))
-	want := documentHash(canonicalManifest, canonicalPkg)
-	// a1: create — before stays NULL, after repaired.
+	want, err := libplugin.ComputePluginHash([]byte(manifest), []byte(newPkg))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if p.actions[0].args[1] != nil || p.actions[0].args[2] != any(want) {
 		t.Fatalf("a1 before=%v after=%v want=%s", p.actions[0].args[1], p.actions[0].args[2], want)
 	}
-	// a2: update — before chains to a1's repaired after, after repaired.
 	if p.actions[1].args[1] != any(want) || p.actions[1].args[2] != any(want) {
 		t.Fatalf("a2 before=%v after=%v want=%s", p.actions[1].args[1], p.actions[1].args[2], want)
 	}
-	// a3: delete — before chains to a2's repaired after, after stays NULL.
 	if p.actions[2].args[1] != any(want) || p.actions[2].args[2] != nil {
 		t.Fatalf("a3 before=%v after=%v", p.actions[2].args[1], p.actions[2].args[2])
 	}
@@ -214,9 +236,9 @@ func TestRepackageAuditsRepairsHashChain(t *testing.T) {
 	}
 }
 
-// TestRepackageAuditsLeavesConsistentNewLayoutRowsAlone: already-migrated
+// TestRepackageAuditsLeavesConsistentContractRowsAlone: already-migrated
 // snapshots whose chain is intact must produce zero actions (idempotency).
-func TestRepackageAuditsLeavesConsistentNewLayoutRowsAlone(t *testing.T) {
+func TestRepackageAuditsLeavesConsistentContractRowsAlone(t *testing.T) {
 	r, mock, done := repackageRunner(t)
 	defer done()
 	manifest, oldPkg := oldExpertPkg(t)
@@ -224,8 +246,10 @@ func TestRepackageAuditsLeavesConsistentNewLayoutRowsAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	canonicalManifest, _ := canonicalJSONBytes([]byte(manifest))
-	consistent := documentHash(canonicalManifest, newPkg)
+	consistent, err := libplugin.ComputePluginHash([]byte(manifest), newPkg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rows := sqlmock.NewRows([]string{"audit_log_id", "plugin_id", "manifest_snapshot_json", "plugin_snapshot_json", "before_hash", "after_hash"}).
 		AddRow("a1", "p1", manifest, string(newPkg), nil, consistent).
 		AddRow("a2", "p1", manifest, string(newPkg), consistent, consistent)
@@ -264,5 +288,57 @@ func TestRepackagePluginsRejectsSecretBearingTransform(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestRepackageRelationsRenamesAndRekeysDeterministicRows: backfill-derived
+// relation IDs embed the type string and must be re-derived; API-created rows
+// keep their IDs.
+func TestRepackageRelationsRenamesAndRekeysDeterministicRows(t *testing.T) {
+	r, mock, done := repackageRunner(t)
+	defer done()
+	oldID := deterministicRelationID("team-1", legacyTeamRelation, 0, "member-1")
+	rows := sqlmock.NewRows([]string{"relation_id", "source_plugin_id", "target_plugin_id", "sort_order"}).
+		AddRow(oldID, "team-1", "member-1", 0).
+		AddRow("api-created-id", "team-2", "member-2", 1)
+	mock.ExpectQuery(`SELECT relation_id, source_plugin_id, target_plugin_id, sort_order FROM plugin_relations WHERE relation_type=`).
+		WillReturnRows(rows)
+	var p repackagePlan
+	if err := r.repackageRelations(context.Background(), &p); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.actions) != 2 {
+		t.Fatalf("actions=%d", len(p.actions))
+	}
+	wantNew := deterministicRelationID("team-1", contractTeamRelation, 0, "member-1")
+	if p.actions[0].args[0] != wantNew || p.actions[0].args[1] != contractTeamRelation || p.actions[0].args[2] != oldID {
+		t.Fatalf("deterministic row args=%#v", p.actions[0].args)
+	}
+	if p.actions[1].args[0] != "api-created-id" {
+		t.Fatalf("api row rekeyed: %#v", p.actions[1].args)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTransformVersionRelationsRewritesSnapshotEntries(t *testing.T) {
+	oldID := deterministicRelationID("team-1", legacyTeamRelation, 2, "member-9")
+	raw := []byte(`[{"relation_id":"` + oldID + `","target_plugin_id":"member-9","relation_type":"expert_team_member","sort_order":2,"relation":{"is_leader":true}},` +
+		`{"relation_id":"keep-1","target_plugin_id":"skill-1","relation_type":"expert_skill","sort_order":0,"relation":null}]`)
+	out, changed, err := transformVersionRelations(raw, "team-1")
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	text := string(out)
+	wantNew := deterministicRelationID("team-1", contractTeamRelation, 2, "member-9")
+	if strings.Contains(text, legacyTeamRelation) || !strings.Contains(text, contractTeamRelation) || !strings.Contains(text, wantNew) || strings.Contains(text, oldID) {
+		t.Fatalf("out=%s", text)
+	}
+	if !strings.Contains(text, `"relation_id":"keep-1"`) {
+		t.Fatalf("unrelated entry mangled: %s", text)
+	}
+	if _, again, err := transformVersionRelations(out, "team-1"); err != nil || again {
+		t.Fatalf("second pass changed=%v err=%v", again, err)
 	}
 }

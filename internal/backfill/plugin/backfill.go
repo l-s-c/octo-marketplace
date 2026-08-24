@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
+	libplugin "codex.mlamp.cn/dmwork/octo-plugin-lib/plugin"
 )
 
 type Mode string
@@ -246,8 +248,15 @@ func ntime(t sql.NullTime) any {
 	}
 	return nil
 }
+
+// both computes the contract plugin_hash over a manifest/package pair via the
+// lib's frozen formula (canonical concatenation, no separator).
 func both(a, b []byte) string {
-	return hashJSON(append(append(append([]byte{}, a...), byte('\n')), b...))
+	hash, err := libplugin.ComputePluginHash(a, b)
+	if err != nil {
+		return ""
+	}
+	return hash
 }
 func (r *Runner) categories(ctx context.Context, p *plan) (map[string]string, error) {
 	m := map[string]string{}
@@ -465,7 +474,11 @@ func snapshotSkill(parentID string, index, occurrence int, s legacySkillRef, own
 	id := DeterministicID("snapshotskill", fmt.Sprintf("%s:%s:%06d", parentID, source, occurrence))
 	draft := embeddedSkillManifest(s)
 	extra, _ := jsonAttachment("skill/ref.json", map[string]any{"file_name": s.FileName, "file_size": s.FileSize, "files": nonNilStrings(s.Files), "object_key": s.ObjectKey, "skill_key": skillPathKey(s), "zip_object_key": s.ZipObjectKey})
-	docs, err := canonicalDocs(s.Name, "skill", nil, draft, []rawAttachment{extra}, space)
+	// The contract requires the SKILL.md entry file; snapshot skills carry
+	// their full document behind the ref.json pointer, so the inline entry is
+	// a minimal deterministic stub (readers prefer the referenced object).
+	entry := rawAttachment{path: "SKILL.md", mimeType: "text/markdown", content: entryMarkdown(s.Name, "")}
+	docs, err := canonicalDocs(s.Name, "skill", nil, draft, []rawAttachment{entry, extra}, space)
 	if err != nil {
 		return plugRow{}, verRow{}, err
 	}
@@ -566,10 +579,10 @@ func (r *Runner) experts(ctx context.Context, cats map[string]string, dict map[i
 		var cfg any
 		_ = json.Unmarshal(safeMCP, &cfg)
 		mcpAttachment, _ := jsonAttachment("mcp.json", cfg)
-		extras := []rawAttachment{mcpAttachment}
-		if instruction != "" {
-			extras = append(extras, rawAttachment{path: "AGENTS.md", mimeType: "text/markdown", content: instruction})
-		}
+		// The contract requires every expert package to carry the AGENTS.md
+		// entry; experts without a legacy instruction get a minimal document
+		// derived from their display fields.
+		extras := []rawAttachment{mcpAttachment, {path: "AGENTS.md", mimeType: "text/markdown", content: expertAgentsMarkdown(name, summary, instruction)}}
 		// Embedded skills are not copied into the expert package: each one is
 		// promoted to a standalone skill Plugin and referenced through an
 		// expert_skill relation, so related content has exactly one home.
@@ -659,10 +672,10 @@ func (r *Runner) squads(ctx context.Context, cats map[string]string, dict map[in
 		}
 		pid := PluginID("expertteam", id)
 		draft, _ := canonical(newPluginManifest(name, "expert_team", name, summary, tags, nil))
-		teamConfig, _ := jsonAttachment("team/config.json", map[string]any{"dependencies": dependencyValue, "leader": leader, "permission": permission, "strategies": strategyValue})
-		// AGENTS.md is the human-readable entry the plugin-lib layout expects;
-		// the structured install config stays in team/config.json.
-		extras := []rawAttachment{teamConfig, {path: "AGENTS.md", mimeType: "text/markdown", content: teamAgentsMarkdown(name, summary, leader, strategyValue)}}
+		// Contract layout: the team package is exactly one AGENTS.md carrying
+		// the collaboration prose, dispatch strategies, dependencies, and
+		// permission; membership and leadership live in relations.
+		extras := []rawAttachment{{path: "AGENTS.md", mimeType: "text/markdown", content: teamAgentsMarkdown(name, summary, leader, strategyValue, dependencyValue, permission)}}
 		// Member content is not copied into the team package: each member is a
 		// standalone snapshot Plugin referenced through an expert_team_member
 		// relation, whose relation_json carries role/is_leader/member_key.
@@ -688,10 +701,7 @@ func (r *Runner) squads(ctx context.Context, cats map[string]string, dict map[in
 			memberDraft, _ := canonical(newPluginManifest(member.Name, "expert", member.Name, member.Role, nil, member.UsageExamples))
 			contextAttachment, _ := jsonAttachment("expert/context.json", map[string]any{"is_leader": member.IsLeader, "member_key": member.MemberKey, "role": member.Role, "template_id": member.TemplateID})
 			mcpAttachment, _ := jsonAttachment("mcp.json", memberMCP[i])
-			memberExtras := []rawAttachment{contextAttachment, mcpAttachment}
-			if member.Instruction != "" {
-				memberExtras = append(memberExtras, rawAttachment{path: "AGENTS.md", mimeType: "text/markdown", content: member.Instruction})
-			}
+			memberExtras := []rawAttachment{contextAttachment, mcpAttachment, {path: "AGENTS.md", mimeType: "text/markdown", content: expertAgentsMarkdown(member.Name, member.Role, member.Instruction)}}
 			memberDocs, memberErr := canonicalDocs(member.Name, "expert", nil, memberDraft, memberExtras, space.String)
 			if memberErr != nil {
 				p.issues = append(p.issues, Issue{"skip", "invalid_member_documents", "expert_squads", id, fmt.Sprintf("member %d: %v", i, memberErr)})
@@ -707,7 +717,7 @@ func (r *Runner) squads(ctx context.Context, cats map[string]string, dict map[in
 				versionID: mvid, status: active(deleted), created: created, updated: updated, deleted: deleted,
 			}
 			appendPlugin(p, mx, mkver(mvid, mid, "1.0.0", "", owner, created, mm, mp))
-			p.relations = append(p.relations, relation(pid, mid, "expert_team_member", i, map[string]any{"source_index": i, "member_key": member.MemberKey, "role": member.Role, "is_leader": member.IsLeader}, owner, created, updated, deleted))
+			p.relations = append(p.relations, relation(pid, mid, "expert_team_expert", i, map[string]any{"source_index": i, "member_key": member.MemberKey, "role": member.Role, "is_leader": member.IsLeader}, owner, created, updated, deleted))
 			skillOccurrences := snapshotOccurrences(member.Skills, skillIdentityKey)
 			for j, skill := range member.Skills {
 				sx, sv, snapErr := snapshotSkill(mid, j, skillOccurrences[j], skill, owner, space.String, expertVisibility(visibility), creator, by, created, updated, deleted)

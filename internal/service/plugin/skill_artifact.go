@@ -46,9 +46,10 @@ func (s *Service) skillRef(p *model.Plugin) skillRefDocument {
 	return ref
 }
 
-// SkillMarkdown returns the SKILL.md text of a visible skill Plugin: the
-// inlined raw attachment when present (import and backfill both write it),
-// else the legacy SKILL.md object referenced by skill/ref.json.
+// SkillMarkdown returns the SKILL.md text of a visible skill Plugin. The
+// authoritative document is the object referenced by skill/ref.json when it
+// exists (snapshot skills inline only a stub entry file); the inlined raw
+// attachment is the fallback for import-created and inline-only packages.
 func (s *Service) SkillMarkdown(ctx context.Context, caller Caller, pluginID string) (string, error) {
 	if validateCaller(caller) != nil {
 		return "", ErrInvalidRequest
@@ -64,23 +65,22 @@ func (s *Service) SkillMarkdown(ctx context.Context, caller Caller, pluginID str
 	if p.Type != model.PluginTypeSkill {
 		return "", ErrInvalidRequest
 	}
+	ref := s.skillRef(p)
+	if s.storage != nil && trustedArtifactKey(ref.ObjectKey, p.SpaceID) {
+		body, err := s.storage.GetObject(ctx, ref.ObjectKey)
+		if err == nil {
+			defer body.Close()
+			data, err := io.ReadAll(io.LimitReader(body, s.maxAttachmentBytes))
+			if err != nil {
+				return "", fmt.Errorf("read skill markdown: %w", err)
+			}
+			return string(data), nil
+		}
+	}
 	if raw, ok := rawAttachmentContent(p.Package, "SKILL.md"); ok {
 		return raw, nil
 	}
-	ref := s.skillRef(p)
-	if s.storage == nil || !trustedArtifactKey(ref.ObjectKey, p.SpaceID) {
-		return "", ErrNotFound
-	}
-	body, err := s.storage.GetObject(ctx, ref.ObjectKey)
-	if err != nil {
-		return "", fmt.Errorf("open skill markdown: %w", err)
-	}
-	defer body.Close()
-	data, err := io.ReadAll(io.LimitReader(body, s.maxAttachmentBytes))
-	if err != nil {
-		return "", fmt.Errorf("read skill markdown: %w", err)
-	}
-	return string(data), nil
+	return "", ErrNotFound
 }
 
 // OpenSkillPackage streams the packaged zip of a visible skill Plugin: the

@@ -1,15 +1,15 @@
 package plugin
 
 import (
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	libplugin "codex.mlamp.cn/dmwork/octo-plugin-lib/plugin"
 )
 
 var canonicalUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
@@ -72,12 +72,8 @@ func TestSanitizeConnectorJSONAllowsEmptyAndPlaceholder(t *testing.T) {
 	}
 }
 
-func TestPackageJSONIncludesCanonicalManifestAndAttachmentMetadata(t *testing.T) {
-	manifestJSON, err := canonical(newPluginManifest("Example", "expert", "Example", "description", []string{"tag"}, []string{"try it"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	pkgJSON, err := packageJSON(manifestJSON,
+func TestPackageJSONSortsAttachmentsWithMetadataAndNoManifestEmbed(t *testing.T) {
+	pkgJSON, err := packageJSON(
 		rawAttachment{path: "z.txt", mimeType: "text/plain", content: "z"},
 		rawAttachment{path: "a.txt", mimeType: "text/plain", content: "hello"},
 	)
@@ -88,16 +84,14 @@ func TestPackageJSONIncludesCanonicalManifestAndAttachmentMetadata(t *testing.T)
 	if err := json.Unmarshal(pkgJSON, &pkg); err != nil {
 		t.Fatal(err)
 	}
-	if pkg.Schema != "cowork-plugin-package-1.0.json" || len(pkg.Attachments) != 3 {
+	if pkg.Schema != "cowork-plugin-package-1.0.json" || len(pkg.Attachments) != 2 {
 		t.Fatalf("package = %#v", pkg)
 	}
-	paths := []string{pkg.Attachments[0].Path, pkg.Attachments[1].Path, pkg.Attachments[2].Path}
-	if strings.Join(paths, ",") != "a.txt,manifest.json,z.txt" {
+	paths := []string{pkg.Attachments[0].Path, pkg.Attachments[1].Path}
+	// The contract layout carries the manifest only in the manifest_json
+	// column; no manifest.json attachment is embedded.
+	if strings.Join(paths, ",") != "a.txt,z.txt" {
 		t.Fatalf("attachment paths = %#v", paths)
-	}
-	manifestAttachment := pkg.Attachments[1]
-	if manifestAttachment.RawContent != string(manifestJSON) || manifestAttachment.ContentSize != len(manifestJSON) || manifestAttachment.ContentHash != hashJSON(manifestJSON) {
-		t.Fatalf("manifest attachment = %#v", manifestAttachment)
 	}
 	for _, attachment := range pkg.Attachments {
 		if attachment.ContentSize != len([]byte(attachment.RawContent)) || attachment.ContentHash != hashJSON([]byte(attachment.RawContent)) {
@@ -107,13 +101,12 @@ func TestPackageJSONIncludesCanonicalManifestAndAttachmentMetadata(t *testing.T)
 }
 
 func TestPackageJSONRejectsUnsafeAndConflictingPaths(t *testing.T) {
-	manifestJSON, _ := canonical(newPluginManifest("Example", "skill", "example", "", nil, nil))
 	for _, attachmentPath := range []string{"../secret", "/absolute", `bad\\path`} {
-		if _, err := packageJSON(manifestJSON, rawAttachment{path: attachmentPath, mimeType: "text/plain", content: "x"}); err == nil {
+		if _, err := packageJSON(rawAttachment{path: attachmentPath, mimeType: "text/plain", content: "x"}); err == nil {
 			t.Fatalf("unsafe path accepted: %q", attachmentPath)
 		}
 	}
-	if _, err := packageJSON(manifestJSON,
+	if _, err := packageJSON(
 		rawAttachment{path: "same", mimeType: "text/plain", content: "one"},
 		rawAttachment{path: "same", mimeType: "text/plain", content: "two"},
 	); err == nil {
@@ -133,12 +126,15 @@ func TestManifestExamplesAndPluginHashFollowDesign(t *testing.T) {
 	if got.Labels == nil || len(got.Examples) != 2 || got.Examples[1].Title != "使用示例 2" || got.Examples[1].Input != "second" {
 		t.Fatalf("manifest = %#v", got)
 	}
-	pkgJSON, err := packageJSON(manifestJSON)
+	pkgJSON, err := packageJSON(rawAttachment{path: "SKILL.md", mimeType: "text/markdown", content: "# doc"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256.Sum256(append(append(append([]byte{}, manifestJSON...), '\n'), pkgJSON...))
-	want := "sha256:" + hex.EncodeToString(sum[:])
+	// plugin_hash follows the lib's frozen formula.
+	want, err := libplugin.ComputePluginHash(manifestJSON, pkgJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := both(manifestJSON, pkgJSON); got != want {
 		t.Fatalf("plugin hash = %q want %q", got, want)
 	}

@@ -123,10 +123,14 @@ type SquadDependencies struct {
 // expert_squads table. It shares the generic marketplace metadata with Expert
 // and swaps the ExpertSpec for the squad dispatch payload.
 type Squad struct {
-	ID               string
-	ShortName        string
-	Name             string
-	Summary          string
+	ID        string
+	ShortName string
+	Name      string
+	Summary   string
+	// Instructions is the squad's dispatch/collaboration document (the team
+	// package's AGENTS.md). When non-empty it becomes the Loop squad's
+	// instructions verbatim, superseding the numbered Strategies rendering.
+	Instructions     string
 	Category         string
 	Tags             []string
 	Publisher        string

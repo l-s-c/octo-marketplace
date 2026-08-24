@@ -253,11 +253,11 @@ func lockRelationTargets(ctx context.Context, tx *sql.Tx, scope Scope, sourceTyp
 
 func validPersistedRelation(relationType string, sourceType, targetType model.PluginType) bool {
 	switch relationType {
-	case "expert_team_member":
+	case "expert_team_expert":
 		return sourceType == model.PluginTypeExpertTeam && targetType == model.PluginTypeExpert
 	case "expert_skill":
 		return (sourceType == model.PluginTypeExpert || sourceType == model.PluginTypeExpertTeam) && targetType == model.PluginTypeSkill
-	case "plugin_dependency":
+	case "expert_connector":
 		validSource := sourceType == model.PluginTypeExpert || sourceType == model.PluginTypeExpertTeam || sourceType == model.PluginTypeConnector
 		return validSource && (targetType == model.PluginTypeSkill || targetType == model.PluginTypeConnector)
 	default:

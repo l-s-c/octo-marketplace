@@ -80,7 +80,7 @@ func TestGetScansMetricCounters(t *testing.T) {
 func TestCountMemberRelationsBatchesLiveTargets(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
-	mock.ExpectQuery(`SELECT r.source_plugin_id, COUNT\(\*\) FROM plugin_relations r\s+JOIN plugins t ON t.plugin_id=r.target_plugin_id AND t.status=1 AND t.deleted_at IS NULL\s+WHERE r.source_plugin_id IN \(\?,\?\) AND r.relation_type='expert_team_member' AND r.status=1 AND r.deleted_at IS NULL`).
+	mock.ExpectQuery(`SELECT r.source_plugin_id, COUNT\(\*\) FROM plugin_relations r\s+JOIN plugins t ON t.plugin_id=r.target_plugin_id AND t.status=1 AND t.deleted_at IS NULL\s+WHERE r.source_plugin_id IN \(\?,\?\) AND r.relation_type='expert_team_expert' AND r.status=1 AND r.deleted_at IS NULL`).
 		WithArgs("team-1", "team-2").
 		WillReturnRows(sqlmock.NewRows([]string{"source_plugin_id", "count"}).AddRow("team-1", 4))
 	counts, err := New(db).CountMemberRelations(context.Background(), []string{"team-1", "team-2"})

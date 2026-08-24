@@ -114,12 +114,12 @@ func newPluginManifest(pluginName, pluginType, name, description string, labels,
 	}
 }
 
-func packageJSON(manifestJSON []byte, extras ...rawAttachment) ([]byte, error) {
-	return connectorPackageJSON(nil, manifestJSON, extras...)
+func packageJSON(extras ...rawAttachment) ([]byte, error) {
+	return connectorPackageJSON(nil, extras...)
 }
 
-func connectorPackageJSON(connector *packageConnector, manifestJSON []byte, extras ...rawAttachment) ([]byte, error) {
-	attachments := make([]packageAttachment, 0, len(extras)+1)
+func connectorPackageJSON(connector *packageConnector, extras ...rawAttachment) ([]byte, error) {
+	attachments := make([]packageAttachment, 0, len(extras))
 	add := func(attachmentPath, mimeType, content string) error {
 		if !validAttachmentPath(attachmentPath) {
 			return fmt.Errorf("invalid package attachment path %q", attachmentPath)
@@ -134,9 +134,6 @@ func connectorPackageJSON(connector *packageConnector, manifestJSON []byte, extr
 			ContentHash: hashJSON(raw),
 		})
 		return nil
-	}
-	if err := add("manifest.json", "application/json", string(manifestJSON)); err != nil {
-		return nil, err
 	}
 	for _, extra := range extras {
 		if err := add(extra.path, extra.mimeType, extra.content); err != nil {
@@ -193,7 +190,7 @@ func canonicalConnectorDocs(outerName, pluginType string, tags []string, draftMa
 	if err != nil {
 		return nil, fmt.Errorf("manifest rejected by service validator: %w", err)
 	}
-	pkg, err := connectorPackageJSON(connector, manifest, extras...)
+	pkg, err := connectorPackageJSON(connector, extras...)
 	if err != nil {
 		return nil, err
 	}
@@ -205,9 +202,11 @@ func canonicalConnectorDocs(outerName, pluginType string, tags []string, draftMa
 }
 
 // teamAgentsMarkdown renders the deterministic AGENTS.md entry document of an
-// expert_team package from its legacy squad fields. Free text only — the
-// structured install config lives in team/config.json.
-func teamAgentsMarkdown(name, summary, leader string, strategies any) string {
+// expert_team package from its legacy squad fields: collaboration prose,
+// leader, ordered dispatch strategies, dependencies, and permission. It is the
+// team package's O\nY attachment under the contract layout, and backfill and
+// repackage must render byte-identical output.
+func teamAgentsMarkdown(name, summary, leader string, strategies, dependencies any, permission string) string {
 	var b strings.Builder
 	b.WriteString("# " + strings.TrimSpace(name) + "\n")
 	if trimmed := strings.TrimSpace(summary); trimmed != "" {
@@ -217,21 +216,66 @@ func teamAgentsMarkdown(name, summary, leader string, strategies any) string {
 	if trimmed := strings.TrimSpace(leader); trimmed != "" {
 		b.WriteString("\n- Leader: " + trimmed + "\n")
 	}
-	if items, ok := strategies.([]any); ok {
-		lines := make([]string, 0, len(items))
-		for _, item := range items {
-			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
-				lines = append(lines, strings.TrimSpace(text))
-			}
+	if lines := stringItems(strategies); len(lines) > 0 {
+		b.WriteString("\n### 策略\n")
+		for i, line := range lines {
+			b.WriteString(fmt.Sprintf("%d. %s\n", i+1, line))
 		}
-		if len(lines) > 0 {
-			b.WriteString("\n### 策略\n")
-			for i, line := range lines {
-				b.WriteString(fmt.Sprintf("%d. %s\n", i+1, line))
+	}
+	if deps, ok := dependencies.(map[string]any); ok {
+		blocking := stringItems(deps["blocking"])
+		recommended := stringItems(deps["recommended"])
+		if len(blocking) > 0 || len(recommended) > 0 {
+			b.WriteString("\n### 依赖\n")
+			for _, line := range blocking {
+				b.WriteString("- 阻塞: " + line + "\n")
+			}
+			for _, line := range recommended {
+				b.WriteString("- 推荐: " + line + "\n")
 			}
 		}
 	}
+	if trimmed := strings.TrimSpace(permission); trimmed != "" {
+		b.WriteString("\n### 权限\n" + trimmed + "\n")
+	}
 	return b.String()
+}
+
+// entryMarkdown renders the minimal deterministic entry document (used when a
+// package must carry its contract entry file but the legacy source has no
+// authored text).
+func entryMarkdown(name, summary string) string {
+	var b strings.Builder
+	b.WriteString("# " + strings.TrimSpace(name) + "\n")
+	if trimmed := strings.TrimSpace(summary); trimmed != "" {
+		b.WriteString("\n" + trimmed + "\n")
+	}
+	return b.String()
+}
+
+// expertAgentsMarkdown picks the expert package's AGENTS.md entry document:
+// the legacy instruction verbatim when present, else a minimal deterministic
+// document from the display fields (the contract requires the entry file).
+func expertAgentsMarkdown(name, summary, instruction string) string {
+	if trimmed := strings.TrimSpace(instruction); trimmed != "" {
+		return instruction
+	}
+	return entryMarkdown(name, summary)
+}
+
+// stringItems extracts the non-blank string entries of a decoded JSON array.
+func stringItems(value any) []string {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+			out = append(out, strings.TrimSpace(text))
+		}
+	}
+	return out
 }
 
 func secretShaped(key string) bool {

@@ -131,20 +131,12 @@ func (s *Service) agentSpecFromPlugin(ctx context.Context, caller Caller, detail
 // is_leader, and member_key), each member's spec from its own Plugin.
 func (s *Service) squadFromPlugin(ctx context.Context, caller Caller, detail *Detail) (*model.Squad, error) {
 	p := detail.Plugin
-	var cfg struct {
-		Leader     string `json:"leader"`
-		Strategies []any  `json:"strategies"`
-	}
-	if raw, ok := rawAttachmentContent(p.Package, "team/config.json"); ok {
-		_ = json.Unmarshal([]byte(raw), &cfg)
-	}
-	strategies := make([]string, 0, len(cfg.Strategies))
-	for _, item := range cfg.Strategies {
-		if text, ok := item.(string); ok {
-			strategies = append(strategies, text)
-		}
-	}
-	memberRelations := relationsOfType(detail.Relations, "expert_team_member")
+	// Contract layout: the team package is a single AGENTS.md document that
+	// carries the collaboration/dispatch prose; it becomes the Loop squad's
+	// instructions verbatim. Leadership comes from member relations
+	// (relation_json is_leader), not from a config attachment.
+	instructions, _ := rawAttachmentContent(p.Package, "AGENTS.md")
+	memberRelations := relationsOfType(detail.Relations, "expert_team_expert")
 	members := make([]model.SquadMember, 0, len(memberRelations))
 	for _, rel := range memberRelations {
 		memberDetail, err := s.Detail(ctx, caller, rel.TargetPluginID, true)
@@ -158,12 +150,11 @@ func (s *Service) squadFromPlugin(ctx context.Context, caller Caller, detail *De
 		members = append(members, *member)
 	}
 	return &model.Squad{
-		ID:         p.ID,
-		Name:       p.Name,
-		Summary:    manifestDescription(p.Manifest),
-		Leader:     cfg.Leader,
-		Strategies: strategies,
-		Members:    members,
+		ID:           p.ID,
+		Name:         p.Name,
+		Summary:      manifestDescription(p.Manifest),
+		Instructions: instructions,
+		Members:      members,
 	}, nil
 }
 

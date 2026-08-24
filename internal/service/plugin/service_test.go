@@ -116,17 +116,13 @@ var testCaller = Caller{UID: "user-1", Name: "Alice", SpaceID: "space-a", Reques
 
 func validRequest() WriteRequest {
 	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"Example Plugin","plugin_type":"expert","name":"example-plugin","description":"An example plugin.","labels":["one","two"],"examples":[]}`)
-	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":"{\"$schema\":\"cowork-plugin-manifest-1.0.json\",\"description\":\"An example plugin.\",\"examples\":[],\"labels\":[\"one\",\"two\"],\"name\":\"example-plugin\",\"plugin_name\":\"Example Plugin\",\"plugin_type\":\"expert\"}"}]}`)
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[{"path":"AGENTS.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# Example Plugin"}]}`)
 	return WriteRequest{Name: "  Example Plugin  ", Type: model.PluginTypeExpert, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`["one","one","two"]`), Manifest: manifest, Package: pkg}
 }
 
 func connectorRequest(config json.RawMessage) WriteRequest {
 	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"Example Plugin","plugin_type":"connector","name":"example-plugin","description":"An example plugin.","labels":["one","two"],"examples":[],"config":` + string(config) + `}`)
-	canonical, _, err := normalizeManifest(manifest, "Example Plugin", model.PluginTypeConnector, json.RawMessage(`["one","two"]`))
-	if err != nil {
-		panic(err)
-	}
-	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","connector":{"type":"mcp","source":"connector.example-plugin"},"attachments":[{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(string(canonical)) + `}]}`)
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","connector":{"type":"mcp","source":"connector.example-plugin"},"attachments":[{"path":"mcp.json","content_type":"raw","mime_type":"application/json","raw_content":"{\"mcpServers\":{}}"}]}`)
 	return WriteRequest{Name: "Example Plugin", Type: model.PluginTypeConnector, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`["one","two"]`), Manifest: manifest, Package: pkg}
 }
 
@@ -424,10 +420,9 @@ func TestRepositoryConflictsAndInvalidPlacementsMapToServiceErrors(t *testing.T)
 
 func expertRequestWithConfigAttachment(configJSON string) WriteRequest {
 	r := validRequest()
-	canonical := `{"$schema":"cowork-plugin-manifest-1.0.json","description":"An example plugin.","examples":[],"labels":["one","two"],"name":"example-plugin","plugin_name":"Example Plugin","plugin_type":"expert"}`
 	r.Package = json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
-		`{"path":"mcp.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(configJSON) + `},` +
-		`{"path":"manifest.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(canonical) + `}]}`)
+		`{"path":"AGENTS.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# Example Plugin"},` +
+		`{"path":"mcp.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(configJSON) + `}]}`)
 	return r
 }
 

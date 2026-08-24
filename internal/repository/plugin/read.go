@@ -192,7 +192,7 @@ ORDER BY r.sort_order,r.relation_id`, pluginID, scope.SpaceID, scope.CallerUID)
 	return p, rels, rows.Err()
 }
 
-// CountMemberRelations returns per-team counts of live expert_team_member
+// CountMemberRelations returns per-team counts of live expert_team_expert
 // edges whose target Plugin is itself live. Members are embedded Plugins
 // promoted with their team, so target liveness (not caller visibility) is the
 // correct predicate: a team visible to the caller never leaks counts of
@@ -208,7 +208,7 @@ func (r *Repo) CountMemberRelations(ctx context.Context, teamIDs []string) (map[
 	}
 	rows, err := r.db.QueryContext(ctx, `SELECT r.source_plugin_id, COUNT(*) FROM plugin_relations r
 JOIN plugins t ON t.plugin_id=r.target_plugin_id AND t.status=1 AND t.deleted_at IS NULL
-WHERE r.source_plugin_id IN (`+placeholders(len(teamIDs))+`) AND r.relation_type='expert_team_member' AND r.status=1 AND r.deleted_at IS NULL
+WHERE r.source_plugin_id IN (`+placeholders(len(teamIDs))+`) AND r.relation_type='expert_team_expert' AND r.status=1 AND r.deleted_at IS NULL
 GROUP BY r.source_plugin_id`, args...)
 	if err != nil {
 		return nil, wrapped("count member relations", err)

@@ -316,7 +316,6 @@ func buildImportWriteRequest(f *importFields, rewritten *skillsvc.RewriteResult,
 		return nil, ErrInvalidRequest
 	}
 	attachments := []map[string]any{
-		{"path": "manifest.json", "content_type": "raw", "mime_type": "application/json", "raw_content": string(manifest)},
 		{"path": "SKILL.md", "content_type": "raw", "mime_type": "text/markdown", "raw_content": string(rewritten.SkillMD)},
 		{"path": "skill/ref.json", "content_type": "raw", "mime_type": "application/json", "raw_content": string(refRaw)},
 		{"path": "skill/package.zip", "content_type": "storage", "mime_type": "application/zip", "storage_uri": zipKey, "content_size": rewritten.ZipSize, "content_hash": "sha256:" + rewritten.ZipSHA256},

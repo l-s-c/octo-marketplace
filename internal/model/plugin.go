@@ -50,7 +50,7 @@ type Plugin struct {
 	// ToolCount is materialized from the connector/tools.json attachment on the
 	// write path because list queries never load plugin_json.
 	ToolCount int
-	// MemberCount is derived from live expert_team_member relations for list
+	// MemberCount is derived from live expert_team_expert relations for list
 	// responses; it is never persisted.
 	MemberCount int
 	// View/Install/DownloadCount are read-only counters resolved from

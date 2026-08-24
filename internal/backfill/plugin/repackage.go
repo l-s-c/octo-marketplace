@@ -1,10 +1,14 @@
-// Repackage migrates persisted plugin packages from the first-generation
-// layout (expert/instruction.md, expert/mcp.json, team/config.json only,
-// connector/config.json) to the plugin-lib layout (root AGENTS.md + mcp.json,
-// team AGENTS.md entry, top-level connector descriptor + standard mcp.json).
-// It rewrites plugins.plugin_json (+plugin_hash), every plugin_versions
-// snapshot, and every plugin_audit_logs snapshot, repairing the audit hash
-// chain. Already-migrated rows produce no actions, so re-runs are no-ops.
+// Repackage migrates persisted plugin documents to the octo-plugin-lib
+// contracts/v1 layout: every package drops the redundant embedded
+// manifest.json, expert_team packages collapse to a single AGENTS.md carrying
+// the collaboration/dispatch prose (team/config.json removed), legacy
+// first-generation layouts (expert/instruction.md, connector/config.json) are
+// still converted, expert_team_member relations rename to expert_team_expert
+// (with deterministic relation IDs re-derived), and every plugin_hash is
+// recomputed with the lib formula sha256(canonicalManifest||canonicalPackage).
+// It rewrites plugins, plugin_versions (documents + relation snapshots), and
+// plugin_audit_logs (snapshots + hash chain). Already-migrated rows produce no
+// actions, so re-runs are no-ops.
 
 package plugin
 
@@ -16,13 +20,20 @@ import (
 	"strings"
 	"time"
 
+	libplugin "codex.mlamp.cn/dmwork/octo-plugin-lib/plugin"
 	pluginsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/plugin"
 )
 
+const (
+	legacyTeamRelation   = "expert_team_member"
+	contractTeamRelation = "expert_team_expert"
+)
+
 type RepackageCounts struct {
-	Plugins  int `json:"plugins"`
-	Versions int `json:"versions"`
-	Audits   int `json:"audits"`
+	Plugins   int `json:"plugins"`
+	Versions  int `json:"versions"`
+	Audits    int `json:"audits"`
+	Relations int `json:"relations"`
 }
 
 type RepackageReport struct {
@@ -109,6 +120,9 @@ func (r *Runner) buildRepackage(ctx context.Context) (repackagePlan, error) {
 	if err := r.repackageAudits(ctx, types, &p); err != nil {
 		return p, err
 	}
+	if err := r.repackageRelations(ctx, &p); err != nil {
+		return p, err
+	}
 	return p, nil
 }
 
@@ -148,21 +162,20 @@ func (r *Runner) repackagePlugins(ctx context.Context, p *repackagePlan) error {
 			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugins", id, err.Error()})
 			continue
 		}
-		if !changed {
-			continue
+		if changed {
+			if err := pluginsvc.RejectSecretValues(newPkg); err != nil {
+				p.issues = append(p.issues, Issue{"skip", "repackage_secret_rejected", "plugins", id, err.Error()})
+				continue
+			}
 		}
-		canonicalManifest, err := canonicalJSONBytes(manifest)
+		newHash, err := libplugin.ComputePluginHash(manifest, newPkg)
 		if err != nil {
 			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugins", id, err.Error()})
 			continue
 		}
-		// Direct-SQL writes bypass the repository gate, so the transformed
-		// package must pass the same secret scan the write path enforces.
-		if err := pluginsvc.RejectSecretValues(newPkg); err != nil {
-			p.issues = append(p.issues, Issue{"skip", "repackage_secret_rejected", "plugins", id, err.Error()})
+		if !changed && newHash == oldHash {
 			continue
 		}
-		newHash := documentHash(canonicalManifest, newPkg)
 		p.actions = append(p.actions, repackageAction{
 			count: func(c *RepackageCounts) *int { return &c.Plugins },
 			query: `UPDATE plugins SET plugin_json=?, plugin_hash=? WHERE plugin_id=? AND plugin_hash=?`,
@@ -173,15 +186,15 @@ func (r *Runner) repackagePlugins(ctx context.Context, p *repackagePlan) error {
 }
 
 func (r *Runner) repackageVersions(ctx context.Context, types map[string]string, p *repackagePlan) error {
-	rows, err := r.db.QueryContext(ctx, `SELECT version_id, plugin_id, manifest_json, plugin_json, plugin_hash FROM plugin_versions ORDER BY version_id`)
+	rows, err := r.db.QueryContext(ctx, `SELECT version_id, plugin_id, manifest_json, plugin_json, relations_json, plugin_hash FROM plugin_versions ORDER BY version_id`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id, pluginID, oldHash string
-		var manifest, pkg []byte
-		if err := rows.Scan(&id, &pluginID, &manifest, &pkg, &oldHash); err != nil {
+		var manifest, pkg, relations []byte
+		if err := rows.Scan(&id, &pluginID, &manifest, &pkg, &relations, &oldHash); err != nil {
 			return err
 		}
 		typ, known := types[pluginID]
@@ -194,30 +207,36 @@ func (r *Runner) repackageVersions(ctx context.Context, types map[string]string,
 			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_versions", id, err.Error()})
 			continue
 		}
-		if !changed {
-			continue
+		if changed {
+			if err := pluginsvc.RejectSecretValues(newPkg); err != nil {
+				p.issues = append(p.issues, Issue{"skip", "repackage_secret_rejected", "plugin_versions", id, err.Error()})
+				continue
+			}
 		}
-		canonicalManifest, err := canonicalJSONBytes(manifest)
+		newRelations, relationsChanged, err := transformVersionRelations(relations, pluginID)
 		if err != nil {
 			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_versions", id, err.Error()})
 			continue
 		}
-		if err := pluginsvc.RejectSecretValues(newPkg); err != nil {
-			p.issues = append(p.issues, Issue{"skip", "repackage_secret_rejected", "plugin_versions", id, err.Error()})
+		newHash, err := libplugin.ComputePluginHash(manifest, newPkg)
+		if err != nil {
+			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_versions", id, err.Error()})
 			continue
 		}
-		newHash := documentHash(canonicalManifest, newPkg)
+		if !changed && !relationsChanged && newHash == oldHash {
+			continue
+		}
 		p.actions = append(p.actions, repackageAction{
 			count: func(c *RepackageCounts) *int { return &c.Versions },
-			query: `UPDATE plugin_versions SET plugin_json=?, plugin_hash=? WHERE version_id=? AND plugin_hash=?`,
-			args:  []any{string(newPkg), newHash, id, oldHash},
+			query: `UPDATE plugin_versions SET plugin_json=?, relations_json=?, plugin_hash=? WHERE version_id=? AND plugin_hash=?`,
+			args:  []any{string(newPkg), string(newRelations), newHash, id, oldHash},
 		})
 	}
 	return rows.Err()
 }
 
 // repackageAudits rewrites audit snapshots and repairs the per-plugin hash
-// chain: after_hash becomes the hash of the transformed snapshot pair, and
+// chain: after_hash becomes the lib hash of the transformed snapshot pair, and
 // each row's before_hash becomes the previous row's after_hash.
 func (r *Runner) repackageAudits(ctx context.Context, types map[string]string, p *repackagePlan) error {
 	rows, err := r.db.QueryContext(ctx, `SELECT audit_log_id, plugin_id, manifest_snapshot_json, plugin_snapshot_json, before_hash, after_hash FROM plugin_audit_logs ORDER BY plugin_id, created_at, audit_log_id`)
@@ -254,24 +273,23 @@ func (r *Runner) repackageAudits(ctx context.Context, types map[string]string, p
 				continue
 			}
 			newPkg, changed = transformed, didChange
-		}
-		if changed {
-			if err := pluginsvc.RejectSecretValues(newPkg); err != nil {
-				p.issues = append(p.issues, Issue{"skip", "repackage_secret_rejected", "plugin_audit_logs", id, err.Error()})
-				lastHash[pluginID] = oldAfter
-				continue
+			if changed {
+				if err := pluginsvc.RejectSecretValues(newPkg); err != nil {
+					p.issues = append(p.issues, Issue{"skip", "repackage_secret_rejected", "plugin_audit_logs", id, err.Error()})
+					lastHash[pluginID] = oldAfter
+					continue
+				}
 			}
 		}
 		snapshotHash := ""
 		if len(newPkg) > 0 && len(manifest) > 0 {
-			canonicalManifest, mErr := canonicalJSONBytes(manifest)
-			canonicalPkg, pErr := canonicalJSONBytes(newPkg)
-			if mErr != nil || pErr != nil {
-				p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_audit_logs", id, "invalid snapshot JSON"})
+			computed, err := libplugin.ComputePluginHash(manifest, newPkg)
+			if err != nil {
+				p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_audit_logs", id, err.Error()})
 				lastHash[pluginID] = oldAfter
 				continue
 			}
-			snapshotHash = documentHash(canonicalManifest, canonicalPkg)
+			snapshotHash = computed
 		}
 		newBefore, newAfter := oldBefore, oldAfter
 		if oldBefore != "" {
@@ -295,24 +313,88 @@ func (r *Runner) repackageAudits(ctx context.Context, types map[string]string, p
 	return rows.Err()
 }
 
-// canonicalJSONBytes re-canonicalizes JSON read back from a MySQL JSON column
-// (which reformats with spaces) into the compact json.Marshal form every hash
-// in this system is computed over. Numbers survive via UseNumber.
-func canonicalJSONBytes(raw []byte) ([]byte, error) {
+// repackageRelations renames live expert_team_member relations to the contract
+// enum. Backfill-derived deterministic relation IDs embed the type string, so
+// rows still carrying the old deterministic ID are re-keyed to the new
+// derivation; API-created rows keep their IDs and only the type changes.
+func (r *Runner) repackageRelations(ctx context.Context, p *repackagePlan) error {
+	rows, err := r.db.QueryContext(ctx, `SELECT relation_id, source_plugin_id, target_plugin_id, sort_order FROM plugin_relations WHERE relation_type=? ORDER BY relation_id`, legacyTeamRelation)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, source, target string
+		var order int
+		if err := rows.Scan(&id, &source, &target, &order); err != nil {
+			return err
+		}
+		newID := id
+		if id == deterministicRelationID(source, legacyTeamRelation, order, target) {
+			newID = deterministicRelationID(source, contractTeamRelation, order, target)
+		}
+		p.actions = append(p.actions, repackageAction{
+			count: func(c *RepackageCounts) *int { return &c.Relations },
+			query: `UPDATE plugin_relations SET relation_id=?, relation_type=? WHERE relation_id=? AND relation_type=?`,
+			args:  []any{newID, contractTeamRelation, id, legacyTeamRelation},
+		})
+	}
+	return rows.Err()
+}
+
+// deterministicRelationID mirrors the backfill relation() ID derivation.
+func deterministicRelationID(source, typ string, order int, target string) string {
+	return DeterministicID("relation", fmt.Sprintf("%s:%s:%06d:%s", source, typ, order, target))
+}
+
+// transformVersionRelations rewrites a version snapshot's relations_json:
+// expert_team_member entries rename to expert_team_expert, and deterministic
+// relation IDs (derived from the type string by backfill) are re-keyed.
+func transformVersionRelations(raw []byte, sourcePluginID string) ([]byte, bool, error) {
 	if len(strings.TrimSpace(string(raw))) == 0 {
-		return nil, nil
+		return raw, false, nil
 	}
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.UseNumber()
-	var value any
-	if err := dec.Decode(&value); err != nil {
-		return nil, err
+	var entries []map[string]any
+	if err := dec.Decode(&entries); err != nil {
+		return nil, false, fmt.Errorf("invalid relations JSON: %w", err)
 	}
-	return json.Marshal(value)
+	changed := false
+	for _, entry := range entries {
+		typ, _ := entry["relation_type"].(string)
+		if typ != legacyTeamRelation {
+			continue
+		}
+		entry["relation_type"] = contractTeamRelation
+		changed = true
+		id, _ := entry["relation_id"].(string)
+		target, _ := entry["target_plugin_id"].(string)
+		order := 0
+		if number, ok := entry["sort_order"].(json.Number); ok {
+			if parsed, err := number.Int64(); err == nil {
+				order = int(parsed)
+			}
+		}
+		if id != "" && id == deterministicRelationID(sourcePluginID, legacyTeamRelation, order, target) {
+			entry["relation_id"] = deterministicRelationID(sourcePluginID, contractTeamRelation, order, target)
+		}
+	}
+	if !changed {
+		return raw, false, nil
+	}
+	out, err := json.Marshal(entries)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
 }
 
-func documentHash(canonicalManifest, canonicalPackage []byte) string {
-	return hashJSON(append(append(append([]byte{}, canonicalManifest...), '\n'), canonicalPackage...))
+func nullableJSON(raw []byte) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	return string(raw)
 }
 
 // hashColumn preserves the original NULL-vs-empty representation for hash
@@ -324,18 +406,17 @@ func hashColumn(value string, wasNull bool) any {
 	return value
 }
 
-func nullableJSON(raw []byte) any {
-	if len(raw) == 0 {
-		return nil
-	}
-	return string(raw)
-}
-
-// transformPackage converts one persisted package document to the plugin-lib
-// layout. It is purely syntactic: decode with number preservation, rename or
-// synthesize attachments, re-sort, re-marshal — json.Marshal of the decoded
-// value is exactly the service canonical form, so untouched rows round-trip
-// byte-identically and changed rows match what a fresh backfill would emit.
+// transformPackage converts one persisted package document to the contracts/v1
+// layout. It is purely syntactic and idempotent:
+//   - first-generation layouts still convert (expert/instruction.md ->
+//     AGENTS.md, expert/mcp.json -> mcp.json, connector/config.json ->
+//     descriptor + standard mcp.json);
+//   - the embedded manifest.json attachment is removed for every type;
+//   - expert_team packages collapse to a single AGENTS.md rendered by the
+//     shared teamAgentsMarkdown (team/config.json is folded in and removed).
+//
+// Changed output is re-canonicalized with the lib encoder so persisted bytes
+// match what a fresh backfill would emit.
 func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, bool, error) {
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		return raw, false, nil
@@ -348,16 +429,54 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 	}
 	attachments, _ := doc["attachments"].([]any)
 	changed := false
+	if idx := attachmentIndex(attachments, "manifest.json"); idx >= 0 {
+		attachments = append(attachments[:idx], attachments[idx+1:]...)
+		doc["attachments"] = attachments
+		changed = true
+	}
 	switch pluginType {
+	case "skill":
+		// Snapshot skills carry their document behind the ref.json pointer;
+		// the contract entry file is a deterministic stub matching what a
+		// fresh backfill emits.
+		if attachmentIndex(attachments, "SKILL.md") < 0 {
+			meta := manifestFields(manifest)
+			content := entryMarkdown(meta.pluginName, "")
+			attachments = append(attachments, map[string]any{
+				"path":         "SKILL.md",
+				"content_type": "raw",
+				"mime_type":    "text/markdown",
+				"raw_content":  content,
+				"content_size": json.Number(fmt.Sprintf("%d", len(content))),
+				"content_hash": hashJSON([]byte(content)),
+			})
+			doc["attachments"] = attachments
+			changed = true
+		}
 	case "expert":
 		changed = renameAttachment(attachments, "expert/instruction.md", "AGENTS.md") || changed
 		changed = renameAttachment(attachments, "expert/mcp.json", "mcp.json") || changed
-	case "expert_team":
-		changed = renameAttachment(attachments, "expert/instruction.md", "AGENTS.md") || changed
 		if attachmentIndex(attachments, "AGENTS.md") < 0 {
 			meta := manifestFields(manifest)
-			leader, strategies := teamConfigFields(attachments)
-			content := teamAgentsMarkdown(meta.pluginName, meta.description, leader, strategies)
+			content := expertAgentsMarkdown(meta.pluginName, meta.description, "")
+			attachments = append(attachments, map[string]any{
+				"path":         "AGENTS.md",
+				"content_type": "raw",
+				"mime_type":    "text/markdown",
+				"raw_content":  content,
+				"content_size": json.Number(fmt.Sprintf("%d", len(content))),
+				"content_hash": hashJSON([]byte(content)),
+			})
+			doc["attachments"] = attachments
+			changed = true
+		}
+	case "expert_team":
+		changed = renameAttachment(attachments, "expert/instruction.md", "AGENTS.md") || changed
+		if idx := attachmentIndex(attachments, "team/config.json"); idx >= 0 {
+			meta := manifestFields(manifest)
+			leader, strategies, dependencies, permission := teamConfigFields(attachments)
+			content := teamAgentsMarkdown(meta.pluginName, meta.description, leader, strategies, dependencies, permission)
+			attachments = append(attachments[:idx], attachments[idx+1:]...)
 			entry := map[string]any{
 				"path":         "AGENTS.md",
 				"content_type": "raw",
@@ -366,7 +485,11 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 				"content_size": json.Number(fmt.Sprintf("%d", len(content))),
 				"content_hash": hashJSON([]byte(content)),
 			}
-			attachments = append(attachments, entry)
+			if existing := attachmentIndex(attachments, "AGENTS.md"); existing >= 0 {
+				attachments[existing] = entry
+			} else {
+				attachments = append(attachments, entry)
+			}
 			doc["attachments"] = attachments
 			changed = true
 		}
@@ -417,15 +540,18 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 		return lp < rp
 	})
 	doc["attachments"] = attachments
-	out, err := json.Marshal(doc)
+	marshaled, err := json.Marshal(doc)
+	if err != nil {
+		return nil, false, err
+	}
+	out, err := libplugin.CanonicalJSON(marshaled)
 	if err != nil {
 		return nil, false, err
 	}
 	return out, true, nil
 }
 
-// renameAttachment updates the path (and refreshed content hash metadata stays
-// as-is: only the path changes, the bytes do not).
+// renameAttachment updates the path (content bytes and hash metadata stay).
 func renameAttachment(attachments []any, from, to string) bool {
 	idx := attachmentIndex(attachments, from)
 	if idx < 0 {
@@ -465,17 +591,19 @@ func manifestFields(manifest []byte) manifestMeta {
 	return manifestMeta{pluginName: m.PluginName, name: m.Name, description: m.Description}
 }
 
-func teamConfigFields(attachments []any) (string, any) {
+func teamConfigFields(attachments []any) (string, any, any, string) {
 	idx := attachmentIndex(attachments, "team/config.json")
 	if idx < 0 {
-		return "", nil
+		return "", nil, nil, ""
 	}
 	entry, _ := attachments[idx].(map[string]any)
 	content, _ := entry["raw_content"].(string)
 	var cfg struct {
-		Leader     string `json:"leader"`
-		Strategies any    `json:"strategies"`
+		Leader       string `json:"leader"`
+		Strategies   any    `json:"strategies"`
+		Dependencies any    `json:"dependencies"`
+		Permission   string `json:"permission"`
 	}
 	_ = json.Unmarshal([]byte(content), &cfg)
-	return cfg.Leader, cfg.Strategies
+	return cfg.Leader, cfg.Strategies, cfg.Dependencies, cfg.Permission
 }

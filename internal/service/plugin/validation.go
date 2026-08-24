@@ -5,6 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"time"
+
+	libplugin "codex.mlamp.cn/dmwork/octo-plugin-lib/plugin"
 	"errors"
 	"fmt"
 	"io"
@@ -93,30 +96,46 @@ func validVersion(v string) bool       { return versionPattern.MatchString(strin
 func validPlacementCode(v string) bool { return placementPattern.MatchString(v) }
 func validRelationID(v string) bool    { return relationIDPattern.MatchString(v) }
 
-func validRelationSource(relation string, source model.PluginType) bool {
-	switch relation {
-	case "expert_team_member":
-		return source == model.PluginTypeExpertTeam
-	case "expert_skill":
-		return source == model.PluginTypeExpert || source == model.PluginTypeExpertTeam
-	case "plugin_dependency":
-		return source == model.PluginTypeExpert || source == model.PluginTypeExpertTeam || source == model.PluginTypeConnector
-	default:
-		return false
+// relationEndpointProbe* are fixed well-formed identities so the octo-plugin-
+// lib endpoint validator (which also checks IDs, self-reference, and
+// timestamps on the full Relation object) can be reused as the single source
+// of the relation-type endpoint matrix.
+var (
+	relationProbeStamp = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+)
+
+const (
+	relationProbeID     = "00000000-0000-8000-8000-000000000001"
+	relationProbeSource = "00000000-0000-8000-8000-000000000002"
+	relationProbeTarget = "00000000-0000-8000-8000-000000000003"
+)
+
+// validRelationType reports whether relation may connect source -> target,
+// delegating the endpoint matrix (expert_team_expert: expert_team -> expert,
+// expert_skill: expert -> skill, expert_connector: expert -> connector) to
+// libplugin.ValidateRelationEndpoints.
+func validRelationType(relation string, source, target model.PluginType) bool {
+	probe := libplugin.Relation{
+		RelationID:     relationProbeID,
+		SourcePluginID: relationProbeSource,
+		TargetPluginID: relationProbeTarget,
+		RelationType:   libplugin.RelationType(relation),
+		CreatedAt:      relationProbeStamp,
+		UpdatedAt:      relationProbeStamp,
 	}
+	return libplugin.ValidateRelationEndpoints(probe, libplugin.Type(source), libplugin.Type(target)) == nil
 }
 
-func validRelationTarget(relation string, target model.PluginType) bool {
-	switch relation {
-	case "expert_team_member":
-		return target == model.PluginTypeExpert
-	case "expert_skill":
-		return target == model.PluginTypeSkill
-	case "plugin_dependency":
-		return target == model.PluginTypeSkill || target == model.PluginTypeConnector
-	default:
-		return false
+// validRelationSource is the fast pre-check run before the target row is
+// loaded: the relation type must exist and admit this source type with at
+// least one valid target.
+func validRelationSource(relation string, source model.PluginType) bool {
+	for _, target := range []model.PluginType{model.PluginTypeExpert, model.PluginTypeExpertTeam, model.PluginTypeSkill, model.PluginTypeConnector} {
+		if validRelationType(relation, source, target) {
+			return true
+		}
 	}
+	return false
 }
 
 func normalizeObject(raw json.RawMessage) (json.RawMessage, string, error) {

@@ -61,7 +61,7 @@ func installFixture() *fakeStore {
 	space := "space-a"
 	skillPkg := packageWith(rawAtt("skill/ref.json", `{"file_name":"pack.zip","file_size":9,"files":["a.md"],"object_key":"legacy/skill.md","zip_object_key":"legacy/pack.zip"}`))
 	expertPkg := packageWith(rawAtt("AGENTS.md", "do the work"), rawAtt("mcp.json", `{"mcpServers":{}}`))
-	teamPkg := packageWith(rawAtt("team/config.json", `{"leader":"Alice","strategies":["first","second"],"permission":"open"}`))
+	teamPkg := packageWith(rawAtt("AGENTS.md", "# Team\n\n## 协作方式\n1. first\n2. second"))
 	return &fakeStore{
 		plugins: map[string]*model.Plugin{
 			"expert-1": {ID: "expert-1", Name: "Alice", Type: model.PluginTypeExpert, OwnerUID: "user-1", SpaceID: &space, Manifest: json.RawMessage(`{"description":"expert summary"}`), Package: expertPkg},
@@ -70,7 +70,7 @@ func installFixture() *fakeStore {
 		},
 		relations: map[string][]model.PluginRelation{
 			"expert-1": {{ID: "r1", SourcePluginID: "expert-1", TargetPluginID: "skill-1", TargetPluginType: model.PluginTypeSkill, Type: "expert_skill", SortOrder: 0, Status: 1}},
-			"team-1":   {{ID: "r2", SourcePluginID: "team-1", TargetPluginID: "expert-1", TargetPluginType: model.PluginTypeExpert, Type: "expert_team_member", SortOrder: 0, Status: 1, Data: json.RawMessage(`{"member_key":"m1","role":"leader","is_leader":true}`)}},
+			"team-1":   {{ID: "r2", SourcePluginID: "team-1", TargetPluginID: "expert-1", TargetPluginType: model.PluginTypeExpert, Type: "expert_team_expert", SortOrder: 0, Status: 1, Data: json.RawMessage(`{"member_key":"m1","role":"leader","is_leader":true}`)}},
 		},
 	}
 }
@@ -102,7 +102,7 @@ func TestInstallExpertBuildsSpecFromAttachmentsAndRelations(t *testing.T) {
 	}
 }
 
-func TestInstallTeamBuildsSquadModelFromConfigAndMembers(t *testing.T) {
+func TestInstallTeamBuildsSquadModelFromAgentsDocAndMembers(t *testing.T) {
 	f := installFixture()
 	prov := &fakeProvisioner{}
 	svc := fixedService(f).WithProvisioner(prov)
@@ -114,10 +114,15 @@ func TestInstallTeamBuildsSquadModelFromConfigAndMembers(t *testing.T) {
 		t.Fatalf("outcome = %#v", outcome)
 	}
 	squad := prov.squad
-	if squad.Name != "Team" || squad.Summary != "team summary" || squad.Leader != "Alice" {
+	// Contract layout: the AGENTS.md prose is the squad's dispatch document;
+	// leadership comes from member relation data, not a config attachment.
+	if squad.Name != "Team" || squad.Summary != "team summary" || squad.Leader != "" {
 		t.Fatalf("squad = %#v", squad)
 	}
-	if len(squad.Strategies) != 2 || squad.Strategies[0] != "first" {
+	if squad.Instructions != "# Team\n\n## 协作方式\n1. first\n2. second" {
+		t.Fatalf("instructions = %q", squad.Instructions)
+	}
+	if len(squad.Strategies) != 0 {
 		t.Fatalf("strategies = %#v", squad.Strategies)
 	}
 	if len(squad.Members) != 1 {

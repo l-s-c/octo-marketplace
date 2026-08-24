@@ -555,7 +555,7 @@ func (s *Service) buildRelations(ctx context.Context, c Caller, source *model.Pl
 		if err != nil {
 			return nil, mapStoreError(err)
 		}
-		if !validRelationTarget(typ, target.Type) {
+		if !validRelationType(typ, source.Type, target.Type) {
 			return nil, ErrInvalidRequest
 		}
 		data, err := normalizeOptionalObject(r.Data)

@@ -120,20 +120,18 @@ func assertCompliantPluginDocuments(t *testing.T, plugin plugRow) {
 		t.Fatalf("plugin %q package is not compliant: %#v", plugin.id, packageValue)
 	}
 	paths := make([]string, 0, len(packageValue.Attachments))
-	manifestCount := 0
 	for _, attachment := range packageValue.Attachments {
 		paths = append(paths, attachment.Path)
 		if attachment.ContentType != "raw" || attachment.ContentSize != len([]byte(attachment.RawContent)) || attachment.ContentHash != hashJSON([]byte(attachment.RawContent)) {
 			t.Fatalf("plugin %q attachment invalid: %#v", plugin.id, attachment)
 		}
+		// Contract layout: the manifest lives only in the manifest_json
+		// column, never as an embedded attachment.
 		if attachment.Path == "manifest.json" {
-			manifestCount++
-			if attachment.RawContent != plugin.manifest || attachment.MIMEType != "application/json" {
-				t.Fatalf("plugin %q canonical manifest attachment mismatch", plugin.id)
-			}
+			t.Fatalf("plugin %q embeds manifest.json", plugin.id)
 		}
 	}
-	if manifestCount != 1 || !sort.StringsAreSorted(paths) {
+	if !sort.StringsAreSorted(paths) {
 		t.Fatalf("plugin %q package paths = %#v", plugin.id, paths)
 	}
 	if plugin.mhash != hashJSON([]byte(plugin.manifest)) || plugin.phash != both([]byte(plugin.manifest), []byte(plugin.pkg)) {

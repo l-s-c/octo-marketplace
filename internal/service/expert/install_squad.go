@@ -135,7 +135,7 @@ func (s *Service) provisionSquad(ctx context.Context, in InstallInput, m *model.
 	// squad silently missing its dispatch rules is exactly the defect this write
 	// exists to prevent. No strategies → leave fleet's instructions empty
 	// instead of injecting a client-side default.
-	if instructions := squadInstructions(m); instructions != "" {
+	if instructions := squadDispatchInstructions(m); instructions != "" {
 		if err := s.updateSquadInstructions(ctx, in, fleetSquadID, instructions); err != nil {
 			s.rollbackSquad(ctx, in, fleetSquadID, created)
 			return InstallSquadResult{}, err
@@ -162,6 +162,16 @@ func (s *Service) provisionSquad(ctx context.Context, in InstallInput, m *model.
 	}
 
 	return InstallSquadResult{SquadID: fleetSquadID, LeaderAgentID: leaderAgentID}, nil
+}
+
+// squadDispatchInstructions picks the squad's dispatch document: the contract
+// team package carries prose Instructions (AGENTS.md verbatim); legacy squads
+// fall back to rendering their ordered strategies.
+func squadDispatchInstructions(m *model.Squad) string {
+	if text := strings.TrimSpace(m.Instructions); text != "" {
+		return text
+	}
+	return squadInstructions(m)
 }
 
 // squadInstructions renders the squad's ordered dispatch strategies (专家团的
