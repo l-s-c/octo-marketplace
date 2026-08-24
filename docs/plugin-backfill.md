@@ -31,3 +31,52 @@ go run ./cmd/plugin-backfill -mode verify
 The default mode is `dry-run`. Output is structured JSON containing expected and observed counts, deterministic hashes, missing/conflicting counts, and explicit skipped-field/source issues. `apply` is transactional for each execution. `verify` performs no writes. The command exits with status 2 when verification finds missing or conflicting rows.
 
 Review every `issues` entry before cutover. A skipped field or row requires a product/data decision rather than inferred semantics.
+
+## Phases
+
+The command carries three idempotent phases (all support `dry-run` / `apply` / `verify`):
+
+| Phase | What it does | When to run |
+| --- | --- | --- |
+| `plan` (default) | Deterministic historical backfill from the legacy tables (skills / mcp_servers / experts / expert_squads) into the unified plugin tables, emitting the contracts/v1 package layout. | Environments whose unified tables are empty while legacy data exists. |
+| `enrich` | Display-data fill: legacy icons, connector category registration, materialized tool counts, one-time resource-metrics copy onto plugin rows. | After `plan`, or on environments that predate these columns. |
+| `repackage` | Migrates already-stored documents to the contracts/v1 layout: strips embedded manifest.json, collapses expert_team packages to a single AGENTS.md, converts first-generation layouts, renames `expert_team_member` relations to `expert_team_expert` (re-deriving deterministic relation IDs), and recomputes every `plugin_hash` with the octo-plugin-lib formula across plugins, version snapshots, and audit chains. | Environments that ran a pre-contracts/v1 build of the unified plugin backend. |
+
+## Deployment runbook
+
+Schema migrations (`migrations/sql/`) run automatically at marketplace-api startup; the
+data phases above do NOT — run them explicitly right after deploying a new backend build:
+
+1. Back up `plugins`, `plugin_versions`, `plugin_audit_logs`, `plugin_relations`
+   (`repackage` rewrites hashes one-way).
+2. Deploy and start the new marketplace-api (schema auto-migrates).
+3. Run the data phases against the same database:
+   - fresh environment: `plan` apply → verify, then `enrich` apply → verify;
+   - previously-deployed environment: `enrich` apply → verify (if pending), then
+     `repackage` apply → verify (`remaining` must be all zeros; exit code 2 otherwise).
+4. Release the matching octo-web build in the same window — old and new frontends read
+   different package layouts, so the migration and the frontend must not drift apart.
+
+Keep the gap between steps 2 and 3 short: the new binary reads the contracts/v1 layout,
+so pre-migration rows are served degraded until `repackage` completes.
+
+## Standalone image
+
+`Dockerfile.backfill` builds a self-contained migration image (dependencies are vendored,
+so no git credentials are needed at build time):
+
+```bash
+docker build -f Dockerfile.backfill -t plugin-backfill:<tag> .
+
+# Read-only default (repackage dry-run):
+docker run --rm -e MYSQL_DSN='<dsn>' plugin-backfill:<tag>
+
+# Explicit phases:
+docker run --rm -e MYSQL_DSN='<dsn>' plugin-backfill:<tag> -phase=enrich    -mode=apply
+docker run --rm -e MYSQL_DSN='<dsn>' plugin-backfill:<tag> -phase=repackage -mode=apply
+docker run --rm -e MYSQL_DSN='<dsn>' plugin-backfill:<tag> -phase=repackage -mode=verify
+```
+
+In Kubernetes, run it as a one-shot Job (or a pre-release hook) mounting the same
+`MYSQL_DSN` secret the marketplace-api deployment uses — the tool reads the decrypted
+environment exactly like the service and never needs the plaintext DSN handled manually.

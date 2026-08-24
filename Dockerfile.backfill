@@ -1,0 +1,15 @@
+FROM docker.m.daocloud.io/golang:1.25-alpine AS builder
+WORKDIR /app
+# Dependencies (including the private codex.mlamp.cn plugin lib) are vendored,
+# so the build needs no network or git credentials.
+COPY . .
+RUN CGO_ENABLED=0 go build -mod=vendor -o /bin/plugin-backfill ./cmd/plugin-backfill
+
+FROM docker.m.daocloud.io/alpine:3.21
+ENV TZ=Asia/Shanghai
+RUN apk add --no-cache ca-certificates tzdata
+COPY --from=builder /bin/plugin-backfill /bin/plugin-backfill
+ENTRYPOINT ["/bin/plugin-backfill"]
+# Safe read-only default: report what a migration would do without writing.
+# Override with e.g.: -phase=enrich -mode=apply / -phase=repackage -mode=verify
+CMD ["-phase=repackage", "-mode=dry-run"]
