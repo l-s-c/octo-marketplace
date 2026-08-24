@@ -23,6 +23,11 @@ type ListFilter struct {
 	Sort          string
 	Limit         int
 	Offset        int
+	// AllSpaces drops the per-Space visibility predicate — set ONLY by the admin
+	// service, never from a caller-supplied filter. Visibility optionally narrows
+	// the admin listing to one visibility class (e.g. system connectors).
+	AllSpaces  bool
+	Visibility model.PluginVisibility
 }
 
 // pluginMetric embeds a correlated counter lookup, mirroring the expert list
@@ -35,8 +40,14 @@ func pluginMetric(column string) string {
 var pluginMetricColumns = `,` + pluginMetric("view_count") + `,` + pluginMetric("install_count") + `,` + pluginMetric("download_count")
 
 func (r *Repo) Get(ctx context.Context, scope Scope, pluginID string) (*model.Plugin, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT `+pluginColumns+pluginMetricColumns+` FROM plugins p
+	var row *sql.Row
+	if scope.Admin {
+		row = r.db.QueryRowContext(ctx, `SELECT `+pluginColumns+pluginMetricColumns+` FROM plugins p
+WHERE p.plugin_id=? AND p.status=1 AND p.deleted_at IS NULL`, pluginID)
+	} else {
+		row = r.db.QueryRowContext(ctx, `SELECT `+pluginColumns+pluginMetricColumns+` FROM plugins p
 WHERE p.plugin_id=? AND p.status=1 AND p.deleted_at IS NULL AND `+visibilitySQL, pluginID, scope.SpaceID, scope.CallerUID)
+	}
 	p, err := scanPluginWithMetrics(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -95,8 +106,18 @@ func buildListQuery(scope Scope, f ListFilter) (string, string, []any) {
 	}
 	// Embedded plugins (promoted from a parent's JSON) are parts of a parent
 	// asset: reachable via detail and relations, never listed as catalog entries.
-	where := ` WHERE p.status=1 AND p.deleted_at IS NULL AND p.is_embedded=0 AND ` + visibilitySQL
-	args = append(args, scope.SpaceID, scope.CallerUID)
+	where := ` WHERE p.status=1 AND p.deleted_at IS NULL AND p.is_embedded=0`
+	if f.AllSpaces {
+		// Admin listing: no per-Space scoping. Never reachable from a caller
+		// filter — only the admin service sets AllSpaces.
+	} else {
+		where += ` AND ` + visibilitySQL
+		args = append(args, scope.SpaceID, scope.CallerUID)
+	}
+	if f.Visibility != "" {
+		where += ` AND p.visibility=?`
+		args = append(args, string(f.Visibility))
+	}
 	if f.Type != "" {
 		where += ` AND p.plugin_type=?`
 		args = append(args, f.Type)
@@ -166,11 +187,15 @@ func (r *Repo) GetWithRelations(ctx context.Context, scope Scope, pluginID strin
 	if err != nil {
 		return nil, nil, err
 	}
+	relWhere, relArgs := visibilitySQL, []any{pluginID, scope.SpaceID, scope.CallerUID}
+	if scope.Admin {
+		relWhere, relArgs = "1=1", []any{pluginID}
+	}
 	rows, err := r.db.QueryContext(ctx, `SELECT r.relation_id,r.source_plugin_id,r.target_plugin_id,p.plugin_type,r.relation_type,r.sort_order,
  r.relation_json,r.status,r.created_by,r.created_at,r.updated_at,r.deleted_at
 FROM plugin_relations r JOIN plugins p ON p.plugin_id=r.target_plugin_id
-WHERE r.source_plugin_id=? AND r.status=1 AND r.deleted_at IS NULL AND p.status=1 AND p.deleted_at IS NULL AND `+visibilitySQL+`
-ORDER BY r.sort_order,r.relation_id`, pluginID, scope.SpaceID, scope.CallerUID)
+WHERE r.source_plugin_id=? AND r.status=1 AND r.deleted_at IS NULL AND p.status=1 AND p.deleted_at IS NULL AND `+relWhere+`
+ORDER BY r.sort_order,r.relation_id`, relArgs...)
 	if err != nil {
 		return nil, nil, err
 	}

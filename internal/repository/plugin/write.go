@@ -46,8 +46,12 @@ func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 			return nil, err
 		}
 	}
-	p.OwnerUID = scope.CallerUID
-	p.SpaceID = &scope.SpaceID
+	// Non-admin writes are pinned to the caller's own identity/Space; the admin
+	// surface supplies owner/Space (and NULL Space for system rows) itself.
+	if !scope.Admin {
+		p.OwnerUID = scope.CallerUID
+		p.SpaceID = &scope.SpaceID
+	}
 	if p.ID == "" {
 		p.ID = r.id()
 	}
@@ -109,8 +113,13 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	}
 	// getOwnedForUpdate already proved existence under lock; RowsAffected reports
 	// changed rows, so a byte-identical resubmit must not surface as not found.
+	updWhere, updTail := `WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, []any{p.ID, scope.CallerUID, scope.SpaceID}
+	if scope.Admin {
+		updWhere, updTail = `WHERE plugin_id=? AND deleted_at IS NULL`, []any{p.ID}
+	}
+	updArgs := append([]any{p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.Visibility, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.Status, now}, updTail...)
 	_, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,icon=?,tool_count=?,manifest_json=?,plugin_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
-WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.Visibility, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.Status, now, p.ID, scope.CallerUID, scope.SpaceID)
+`+updWhere, updArgs...)
 	if err != nil {
 		return nil, wrapped("update", err)
 	}
@@ -155,7 +164,11 @@ func (r *Repo) Delete(ctx context.Context, scope Scope, pluginID, operatorID, op
 		return err
 	}
 	now := r.now()
-	res, err := tx.ExecContext(ctx, `UPDATE plugins SET deleted_at=?,updated_at=? WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, now, now, pluginID, scope.CallerUID, scope.SpaceID)
+	delWhere, delTail := `WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, []any{now, now, pluginID, scope.CallerUID, scope.SpaceID}
+	if scope.Admin {
+		delWhere, delTail = `WHERE plugin_id=? AND deleted_at IS NULL`, []any{now, now, pluginID}
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE plugins SET deleted_at=?,updated_at=? `+delWhere, delTail...)
 	if err != nil {
 		return err
 	}
@@ -203,7 +216,12 @@ func lockPluginCategory(ctx context.Context, tx *sql.Tx, categoryID *string, plu
 }
 
 func getOwnedForUpdate(ctx context.Context, tx *sql.Tx, scope Scope, id string) (*model.Plugin, error) {
-	row := tx.QueryRowContext(ctx, `SELECT `+pluginColumns+` FROM plugins p WHERE p.plugin_id=? AND p.owner_uid=? AND p.space_id=? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`, id, scope.CallerUID, scope.SpaceID)
+	var row *sql.Row
+	if scope.Admin {
+		row = tx.QueryRowContext(ctx, `SELECT `+pluginColumns+` FROM plugins p WHERE p.plugin_id=? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`, id)
+	} else {
+		row = tx.QueryRowContext(ctx, `SELECT `+pluginColumns+` FROM plugins p WHERE p.plugin_id=? AND p.owner_uid=? AND p.space_id=? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`, id, scope.CallerUID, scope.SpaceID)
+	}
 	p, err := scanPlugin(row)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
@@ -236,7 +254,11 @@ func lockRelationTargets(ctx context.Context, tx *sql.Tx, scope Scope, sourceTyp
 			return ErrInvalidRelation
 		}
 		seen[key] = struct{}{}
-		row := tx.QueryRowContext(ctx, `SELECT p.plugin_type FROM plugins p WHERE p.plugin_id=? AND p.status=1 AND p.deleted_at IS NULL AND `+visibilitySQL+` FOR UPDATE`, relation.TargetPluginID, scope.SpaceID, scope.CallerUID)
+		relWhere, relArgs := visibilitySQL, []any{relation.TargetPluginID, scope.SpaceID, scope.CallerUID}
+		if scope.Admin {
+			relWhere, relArgs = "1=1", []any{relation.TargetPluginID}
+		}
+		row := tx.QueryRowContext(ctx, `SELECT p.plugin_type FROM plugins p WHERE p.plugin_id=? AND p.status=1 AND p.deleted_at IS NULL AND `+relWhere+` FOR UPDATE`, relArgs...)
 		var targetType model.PluginType
 		if err := row.Scan(&targetType); err != nil {
 			if err == sql.ErrNoRows {

@@ -22,12 +22,19 @@ var (
 	ErrInvalidPlacement = errors.New("invalid plugin placement")
 	// ErrUnsafeConnectorData prevents copying persisted connector secret values.
 	ErrUnsafeConnectorData = errors.New("unsafe connector secret data")
+	// ErrCategoryInUse blocks deleting a category still referenced by live plugins.
+	ErrCategoryInUse = errors.New("plugin category in use")
 )
 
 // Scope is authoritative caller context; it must never come from request data.
 type Scope struct {
 	CallerUID string
 	SpaceID   string
+	// Admin drops the per-Space/owner predicates on read and write so the
+	// marketplace-admin surface can operate on any plugin (system connectors,
+	// global skills) regardless of owner or Space. It is set ONLY by the admin
+	// service; a caller can never influence it.
+	Admin bool
 }
 
 // Repo provides Plugin persistence.
