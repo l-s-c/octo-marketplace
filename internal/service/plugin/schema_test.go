@@ -137,3 +137,41 @@ func quoted(value string) string {
 	encoded, _ := json.Marshal(value)
 	return string(encoded)
 }
+
+// TestCanonicalizeDocumentsScopesSkillRefKeys is the Q0 provenance gate: on the
+// caller write path a legacy skill/ref.json pointer may reference only this
+// Space's managed prefix, so a caller cannot plant a legacy-root or cross-Space
+// pointer that the expand-skills migration would later dereference with service
+// credentials. The trusted backfill variant admits those keys.
+func TestCanonicalizeDocumentsScopesSkillRefKeys(t *testing.T) {
+	mk := func(refBody string) string {
+		return `{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+			`{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# stub"},` +
+			`{"path":"skill/ref.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(refBody) + `}]}`
+	}
+	manifest := manifestFor("Plugin", "skill", "example-plugin", `[]`)
+
+	// Forged legacy-root and cross-Space pointers are rejected on the caller path.
+	for _, ref := range []string{
+		`{"zip_object_key":"skills/victim-id/versions/v1/package.zip"}`,
+		`{"object_key":"experts/victim/skill.md"}`,
+		`{"file_url":"squads/victim/pkg.zip"}`,
+		`{"object_key":"plugins/space-b/attachments/skill-1.md"}`,
+	} {
+		if _, err := CanonicalizeDocuments("Plugin", model.PluginTypeSkill, json.RawMessage(`[]`), manifest, json.RawMessage(mk(ref)), "space-a"); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("forged ref %q accepted on caller path: %v", ref, err)
+		}
+	}
+
+	// An own-Space pointer is allowed on the caller path.
+	ownRef := `{"object_key":"plugins/space-a/attachments/skill-1.md"}`
+	if _, err := CanonicalizeDocuments("Plugin", model.PluginTypeSkill, json.RawMessage(`[]`), manifest, json.RawMessage(mk(ownRef)), "space-a"); err != nil {
+		t.Fatalf("own-Space ref rejected: %v", err)
+	}
+
+	// The trusted backfill variant admits the legacy-root pointer it migrated.
+	legacyRef := `{"zip_object_key":"skills/legit-id/versions/v1/package.zip"}`
+	if _, err := CanonicalizeMigratedDocuments("Plugin", model.PluginTypeSkill, json.RawMessage(`[]`), manifest, json.RawMessage(mk(legacyRef)), "space-a"); err != nil {
+		t.Fatalf("backfill legacy-root ref rejected: %v", err)
+	}
+}

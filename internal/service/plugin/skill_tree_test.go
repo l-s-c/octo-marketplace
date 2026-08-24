@@ -263,6 +263,28 @@ func TestExpandSkillPackageEmptyRefKeepsInlineDoc(t *testing.T) {
 	}
 }
 
+// TestExpandSkillPackagePrefersRefObjectOverStub is the Q1 fix: a snapshot skill
+// inlines only a SKILL.md stub while its real document lives behind the
+// ref.json object_key. Expansion must keep the real document, not the stub.
+func TestExpandSkillPackagePrefersRefObjectOverStub(t *testing.T) {
+	space := "space-a"
+	pkg := json.RawMessage(`{"$schema":"` + packageSchema + `","attachments":[` +
+		`{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# name"},` +
+		`{"path":"skill/ref.json","content_type":"raw","mime_type":"application/json","raw_content":"{\"object_key\":\"skills/x/SKILL.md\"}"}` +
+		`]}`)
+	blobs := &importStorage{objects: map[string][]byte{"skills/x/SKILL.md": []byte("# Real Doc\nfull body")}}
+	svc := New(&fakeStore{}, blobs)
+
+	out, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-q1", pkg)
+	if err != nil || !changed {
+		t.Fatalf("expand err=%v changed=%v", err, changed)
+	}
+	tree := decodeTree(t, mapsFromPackage(t, out))
+	if got := tree["SKILL.md"].RawContent; got != "# Real Doc\nfull body" {
+		t.Fatalf("expansion kept the stub instead of the ref object: %q", got)
+	}
+}
+
 func TestExpandSkillPackageTreeUnchanged(t *testing.T) {
 	space := "space-a"
 	// Already a tree (no legacy pointer): unchanged.

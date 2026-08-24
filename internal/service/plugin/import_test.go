@@ -187,8 +187,49 @@ func TestImportCreatesSkillPluginAndPublishesDefaultPlacement(t *testing.T) {
 	if uploaded != 1 {
 		t.Fatalf("uploaded objects = %#v", blobs.objects)
 	}
-	if detail.Plugin.ID == "" {
-		t.Fatalf("detail = %#v", detail)
+	// Q2: the reserved ID is the persisted ID. It is baked into the SKILL.md
+	// frontmatter and the spilled object namespace, so all three must agree — no
+	// second id minted at Create.
+	if detail.Plugin.ID != "plugin-new" || created.ID != "plugin-new" {
+		t.Fatalf("persisted id = %q / row id = %q, want reserved plugin-new", detail.Plugin.ID, created.ID)
+	}
+	if !strings.Contains(pkg, "id: plugin-new") {
+		t.Fatalf("SKILL.md frontmatter id does not match persisted id: %s", pkg)
+	}
+	namespaced := false
+	for key := range blobs.objects {
+		if strings.HasPrefix(key, "plugins/space-a/attachments/skill-plugin-new-") {
+			namespaced = true
+		}
+	}
+	if !namespaced {
+		t.Fatalf("spilled object not namespaced under persisted id: %#v", blobs.objects)
+	}
+}
+
+// TestImportReuploadVersionConflictLeavesDocumentUnchanged is the atomicity
+// regression: re-importing an existing version string must fail without applying
+// the new document, so the live plugin never drifts under a stale version
+// pointer (pre-flighted before any mutation).
+func TestImportReuploadVersionConflictLeavesDocumentUnchanged(t *testing.T) {
+	store, _, tasks, svc := importFixtures(t)
+	// An existing skill row with version 2.0.0 already published.
+	space := "space-a"
+	existing := &model.Plugin{ID: "skill-1", Name: "Existing", Type: model.PluginTypeSkill, OwnerUID: "user-1", SpaceID: &space, Visibility: model.PluginVisibilitySpace, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{"attachments":[]}`)}
+	store.plugins["skill-1"] = existing
+	store.versions = []model.PluginVersion{{ID: "v-2", Version: "2.0.0"}}
+
+	_, err := svc.Import(context.Background(), testCaller, ImportParams{ParseTaskID: "task-1", PluginID: "skill-1", Version: "2.0.0"})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+	// Pre-flight fires before mutation: the document was never updated and the
+	// parse task was never consumed (still retryable).
+	if store.update != nil {
+		t.Fatalf("document mutated on version conflict: %#v", store.update)
+	}
+	if len(tasks.consumed) != 0 {
+		t.Fatalf("parse task consumed on pre-flight conflict: %#v", tasks.consumed)
 	}
 }
 

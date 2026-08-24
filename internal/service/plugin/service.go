@@ -45,6 +45,7 @@ type Store interface {
 	Update(context.Context, pluginrepo.Scope, pluginrepo.Mutation) (*pluginrepo.RelationSync, error)
 	Delete(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
 	ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, int64, error)
+	VersionExists(context.Context, pluginrepo.Scope, string, string) (bool, error)
 	Publish(context.Context, pluginrepo.Scope, pluginrepo.PublishParams) (*model.PluginVersion, error)
 	CountMemberRelations(context.Context, []string) (map[string]int, error)
 	ListTags(context.Context, pluginrepo.Scope, pluginrepo.TagListFilter) ([]model.TagFilter, error)
@@ -347,6 +348,15 @@ func (s *Service) Detail(ctx context.Context, caller Caller, pluginID string, in
 }
 
 func (s *Service) Create(ctx context.Context, caller Caller, req WriteRequest) (*Detail, error) {
+	return s.createWithID(ctx, caller, req, "")
+}
+
+// createWithID is Create with an optional caller-reserved plugin ID. Import
+// reserves the ID up front — it is baked into the SKILL.md frontmatter and used
+// to namespace the spilled attachment object keys — so the persisted row must
+// carry that same ID rather than minting a second one, or the shipped id, the
+// object namespace, and the row would all disagree.
+func (s *Service) createWithID(ctx context.Context, caller Caller, req WriteRequest, reservedID string) (*Detail, error) {
 	if err := validateCaller(caller); err != nil {
 		return nil, err
 	}
@@ -355,7 +365,10 @@ func (s *Service) Create(ctx context.Context, caller Caller, req WriteRequest) (
 	if err != nil {
 		return nil, err
 	}
-	p.ID = s.id()
+	p.ID = reservedID
+	if p.ID == "" {
+		p.ID = s.id()
+	}
 	for i := range rels {
 		rels[i].SourcePluginID = p.ID
 	}

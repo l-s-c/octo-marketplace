@@ -27,6 +27,13 @@ import (
 // byte-stable (archive/zip requires a MS-DOS time no earlier than 1980).
 var fixedZipModTime = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
 
+// maxSkillZipEntries bounds how many attachments a reconstructed download zip
+// may contain. plugin_json is already capped at 1 MiB (~7-9k minimal storage
+// entries), but an explicit entry cap plus the aggregate-byte cap below closes
+// the single-request amplification where thousands of attachments each stream up
+// to maxAttachmentBytes from object storage.
+const maxSkillZipEntries = 4096
+
 // SkillPackageStream is an authorized skill package emitted lazily: a download
 // filename plus a callback that writes the zip bytes. The zip is either a stored
 // object copied through or reconstructed from the attachment tree, so its total
@@ -215,23 +222,35 @@ func (s *Service) migrationZipKey(p *model.Plugin, ref skillRefDocument) (string
 // with a fixed modification time (stable output). Raw attachments write their
 // inline bytes; storage attachments stream the referenced object, but only when
 // the key sits in this plugin's own managed prefix. Any lingering legacy pointer
-// attachments are skipped.
+// attachments are skipped. Both the entry count (maxSkillZipEntries) and the
+// aggregate reconstructed size (maxArchiveBytes) are bounded so a single
+// download cannot amplify into an unbounded object-storage read.
 func (s *Service) writeSkillZip(ctx context.Context, p *model.Plugin, attachments []attachmentView, w io.Writer) error {
 	sorted := make([]attachmentView, len(attachments))
 	copy(sorted, attachments)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
 
 	zw := zip.NewWriter(w)
+	entries := 0
+	var total int64
 	for _, a := range sorted {
 		if a.Path == "skill/ref.json" || a.Path == "skill/package.zip" {
 			continue
 		}
+		if entries >= maxSkillZipEntries {
+			return ErrTooLarge
+		}
+		entries++
 		header := &zip.FileHeader{Name: a.Path, Method: zip.Deflate, Modified: fixedZipModTime}
 		fw, err := zw.CreateHeader(header)
 		if err != nil {
 			return err
 		}
 		if a.ContentType == "raw" {
+			total += int64(len(a.RawContent))
+			if total > s.maxArchiveBytes {
+				return ErrTooLarge
+			}
 			if _, err := io.WriteString(fw, a.RawContent); err != nil {
 				return err
 			}
@@ -240,14 +259,24 @@ func (s *Service) writeSkillZip(ctx context.Context, p *model.Plugin, attachment
 		if p.SpaceID == nil || !validReferencedObjectKey(a.StorageURI, *p.SpaceID) {
 			continue
 		}
+		// Bound each object read by both the per-attachment cap and the remaining
+		// aggregate budget, so the running total can never exceed maxArchiveBytes.
+		limit := s.maxAttachmentBytes
+		if remaining := s.maxArchiveBytes - total; remaining < limit {
+			limit = remaining
+		}
 		body, err := s.storage.GetObject(ctx, a.StorageURI)
 		if err != nil {
 			return err
 		}
-		_, err = io.CopyN(fw, body, s.maxAttachmentBytes)
+		n, err := io.CopyN(fw, body, limit+1)
 		body.Close()
 		if err != nil && err != io.EOF {
 			return err
+		}
+		total += n
+		if total > s.maxArchiveBytes || n > s.maxAttachmentBytes {
+			return ErrTooLarge
 		}
 	}
 	return zw.Close()

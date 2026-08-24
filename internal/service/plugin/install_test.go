@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
@@ -189,11 +191,20 @@ func TestInstallSanitizesUnknownPlugin(t *testing.T) {
 }
 
 func TestSkillRefPrefersStoragePackageWhenLegacyPointerAbsent(t *testing.T) {
+	space := "space-a"
 	pkg := json.RawMessage(`{"attachments":[{"path":"skill/package.zip","content_type":"storage","storage_uri":"plugins/space-a/attachments/x.zip"}]}`)
 	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
-	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", Package: pkg})
+	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", SpaceID: &space, Package: pkg})
 	if ref.Name != "New Skill" || ref.ZipObjectKey != "plugins/space-a/attachments/x.zip" {
 		t.Fatalf("ref = %#v", ref)
+	}
+
+	// Q5: a package.zip key outside this plugin's own Space prefix is dropped
+	// rather than handed to the provisioner, matching skill/ref.json scoping.
+	forged := json.RawMessage(`{"attachments":[{"path":"skill/package.zip","content_type":"storage","storage_uri":"plugins/space-b/attachments/x.zip"}]}`)
+	ref = svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", SpaceID: &space, Package: forged})
+	if ref.ZipObjectKey != "" {
+		t.Fatalf("cross-Space package.zip key trusted: %#v", ref)
 	}
 }
 
@@ -227,5 +238,24 @@ func TestSkillRefResolvesTreeContentInline(t *testing.T) {
 	}
 	if _, ok := got["assets/asset.bin"]; ok {
 		t.Fatalf("binary should be skipped: %#v", ref.SupportingFiles)
+	}
+}
+
+// TestSkillRefCapsSupportingFilesBeforeFetching is the Q4 install-side bound: a
+// plugin_json packed with far more attachments than the per-skill budget yields
+// at most maxInstallSupportingFiles, and the cap is applied before fetching so
+// the GetObject fan-out stays bounded too.
+func TestSkillRefCapsSupportingFilesBeforeFetching(t *testing.T) {
+	space := "space-a"
+	var b strings.Builder
+	b.WriteString(`{"attachments":[{"path":"SKILL.md","content_type":"raw","raw_content":"# doc"}`)
+	for i := 0; i < maxInstallSupportingFiles+40; i++ {
+		fmt.Fprintf(&b, `,{"path":"f%d.txt","content_type":"raw","raw_content":"x"}`, i)
+	}
+	b.WriteString(`]}`)
+	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
+	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "Big Skill", SpaceID: &space, Package: json.RawMessage(b.String())})
+	if len(ref.SupportingFiles) != maxInstallSupportingFiles {
+		t.Fatalf("supporting files = %d, want capped at %d", len(ref.SupportingFiles), maxInstallSupportingFiles)
 	}
 }

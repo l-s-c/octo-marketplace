@@ -76,23 +76,40 @@ func (s *Service) Import(ctx context.Context, caller Caller, p ImportParams) (*D
 	}
 
 	updateID := ""
+	var oldPlugin *model.Plugin
+	var oldRels []model.PluginRelation
 	if strings.TrimSpace(p.PluginID) != "" {
 		updateID, err = parseStorageID(p.PluginID)
 		if err != nil {
 			return nil, err
 		}
-		old, _, err := s.repo.GetWithRelations(ctx, scope(caller), updateID)
+		old, rels, err := s.repo.GetWithRelations(ctx, scope(caller), updateID)
 		if err != nil {
 			return nil, mapStoreError(err)
 		}
 		if old.OwnerUID != caller.UID || old.Type != model.PluginTypeSkill {
 			return nil, ErrNotFound
 		}
+		oldPlugin, oldRels = old, rels
 	}
 
 	fields, err := resolveImportFields(p, task, caller.IsSystemAdmin)
 	if err != nil {
 		return nil, err
+	}
+
+	// Pre-flight the immutable-version conflict on the re-import path BEFORE any
+	// document mutation or object upload. Re-importing an existing version string
+	// is the ordinary user mistake; catching it here means the publish failure can
+	// no longer leave the live document half-updated under the old version pointer.
+	if updateID != "" {
+		exists, err := s.repo.VersionExists(ctx, scope(caller), updateID, fields.version)
+		if err != nil {
+			return nil, mapStoreError(err)
+		}
+		if exists {
+			return nil, ErrConflict
+		}
 	}
 
 	// Consume first: the optimistic status flip is the duplicate-import lock.
@@ -103,7 +120,7 @@ func (s *Service) Import(ctx context.Context, caller Caller, p ImportParams) (*D
 		}
 		return nil, fmt.Errorf("consume parse task: %w", err)
 	}
-	detail, err := s.importConsumedTask(ctx, caller, task, fields, updateID)
+	detail, err := s.importConsumedTask(ctx, caller, task, fields, updateID, oldPlugin, oldRels)
 	if err != nil {
 		_ = s.parseTasks.ReleaseConsumedParseTask(context.WithoutCancel(ctx), task.ID)
 		return nil, err
@@ -166,7 +183,7 @@ func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdm
 	return f, nil
 }
 
-func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *skillrepo.ParseTaskRow, f *importFields, updateID string) (*Detail, error) {
+func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *skillrepo.ParseTaskRow, f *importFields, updateID string, oldPlugin *model.Plugin, oldRels []model.PluginRelation) (*Detail, error) {
 	zipData, err := s.readVerifiedUpload(ctx, task)
 	if err != nil {
 		return nil, err
@@ -203,7 +220,9 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 	}
 	var detail *Detail
 	if updateID == "" {
-		detail, err = s.Create(ctx, caller, *req)
+		// Persist under the reserved ID so the shipped SKILL.md frontmatter, the
+		// spilled object namespace, and the row all agree on one plugin_id.
+		detail, err = s.createWithID(ctx, caller, *req, pluginID)
 	} else {
 		detail, err = s.Update(ctx, caller, updateID, *req)
 	}
@@ -212,21 +231,63 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 		return nil, err
 	}
 	// Publish rebuilds the single default placement, keeping the Plugin
-	// discoverable in the confirmed marketplace scene; a version-string
-	// conflict (immutable versions) fails the import after release.
+	// discoverable in the confirmed marketplace scene. The ordinary version-string
+	// conflict was pre-flighted before mutation; a conflict here can only come
+	// from a concurrent publish racing between that check and this write.
 	placement := PlacementRequest{PlacementCode: "default", CategoryID: f.categoryID, Visible: true}
 	if _, err := s.Publish(ctx, caller, detail.Plugin.ID, PublishRequest{Version: f.version, Changelog: nil, Placements: []PlacementRequest{placement}}); err != nil {
 		if updateID == "" {
 			// Create rollback: nothing else references the fresh objects yet.
 			_ = s.Delete(ctx, caller, detail.Plugin.ID)
 			s.deleteObjects(ctx, uploaded...)
+			return nil, err
 		}
-		// Update path: the document update already committed and its package
-		// references the uploaded objects — deleting them would leave the live
-		// Plugin pointing at nothing. Only the version snapshot is missing.
+		// Update rollback: restore the prior document so the failed re-publish
+		// leaves no half-applied content change under the old version pointer.
+		// Only on a successful restore are the newly-uploaded objects safe to
+		// drop — buildSkillAttachmentTree recorded solely genuinely-new keys
+		// (Q3), so none are shared with the restored state. If the restore itself
+		// fails the live row still references those objects, so they are kept.
+		if oldPlugin != nil {
+			if _, restoreErr := s.Update(ctx, caller, updateID, restoreWriteRequest(oldPlugin, oldRels)); restoreErr == nil {
+				s.deleteObjects(ctx, uploaded...)
+			}
+		}
 		return nil, err
 	}
 	return detail, nil
+}
+
+// restoreWriteRequest rebuilds the write request that reproduces a plugin's
+// current persisted state, used to undo a committed import update when the
+// follow-up publish fails. The stored manifest/package/tags are already
+// canonical, so feeding them back through Update is idempotent; relations are
+// resubmitted by ID so the sync keeps them rather than deleting them.
+func restoreWriteRequest(old *model.Plugin, rels []model.PluginRelation) WriteRequest {
+	visibility := old.Visibility
+	relations := make([]RelationRequest, 0, len(rels))
+	for _, r := range rels {
+		relations = append(relations, RelationRequest{
+			ID:             r.ID,
+			SourcePluginID: r.SourcePluginID,
+			TargetPluginID: r.TargetPluginID,
+			Type:           r.Type,
+			SortOrder:      r.SortOrder,
+			Data:           r.Data,
+		})
+	}
+	return WriteRequest{
+		Name:       old.Name,
+		Type:       old.Type,
+		CategoryID: old.CategoryID,
+		Tags:       old.Tags,
+		Publisher:  old.Publisher,
+		Icon:       old.Icon,
+		Visibility: visibility,
+		Manifest:   old.Manifest,
+		Package:    old.Package,
+		Relations:  relations,
+	}
 }
 
 func decodeMetadata(raw json.RawMessage) map[string]any {

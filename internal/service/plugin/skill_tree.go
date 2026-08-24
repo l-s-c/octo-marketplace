@@ -125,15 +125,23 @@ func (s *Service) buildSkillAttachmentTree(ctx context.Context, spaceID, pluginI
 				return nil, nil, nil, ErrInvalidRequest
 			}
 			key := deterministicSkillObjectKey(spaceID, pluginID, it.path, it.bytes)
-			contentType := "application/octet-stream"
-			if it.isText {
-				contentType = attachmentMIME(it.path, true)
+			// Content-addressed: an object already at this key holds identical bytes
+			// (a prior import/version or a live row already references it). Skip the
+			// re-upload and — crucially — do NOT record it for rollback. Deleting a
+			// shared content-addressed object on a later failure would strand the
+			// live rows and immutable version snapshots still pointing at it (Q3);
+			// only genuinely-new keys are safe to roll back.
+			if _, statErr := s.storage.StatObject(ctx, key); statErr != nil {
+				contentType := "application/octet-stream"
+				if it.isText {
+					contentType = attachmentMIME(it.path, true)
+				}
+				if putErr := s.storage.PutObject(ctx, key, bytes.NewReader(it.bytes), int64(size), contentType); putErr != nil {
+					s.deleteObjects(ctx, uploaded...)
+					return nil, nil, nil, fmt.Errorf("upload skill file %s: %w", it.path, putErr)
+				}
+				uploaded = append(uploaded, key)
 			}
-			if putErr := s.storage.PutObject(ctx, key, bytes.NewReader(it.bytes), int64(size), contentType); putErr != nil {
-				s.deleteObjects(ctx, uploaded...)
-				return nil, nil, nil, fmt.Errorf("upload skill file %s: %w", it.path, putErr)
-			}
-			uploaded = append(uploaded, key)
 			if it.isText {
 				spilled = append(spilled, it.path)
 			}
@@ -238,12 +246,22 @@ func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID stri
 		}
 		newAtts = atts
 	} else {
-		// No stored zip: collapse to a single SKILL.md attachment.
-		md, ok := rawAttachmentContent(pkg, "SKILL.md")
-		if !ok && migrationArtifactKey(ref.ObjectKey, p.SpaceID) {
+		// No stored zip: collapse to a single SKILL.md attachment. The
+		// authoritative body is the referenced object (snapshot skills inline only
+		// a stub entry file), so prefer ref.ObjectKey and fall back to the inline
+		// SKILL.md — matching SkillMarkdown and the backfill's own layout. Reading
+		// the object here is safe: the caller write path forbids persisting a
+		// legacy-root/cross-Space ref.json (skillRefKeysScoped), so any pointer
+		// migrationArtifactKey trusts was written by the backfill.
+		var md string
+		var ok bool
+		if migrationArtifactKey(ref.ObjectKey, p.SpaceID) {
 			if data, err := s.getObjectBytes(ctx, ref.ObjectKey, s.maxAttachmentBytes); err == nil {
 				md, ok = string(data), true
 			}
+		}
+		if !ok {
+			md, ok = rawAttachmentContent(pkg, "SKILL.md")
 		}
 		if !ok || !utf8.ValidString(md) {
 			return nil, false, ErrNotFound

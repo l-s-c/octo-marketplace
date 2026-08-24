@@ -245,10 +245,13 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin) model
 		ref.FileSize = legacy.FileSize
 		ref.Files = legacy.Files
 	}
-	if _, ok := storageAttachmentKey(p.Package, "skill/package.zip"); ok {
+	if key, ok := storageAttachmentKey(p.Package, "skill/package.zip"); ok {
 		hasRef = true
-		if ref.ZipObjectKey == "" {
-			key, _ := storageAttachmentKey(p.Package, "skill/package.zip")
+		// Same own-Space scoping as skill/ref.json above (Q5): the managed zip key
+		// is honored only inside this plugin's own prefix, matching legacyZipKey /
+		// migrationZipKey, so a forged or cross-Space key is never handed to the
+		// provisioner to fetch.
+		if ref.ZipObjectKey == "" && p.SpaceID != nil && validReferencedObjectKey(key, *p.SpaceID) {
 			ref.ZipObjectKey = key
 		}
 	}
@@ -260,10 +263,20 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin) model
 	if md, ok := rawAttachmentContent(p.Package, "SKILL.md"); ok {
 		ref.Markdown = md
 	}
+	// Cap the supporting files materialized here BEFORE fetching, mirroring the
+	// downstream per-skill fan-out budget (expert.maxSkillFilesPerSkill). Counting
+	// every processed attachment — not just accepted text — bounds both the
+	// GetObject fan-out and the in-memory SupportingFiles slice for a plugin whose
+	// plugin_json packs thousands of storage attachments.
+	processed := 0
 	for _, a := range decodePackageAttachments(p.Package) {
 		if a.Path == "SKILL.md" {
 			continue
 		}
+		if processed >= maxInstallSupportingFiles {
+			break
+		}
+		processed++
 		if a.ContentType == "raw" {
 			if utf8.ValidString(a.RawContent) {
 				ref.SupportingFiles = append(ref.SupportingFiles, model.SkillFile{Path: a.Path, Content: a.RawContent})
@@ -276,6 +289,12 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin) model
 	}
 	return ref
 }
+
+// maxInstallSupportingFiles bounds how many non-SKILL.md attachments one skill
+// contributes to an install, applied before any storage fetch. It mirrors the
+// provisioner's per-skill file budget so this pre-fetch cap can never admit more
+// than the downstream stage would accept anyway.
+const maxInstallSupportingFiles = 50
 
 // readStorageText fetches a storage attachment from this plugin's managed prefix
 // and returns it only when it is valid UTF-8 text (binary attachments are

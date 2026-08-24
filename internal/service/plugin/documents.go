@@ -68,7 +68,25 @@ func CanonicalizeManifest(name string, typ model.PluginType, tags, manifest json
 // storage-key scoping, and size caps. plugin_hash uses the lib formula
 // sha256(canonicalManifest || canonicalPackage); manifest_hash stays a
 // host-only column over the canonical manifest.
+//
+// This is the CALLER write path: a legacy skill/ref.json pointer may reference
+// only this Space's own managed prefix, so a caller cannot persist a legacy-root
+// or cross-Space pointer through upsert.
 func CanonicalizeDocuments(name string, typ model.PluginType, tags, manifest, pkg json.RawMessage, spaceID string) (*CanonicalDocuments, error) {
+	return canonicalizeDocuments(name, typ, tags, manifest, pkg, spaceID, false)
+}
+
+// CanonicalizeMigratedDocuments is the trusted out-of-band variant used only by
+// the deterministic backfill, which legitimately embeds legacy-root skill/ref.json
+// pointers (skills/, experts/, squads/) it migrated from the source catalogs.
+// Because only this variant admits those pointers, every legacy-root pointer in
+// the plugin catalog is provably backfill-written — never planted by a caller —
+// which is what lets the expand-skills migration trust them.
+func CanonicalizeMigratedDocuments(name string, typ model.PluginType, tags, manifest, pkg json.RawMessage, spaceID string) (*CanonicalDocuments, error) {
+	return canonicalizeDocuments(name, typ, tags, manifest, pkg, spaceID, true)
+}
+
+func canonicalizeDocuments(name string, typ model.PluginType, tags, manifest, pkg json.RawMessage, spaceID string, trustLegacyRefs bool) (*CanonicalDocuments, error) {
 	m, t, err := CanonicalizeManifest(name, typ, tags, manifest)
 	if err != nil {
 		return nil, err
@@ -94,6 +112,15 @@ func CanonicalizeDocuments(name string, typ model.PluginType, tags, manifest, pk
 			return nil, ErrInvalidRequest
 		}
 	}
+	// Host rule (caller path only): a legacy skill/ref.json pointer is a raw
+	// attachment whose JSON body carries object keys the lib never inspects. Scope
+	// those keys to this Space's managed prefix so a caller cannot persist a
+	// forged legacy-root/cross-Space pointer for the expand-skills migration to
+	// later dereference with service credentials. The trusted backfill bypasses
+	// this gate (trustLegacyRefs) because it writes those pointers deliberately.
+	if !trustLegacyRefs && !skillRefKeysScoped(p, spaceID) {
+		return nil, ErrInvalidRequest
+	}
 	if err := rejectSecretValues(m, p); err != nil {
 		return nil, err
 	}
@@ -108,6 +135,33 @@ func CanonicalizeDocuments(name string, typ model.PluginType, tags, manifest, pk
 		ManifestHash: hashJSON(m),
 		PluginHash:   hash,
 	}, nil
+}
+
+// skillRefKeysScoped reports whether a package's legacy skill/ref.json pointer
+// (if any) references only this Space's own managed prefix. A package without a
+// skill/ref.json passes trivially. Every object key the pointer can resolve to
+// (object_key, zip_object_key, file_url) must clear trustedArtifactKey; a
+// legacy-root or cross-Space key fails closed. This is the provenance gate on
+// the caller write path — see canonicalizeDocuments.
+func skillRefKeysScoped(pkg json.RawMessage, spaceID string) bool {
+	raw, ok := rawAttachmentContent(pkg, "skill/ref.json")
+	if !ok {
+		return true
+	}
+	var ref skillRefDocument
+	if json.Unmarshal([]byte(raw), &ref) != nil {
+		return false
+	}
+	sp := &spaceID
+	for _, key := range []string{ref.ObjectKey, ref.ZipObjectKey, ref.FileURL} {
+		if key == "" {
+			continue
+		}
+		if !trustedArtifactKey(key, sp) {
+			return false
+		}
+	}
+	return true
 }
 
 // rawAttachmentContent returns the raw_content of one inline package

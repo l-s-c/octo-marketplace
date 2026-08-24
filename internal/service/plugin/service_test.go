@@ -29,6 +29,7 @@ type fakeStore struct {
 	versionID      string
 	publishParams  pluginrepo.PublishParams
 	versions       []model.PluginVersion
+	versionExists  bool
 	versionTotal   int64
 	list           []model.Plugin
 	memberCounts   map[string]int
@@ -93,6 +94,17 @@ func (f *fakeStore) Delete(_ context.Context, s pluginrepo.Scope, id, _, _, _ st
 func (f *fakeStore) ListVersions(_ context.Context, _ pluginrepo.Scope, id string, _, _ int) ([]model.PluginVersion, int64, error) {
 	f.versionID = id
 	return f.versions, f.versionTotal, f.err
+}
+func (f *fakeStore) VersionExists(_ context.Context, _ pluginrepo.Scope, _, version string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	for _, v := range f.versions {
+		if v.Version == version {
+			return true, nil
+		}
+	}
+	return f.versionExists, nil
 }
 func (f *fakeStore) Publish(_ context.Context, _ pluginrepo.Scope, p pluginrepo.PublishParams) (*model.PluginVersion, error) {
 	f.publishParams = p

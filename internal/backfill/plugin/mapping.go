@@ -194,7 +194,7 @@ func canonicalConnectorDocs(outerName, pluginType string, tags []string, draftMa
 	if err != nil {
 		return nil, err
 	}
-	docs, err := pluginsvc.CanonicalizeDocuments(outerName, model.PluginType(pluginType), canonicalTags, manifest, pkg, spaceID)
+	docs, err := pluginsvc.CanonicalizeMigratedDocuments(outerName, model.PluginType(pluginType), canonicalTags, manifest, pkg, spaceID)
 	if err != nil {
 		return nil, fmt.Errorf("package rejected by service validator: %w", err)
 	}

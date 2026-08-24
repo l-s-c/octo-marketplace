@@ -10,6 +10,25 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
+// VersionExists reports whether an immutable version row already exists for the
+// plugin. It authorizes the caller through Get first (same visibility scope as
+// ListVersions), so it never discloses versions of a plugin the caller cannot
+// see. Used to pre-flight an import re-publish before mutating the document.
+func (r *Repo) VersionExists(ctx context.Context, scope Scope, pluginID, version string) (bool, error) {
+	if _, err := r.Get(ctx, scope, pluginID); err != nil {
+		return false, err
+	}
+	var one int
+	err := r.db.QueryRowContext(ctx, `SELECT 1 FROM plugin_versions WHERE plugin_id=? AND version=? LIMIT 1`, pluginID, version).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (r *Repo) ListVersions(ctx context.Context, scope Scope, pluginID string, limit, offset int) ([]model.PluginVersion, int64, error) {
 	if _, err := r.Get(ctx, scope, pluginID); err != nil {
 		return nil, 0, err
