@@ -41,6 +41,7 @@ The command carries three idempotent phases (all support `dry-run` / `apply` / `
 | `plan` (default) | Deterministic historical backfill from the legacy tables (skills / mcp_servers / experts / expert_squads) into the unified plugin tables, emitting the contracts/v1 package layout. | Environments whose unified tables are empty while legacy data exists. |
 | `enrich` | Display-data fill: legacy icons, connector category registration, materialized tool counts, one-time resource-metrics copy onto plugin rows. | After `plan`, or on environments that predate these columns. |
 | `repackage` | Migrates already-stored documents to the contracts/v1 layout: strips embedded manifest.json, collapses expert_team packages to a single AGENTS.md, converts first-generation layouts, renames `expert_team_member` relations to `expert_team_expert` (re-deriving deterministic relation IDs), and recomputes every `plugin_hash` with the octo-plugin-lib formula across plugins, version snapshots, and audit chains. | Environments that ran a pre-contracts/v1 build of the unified plugin backend. |
+| `expand-skills` | **STORAGE-AWARE.** Expands skill packages from the legacy pointer layout (SKILL.md stub + `skill/ref.json`, or a `skill/package.zip` storage attachment) into the flat attachment tree — one attachment per file, text inlined and binary/oversize files re-uploaded to the Space's managed prefix — then recomputes `plugin_hash` across plugins, version snapshots, and audit chains. Unlike every other phase this one fetches each skill's stored zip and re-uploads files, so it **requires object-storage credentials** (`STORAGE_DRIVER` + `OSS_*` / `LOCAL_STORAGE_DIR`, the same variables marketplace-api reads). Empty-pointer snapshot skills collapse to a single inline SKILL.md. Idempotent: already-expanded skills carry no pointer and are skipped. | Environments that ran a pre-attachment-tree build of the unified skill backend (after `repackage`). |
 
 ## Deployment runbook
 
@@ -56,7 +57,10 @@ data phases above do NOT — run them explicitly right after deploying a new bac
 3. Run the data phases against the same database:
    - fresh environment: `plan` apply → verify, then `enrich` apply → verify;
    - previously-deployed environment: `enrich` apply → verify (if pending), then
-     `repackage` apply → verify (`remaining` must be all zeros; exit code 2 otherwise).
+     `repackage` apply → verify, then `expand-skills` apply → verify
+     (each `remaining` must be all zeros; exit code 2 otherwise).
+   `expand-skills` additionally needs object-storage env (`STORAGE_DRIVER` +
+   `OSS_*` / `LOCAL_STORAGE_DIR`); the other phases run DB-only.
 4. Release the matching octo-web build in the same window — old and new frontends read
    different package layouts, so the migration and the frontend must not drift apart.
 

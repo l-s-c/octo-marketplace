@@ -104,6 +104,13 @@ func skillZipFixture(t *testing.T) ([]byte, string) {
 	if _, err := extra.Write([]byte("echo ok")); err != nil {
 		t.Fatal(err)
 	}
+	binary, err := zw.Create("assets/logo.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := binary.Write([]byte{0x00, 0xff, 0xfe, 0x89, 0x50}); err != nil {
+		t.Fatal(err)
+	}
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -157,12 +164,15 @@ func TestImportCreatesSkillPluginAndPublishesDefaultPlacement(t *testing.T) {
 	if !strings.Contains(pkg, `"SKILL.md"`) || !strings.Contains(pkg, "# Uploaded Skill") {
 		t.Fatalf("package missing inline SKILL.md: %s", pkg)
 	}
-	if !strings.Contains(pkg, `"skill/package.zip"`) || !strings.Contains(pkg, `"storage_uri":"plugins/space-a/attachments/`) {
-		t.Fatalf("package missing managed zip attachment: %s", pkg)
+	// Each source file becomes its own attachment: text inline, binary storage.
+	if !strings.Contains(pkg, `"scripts/run.sh"`) || !strings.Contains(pkg, "echo ok") {
+		t.Fatalf("package missing inline text file: %s", pkg)
 	}
-	// skill/ref.json is an escaped JSON string inside the package document.
-	if !strings.Contains(pkg, `\"zip_object_key\":\"plugins/space-a/attachments/zip-obj.zip\"`) || !strings.Contains(pkg, `\"object_key\":\"plugins/space-a/attachments/md-obj.md\"`) {
-		t.Fatalf("package missing ref pointers: %s", pkg)
+	if !strings.Contains(pkg, `"assets/logo.bin"`) || !strings.Contains(pkg, `"content_type":"storage"`) {
+		t.Fatalf("package missing binary storage attachment: %s", pkg)
+	}
+	if strings.Contains(pkg, "skill/ref.json") || strings.Contains(pkg, "skill/package.zip") {
+		t.Fatalf("legacy ref.json/package.zip must be gone: %s", pkg)
 	}
 	if store.publishParams.Version != "2.0.0" || len(store.publishParams.Placements) != 1 || store.publishParams.Placements[0].PlacementCode != "default" {
 		t.Fatalf("publish = %#v", store.publishParams)
@@ -173,7 +183,8 @@ func TestImportCreatesSkillPluginAndPublishesDefaultPlacement(t *testing.T) {
 			uploaded++
 		}
 	}
-	if uploaded != 2 {
+	// Only the binary spills to object storage; the two text files stay inline.
+	if uploaded != 1 {
 		t.Fatalf("uploaded objects = %#v", blobs.objects)
 	}
 	if detail.Plugin.ID == "" {
@@ -221,7 +232,8 @@ func TestImportReleasesTaskAndDeletesObjectsWhenCreateFails(t *testing.T) {
 			deleted++
 		}
 	}
-	if deleted != 2 {
+	// The one spilled binary object is cleaned up when the create fails.
+	if deleted != 1 {
 		t.Fatalf("deletes = %#v", blobs.deletes)
 	}
 }
@@ -262,9 +274,15 @@ func TestSkillMarkdownPrefersRefObjectAndFallsBackToInline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer download.Body.Close()
-	if download.Path != "pack.zip" || download.Size != int64(len("zip-bytes")) || download.ContentType != "application/zip" {
+	if download.FileName != "pack.zip" {
 		t.Fatalf("download = %#v", download)
+	}
+	var zipBuf bytes.Buffer
+	if err := download.Write(&zipBuf); err != nil {
+		t.Fatal(err)
+	}
+	if zipBuf.String() != "zip-bytes" {
+		t.Fatalf("streamed legacy zip = %q", zipBuf.String())
 	}
 }
 
@@ -318,7 +336,13 @@ func TestSkillArtifactsServeOwnSpaceManagedPointers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	download.Body.Close()
+	var ownZip bytes.Buffer
+	if err := download.Write(&ownZip); err != nil {
+		t.Fatal(err)
+	}
+	if ownZip.String() != "own-zip" {
+		t.Fatalf("streamed own zip = %q", ownZip.String())
+	}
 }
 
 func TestResolveIconOnlyPresignsIconNamespaces(t *testing.T) {

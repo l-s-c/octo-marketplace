@@ -27,7 +27,7 @@ type fakeService struct {
 	detail           *pluginsvc.Detail
 	includeRelations bool
 	err              error
-	download         *pluginsvc.AttachmentDownload
+	download         *pluginsvc.SkillPackageStream
 	versions         []model.PluginVersion
 	versionTotal     int64
 	installID        string
@@ -83,7 +83,7 @@ func (f *fakeService) SkillMarkdown(_ context.Context, c pluginsvc.Caller, _ str
 	f.caller = c
 	return f.skillMarkdown, f.err
 }
-func (f *fakeService) OpenSkillPackage(_ context.Context, c pluginsvc.Caller, _ string) (*pluginsvc.AttachmentDownload, error) {
+func (f *fakeService) OpenSkillPackage(_ context.Context, c pluginsvc.Caller, _ string) (*pluginsvc.SkillPackageStream, error) {
 	f.caller = c
 	return f.download, f.err
 }

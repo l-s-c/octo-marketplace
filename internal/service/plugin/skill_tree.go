@@ -1,0 +1,282 @@
+package plugin
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"path"
+	"sort"
+	"strings"
+	"unicode/utf8"
+
+	libplugin "codex.mlamp.cn/dmwork/octo-plugin-lib/plugin"
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/service/parse"
+)
+
+const (
+	// skillInlineMaxBytes caps a single file that may be inlined as a raw
+	// attachment; larger text files spill to object storage like binaries.
+	skillInlineMaxBytes = 128 * 1024
+	// skillInlineBudgetBytes bounds the total raw_content bytes inlined into
+	// plugin_json, leaving headroom under maxJSONBytes for JSON structure and
+	// escaping so the canonicalized package stays within the 1 MiB column cap.
+	skillInlineBudgetBytes = 512 * 1024
+)
+
+// extMIME maps a lowercase file extension to a fixed media type. It is
+// deliberately a static table rather than mime.TypeByExtension so the produced
+// attachment bytes are byte-identical across machines (the OS mime database
+// varies), which the deterministic backfill/expand invariant depends on.
+var extMIME = map[string]string{
+	".md": "text/markdown", ".markdown": "text/markdown",
+	".json": "application/json", ".txt": "text/plain",
+	".sh": "text/x-shellscript", ".py": "text/x-python",
+	".js": "text/javascript", ".ts": "text/plain", ".tsx": "text/plain",
+	".yaml": "text/yaml", ".yml": "text/yaml", ".toml": "text/plain",
+	".html": "text/html", ".css": "text/css", ".csv": "text/csv",
+	".xml": "text/xml", ".sql": "text/plain", ".env": "text/plain",
+	".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+	".gif": "image/gif", ".svg": "image/svg+xml", ".webp": "image/webp",
+	".pdf": "application/pdf", ".zip": "application/zip",
+}
+
+// buildSkillAttachmentTree turns a skill package zip into a flat attachment tree
+// — one attachment per file, rooted at the SKILL.md directory. UTF-8 text small
+// enough to fit the inline budget becomes a raw attachment; binary or oversized
+// files are uploaded to this Space's managed prefix under a deterministic key
+// and referenced as storage attachments. When skillMDOverride is non-nil it
+// replaces the SKILL.md bytes (import injects rewritten frontmatter); otherwise
+// the zip's own SKILL.md is used. Returns the attachment maps (ready for the
+// package $schema wrapper), the storage keys written (for rollback), and the
+// rooted paths that spilled to storage (for logging). On any error every object
+// written so far is deleted.
+func (s *Service) buildSkillAttachmentTree(ctx context.Context, spaceID, pluginID string, zipData, skillMDOverride []byte) (attachments []map[string]any, uploaded, spilled []string, err error) {
+	if !safeObjectSegment.MatchString(spaceID) {
+		return nil, nil, nil, ErrInvalidRequest
+	}
+	entries, code, _ := parse.ExtractSkillTree(bytes.NewReader(zipData), int64(len(zipData)), s.maxArchiveBytes, s.maxAttachmentBytes, 0)
+	if code != "" {
+		return nil, nil, nil, ErrInvalidRequest
+	}
+
+	// Root every path at the SKILL.md directory so the package is anchored at a
+	// top-level "SKILL.md" regardless of a wrapping folder in the source zip.
+	skillDir := "."
+	for _, e := range entries {
+		if parse.IsSkillMDCandidate(e.Path) {
+			skillDir = path.Dir(e.Path)
+			break
+		}
+	}
+	type item struct {
+		path   string
+		bytes  []byte
+		isText bool
+		isMD   bool
+	}
+	items := make([]item, 0, len(entries))
+	for _, e := range entries {
+		isMD := parse.IsSkillMDCandidate(e.Path)
+		rp := rootRelative(e.Path, skillDir)
+		if isMD {
+			rp = "SKILL.md"
+		}
+		norm, ok := normalizedArchivePath(rp)
+		if !ok {
+			return nil, nil, nil, ErrInvalidRequest
+		}
+		b := e.Bytes
+		if isMD && skillMDOverride != nil {
+			b = skillMDOverride
+		}
+		if isMD && !utf8.Valid(b) {
+			// SKILL.md is the required text entry; a non-UTF-8 SKILL.md cannot be
+			// a valid raw attachment and would fail the contract downstream.
+			return nil, nil, nil, ErrInvalidRequest
+		}
+		items = append(items, item{path: norm, bytes: b, isText: e.IsText || isMD, isMD: isMD})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].path < items[j].path })
+
+	budget := 0
+	for _, it := range items {
+		size := len(it.bytes)
+		// SKILL.md always inlines; other text inlines while within per-file and
+		// aggregate budgets. Everything else is a storage attachment.
+		inline := it.isText && (it.isMD || (size <= skillInlineMaxBytes && budget+size <= skillInlineBudgetBytes))
+		sum := sha256.Sum256(it.bytes)
+		att := map[string]any{
+			"path":         it.path,
+			"mime_type":    attachmentMIME(it.path, it.isText),
+			"content_size": int64(size),
+			"content_hash": "sha256:" + hex.EncodeToString(sum[:]),
+		}
+		if inline {
+			att["content_type"] = "raw"
+			att["raw_content"] = string(it.bytes)
+			budget += size
+		} else {
+			key := deterministicSkillObjectKey(spaceID, pluginID, it.path)
+			contentType := "application/octet-stream"
+			if it.isText {
+				contentType = attachmentMIME(it.path, true)
+			}
+			if putErr := s.storage.PutObject(ctx, key, bytes.NewReader(it.bytes), int64(size), contentType); putErr != nil {
+				s.deleteObjects(ctx, uploaded...)
+				return nil, nil, nil, fmt.Errorf("upload skill file %s: %w", it.path, putErr)
+			}
+			uploaded = append(uploaded, key)
+			if it.isText {
+				spilled = append(spilled, it.path)
+			}
+			att["content_type"] = "storage"
+			att["storage_uri"] = key
+		}
+		attachments = append(attachments, att)
+	}
+	return attachments, uploaded, spilled, nil
+}
+
+// rootRelative strips the SKILL.md directory prefix from an entry path so the
+// tree is anchored at the SKILL.md's directory. Entries outside that directory
+// (unusual) keep their path.
+func rootRelative(p, dir string) string {
+	if dir == "." || dir == "" {
+		return p
+	}
+	return strings.TrimPrefix(p, dir+"/")
+}
+
+// deterministicSkillObjectKey derives a stable managed-prefix object key for a
+// skill file from (pluginID, rootedPath). Re-running import/expand for the same
+// plugin overwrites the same key, keeping plugin_json bytes reproducible.
+func deterministicSkillObjectKey(spaceID, pluginID, rootedPath string) string {
+	sum := sha256.Sum256([]byte(pluginID + "\x00" + rootedPath))
+	name := "skill-" + pluginID + "-" + hex.EncodeToString(sum[:])[:16]
+	if ext := path.Ext(rootedPath); ext != "" && len(ext) <= 12 && safeExtension(ext) {
+		name += strings.ToLower(ext)
+	}
+	return approvedAttachmentPrefix(spaceID) + name
+}
+
+// safeExtension reports whether ext (leading dot included) is limited to the
+// characters allowed in a managed object key so the derived key stays valid.
+func safeExtension(ext string) bool {
+	for _, r := range ext {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// attachmentMIME returns a fixed, whitespace-free media type for an attachment
+// path (SKILL.md is always text/markdown), defaulting by text/binary class.
+func attachmentMIME(p string, isText bool) string {
+	if strings.EqualFold(path.Base(p), "SKILL.md") {
+		return "text/markdown"
+	}
+	if mediaType, ok := extMIME[strings.ToLower(path.Ext(p))]; ok {
+		return mediaType
+	}
+	if isText {
+		return "text/plain"
+	}
+	return "application/octet-stream"
+}
+
+// ExpandSkillPackage migrates one legacy skill package (SKILL.md stub +
+// skill/ref.json pointer, or skill/package.zip storage attachment) into the flat
+// attachment tree, returning the canonical package bytes and whether it changed.
+// A package already in tree form (no legacy pointer) is returned unchanged. When
+// the legacy pointer resolves to a stored zip the tree is rebuilt from it (binary
+// files re-uploaded to this Space's managed prefix under deterministic keys);
+// when no zip exists the package collapses to a single SKILL.md attachment
+// (inline content, or the trusted object_key document). Exported so the
+// storage-aware expand-skills migration can reuse the live write-path logic.
+func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID string, pkg json.RawMessage) (json.RawMessage, bool, error) {
+	attachments := decodePackageAttachments(pkg)
+	legacy := false
+	for _, a := range attachments {
+		if a.Path == "skill/ref.json" || a.Path == "skill/package.zip" {
+			legacy = true
+			break
+		}
+	}
+	if !legacy {
+		return pkg, false, nil
+	}
+	p := &model.Plugin{Name: pluginID, SpaceID: &spaceID, Package: pkg}
+	ref := s.skillRef(p)
+
+	var newAtts []map[string]any
+	if key, ok := s.legacyZipKey(p, ref); ok {
+		// Rebuilding a tree from the zip re-uploads binary files, which requires a
+		// valid managed-prefix Space; the no-zip collapse below does not.
+		if !safeObjectSegment.MatchString(spaceID) {
+			return nil, false, ErrInvalidRequest
+		}
+		zipData, err := s.getObjectBytes(ctx, key, s.maxArchiveBytes)
+		if err != nil {
+			return nil, false, err
+		}
+		atts, _, _, err := s.buildSkillAttachmentTree(ctx, spaceID, pluginID, zipData, nil)
+		if err != nil {
+			return nil, false, err
+		}
+		newAtts = atts
+	} else {
+		// No stored zip: collapse to a single SKILL.md attachment.
+		md, ok := rawAttachmentContent(pkg, "SKILL.md")
+		if !ok && trustedArtifactKey(ref.ObjectKey, p.SpaceID) {
+			if data, err := s.getObjectBytes(ctx, ref.ObjectKey, s.maxAttachmentBytes); err == nil {
+				md, ok = string(data), true
+			}
+		}
+		if !ok || !utf8.ValidString(md) {
+			return nil, false, ErrNotFound
+		}
+		sum := sha256.Sum256([]byte(md))
+		newAtts = []map[string]any{{
+			"path":         "SKILL.md",
+			"content_type": "raw",
+			"mime_type":    "text/markdown",
+			"raw_content":  md,
+			"content_size": int64(len(md)),
+			"content_hash": "sha256:" + hex.EncodeToString(sum[:]),
+		}}
+	}
+	raw, err := json.Marshal(map[string]any{"$schema": packageSchema, "attachments": newAtts})
+	if err != nil {
+		return nil, false, err
+	}
+	canonical, err := libplugin.CanonicalJSON(raw)
+	if err != nil {
+		return nil, false, err
+	}
+	return canonical, true, nil
+}
+
+// getObjectBytes reads an object fully, capped at limit bytes.
+func (s *Service) getObjectBytes(ctx context.Context, key string, limit int64) ([]byte, error) {
+	body, err := s.storage.GetObject(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, ErrTooLarge
+	}
+	return data, nil
+}

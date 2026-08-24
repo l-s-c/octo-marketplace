@@ -1,7 +1,6 @@
 package plugin
 
 import (
-	"io"
 	"path"
 	"regexp"
 	"strings"
@@ -14,14 +13,6 @@ const (
 )
 
 var safeObjectSegment = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-
-// AttachmentDownload is an authorized object stream and its package metadata.
-type AttachmentDownload struct {
-	Body        io.ReadCloser
-	Path        string
-	ContentType string
-	Size        int64
-}
 
 func approvedAttachmentPrefix(spaceID string) string {
 	return "plugins/" + spaceID + "/attachments/"

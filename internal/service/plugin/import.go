@@ -1,10 +1,10 @@
 // Plugin import turns a completed legacy upload-parse task into a skill
-// Plugin: the rewritten package zip and SKILL.md land in the managed
-// plugins/<space>/attachments/ prefix (so archive and attachment reads work
-// natively), SKILL.md is inlined as a raw attachment for detail pages, and a
-// skill/ref.json attachment carries the object pointers the Loop install path
-// consumes. Everything funnels through Create/Update, so validation, secret
-// scanning, hashing, and audit are identical to a direct upsert.
+// Plugin: the rewritten package zip is expanded into a flat attachment tree
+// (one attachment per file — text inlined as raw, binary/oversize files
+// uploaded to the managed plugins/<space>/attachments/ prefix under
+// deterministic keys and referenced as storage attachments). Everything funnels
+// through Create/Update, so validation, secret scanning, hashing, and audit are
+// identical to a direct upsert.
 
 package plugin
 
@@ -189,20 +189,16 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 	if !safeObjectSegment.MatchString(caller.SpaceID) {
 		return nil, ErrInvalidRequest
 	}
-	prefix := approvedAttachmentPrefix(caller.SpaceID)
-	zipKey := prefix + s.id() + ".zip"
-	mdKey := prefix + s.id() + ".md"
-	if err := s.storage.PutObject(ctx, zipKey, bytes.NewReader(rewritten.ZipBytes), rewritten.ZipSize, "application/zip"); err != nil {
-		return nil, fmt.Errorf("upload skill package: %w", err)
-	}
-	if err := s.storage.PutObject(ctx, mdKey, bytes.NewReader(rewritten.SkillMD), int64(len(rewritten.SkillMD)), "text/markdown; charset=utf-8"); err != nil {
-		s.deleteObjects(ctx, zipKey)
-		return nil, fmt.Errorf("upload skill markdown: %w", err)
-	}
-
-	req, err := buildImportWriteRequest(f, rewritten, zipKey, mdKey, task.FileName)
+	// Expand the rewritten package into a flat attachment tree: text inline as
+	// raw, binary/oversize spilled to the managed prefix under deterministic
+	// keys. The rewritten SKILL.md (frontmatter injected) is the entry document.
+	attachments, uploaded, _, err := s.buildSkillAttachmentTree(ctx, caller.SpaceID, pluginID, rewritten.ZipBytes, rewritten.SkillMD)
 	if err != nil {
-		s.deleteObjects(ctx, zipKey, mdKey)
+		return nil, err
+	}
+	req, err := buildImportWriteRequest(f, attachments)
+	if err != nil {
+		s.deleteObjects(ctx, uploaded...)
 		return nil, err
 	}
 	var detail *Detail
@@ -212,7 +208,7 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 		detail, err = s.Update(ctx, caller, updateID, *req)
 	}
 	if err != nil {
-		s.deleteObjects(ctx, zipKey, mdKey)
+		s.deleteObjects(ctx, uploaded...)
 		return nil, err
 	}
 	// Publish rebuilds the single default placement, keeping the Plugin
@@ -223,11 +219,11 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 		if updateID == "" {
 			// Create rollback: nothing else references the fresh objects yet.
 			_ = s.Delete(ctx, caller, detail.Plugin.ID)
-			s.deleteObjects(ctx, zipKey, mdKey)
+			s.deleteObjects(ctx, uploaded...)
 		}
 		// Update path: the document update already committed and its package
-		// references zipKey/mdKey — deleting them would leave the live Plugin
-		// pointing at nothing. Only the version snapshot is missing.
+		// references the uploaded objects — deleting them would leave the live
+		// Plugin pointing at nothing. Only the version snapshot is missing.
 		return nil, err
 	}
 	return detail, nil
@@ -277,7 +273,7 @@ func (s *Service) readVerifiedUpload(ctx context.Context, task *skillrepo.ParseT
 	return data, nil
 }
 
-func buildImportWriteRequest(f *importFields, rewritten *skillsvc.RewriteResult, zipKey, mdKey, uploadedName string) (*WriteRequest, error) {
+func buildImportWriteRequest(f *importFields, attachments []map[string]any) (*WriteRequest, error) {
 	tagsJSON, err := canonicalJSONValue(nonNilTags(f.tags))
 	if err != nil {
 		return nil, ErrInvalidRequest
@@ -298,27 +294,6 @@ func buildImportWriteRequest(f *importFields, rewritten *skillsvc.RewriteResult,
 	manifest, canonicalTags, err := CanonicalizeManifest(f.pluginName, model.PluginTypeSkill, tagsJSON, draftRaw)
 	if err != nil {
 		return nil, err
-	}
-	fileName := strings.TrimSpace(uploadedName)
-	if fileName == "" {
-		fileName = "skill.zip"
-	}
-	ref := map[string]any{
-		"file_name":      fileName,
-		"file_sha256":    rewritten.ZipSHA256,
-		"file_size":      rewritten.ZipSize,
-		"files":          []string{},
-		"object_key":     mdKey,
-		"zip_object_key": zipKey,
-	}
-	refRaw, err := json.Marshal(ref)
-	if err != nil {
-		return nil, ErrInvalidRequest
-	}
-	attachments := []map[string]any{
-		{"path": "SKILL.md", "content_type": "raw", "mime_type": "text/markdown", "raw_content": string(rewritten.SkillMD)},
-		{"path": "skill/ref.json", "content_type": "raw", "mime_type": "application/json", "raw_content": string(refRaw)},
-		{"path": "skill/package.zip", "content_type": "storage", "mime_type": "application/zip", "storage_uri": zipKey, "content_size": rewritten.ZipSize, "content_hash": "sha256:" + rewritten.ZipSHA256},
 	}
 	pkg, err := json.Marshal(map[string]any{"$schema": packageSchema, "attachments": attachments})
 	if err != nil {

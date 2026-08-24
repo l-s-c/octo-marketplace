@@ -273,7 +273,7 @@ func (s *Service) provisionAgent(ctx context.Context, in InstallInput, spec agen
 func (s *Service) installSkills(ctx context.Context, skills []model.SkillRef, summary string, in InstallInput, budget *fileBudget, seenSkillNames map[string]struct{}) ([]string, error) {
 	created := make([]string, 0, len(skills))
 	for i := range skills {
-		if skills[i].ObjectKey == "" {
+		if skills[i].ObjectKey == "" && skills[i].Markdown == "" {
 			continue
 		}
 		// Fleet's UNIQUE(workspace_id, name) constraint is byte-exact. Deduplicate
@@ -313,12 +313,26 @@ func (s *Service) installSkills(ctx context.Context, skills []model.SkillRef, su
 }
 
 // attachSkillFiles pushes the packaged skill's supporting files (everything but
-// SKILL.md) onto the freshly-created fleet skill via UpsertSkillFile. It reads
-// the stored .zip, extracting UTF-8 text files only (binaries are skipped by
-// ExtractSkillFiles). A missing/unreadable/unparseable package is treated as
-// "no extra files" — the SKILL.md-backed skill is already usable — so it does
-// NOT fail the install; only an actual fleet PUT error does.
+// SKILL.md) onto the freshly-created fleet skill via UpsertSkillFile. Tree-shaped
+// skills carry their supporting text files inline (resolved by the plugin path)
+// and are pushed directly; legacy pointer skills read the stored .zip, extracting
+// UTF-8 text files only (binaries are skipped by ExtractSkillFiles). A missing or
+// unreadable package is treated as "no extra files" — the SKILL.md-backed skill is
+// already usable — so it does NOT fail the install; only an actual fleet PUT error
+// or the aggregate budget does.
 func (s *Service) attachSkillFiles(ctx context.Context, in InstallInput, ref model.SkillRef, skillID string, budget *fileBudget) error {
+	// Tree shape: the plugin path already resolved the supporting text files.
+	if ref.Markdown != "" {
+		for _, f := range ref.SupportingFiles {
+			if !budget.take() {
+				return ErrInstallTooLarge
+			}
+			if err := s.fleet.UpsertSkillFile(ctx, in.Token, in.SpaceID, in.WorkspaceID, skillID, f.Path, f.Content); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	if ref.ZipObjectKey == "" || s.store == nil {
 		return nil
 	}

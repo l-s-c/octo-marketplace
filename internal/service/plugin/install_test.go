@@ -161,8 +161,42 @@ func TestInstallSanitizesUnknownPlugin(t *testing.T) {
 
 func TestSkillRefPrefersStoragePackageWhenLegacyPointerAbsent(t *testing.T) {
 	pkg := json.RawMessage(`{"attachments":[{"path":"skill/package.zip","content_type":"storage","storage_uri":"plugins/space-a/attachments/x.zip"}]}`)
-	ref := skillRefFromPlugin(&model.Plugin{Name: "New Skill", Package: pkg})
+	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
+	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", Package: pkg})
 	if ref.Name != "New Skill" || ref.ZipObjectKey != "plugins/space-a/attachments/x.zip" {
 		t.Fatalf("ref = %#v", ref)
+	}
+}
+
+func TestSkillRefResolvesTreeContentInline(t *testing.T) {
+	space := "space-a"
+	binKey := "plugins/space-a/attachments/asset.bin"
+	txtKey := "plugins/space-a/attachments/big.txt"
+	pkg := json.RawMessage(`{"attachments":[` +
+		`{"path":"SKILL.md","content_type":"raw","raw_content":"# doc"},` +
+		`{"path":"scripts/run.sh","content_type":"raw","raw_content":"echo hi"},` +
+		`{"path":"references/big.txt","content_type":"storage","storage_uri":"` + txtKey + `"},` +
+		`{"path":"assets/asset.bin","content_type":"storage","storage_uri":"` + binKey + `"}` +
+		`]}`)
+	blobs := &importStorage{objects: map[string][]byte{
+		txtKey: []byte("spilled text"),
+		binKey: {0x00, 0xff, 0xfe},
+	}}
+	svc := New(&fakeStore{}, blobs)
+	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "Tree Skill", SpaceID: &space, Package: pkg})
+
+	if ref.Markdown != "# doc" || ref.ObjectKey != "" || ref.ZipObjectKey != "" {
+		t.Fatalf("tree ref should resolve inline: %#v", ref)
+	}
+	got := map[string]string{}
+	for _, f := range ref.SupportingFiles {
+		got[f.Path] = f.Content
+	}
+	// Inline text + storage text are included; the binary is skipped.
+	if got["scripts/run.sh"] != "echo hi" || got["references/big.txt"] != "spilled text" {
+		t.Fatalf("supporting files = %#v", ref.SupportingFiles)
+	}
+	if _, ok := got["assets/asset.bin"]; ok {
+		t.Fatalf("binary should be skipped: %#v", ref.SupportingFiles)
 	}
 }

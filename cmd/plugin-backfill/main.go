@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,14 +11,18 @@ import (
 	"syscall"
 
 	backfill "github.com/Mininglamp-OSS/octo-marketplace/internal/backfill/plugin"
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/config"
 	marketdb "github.com/Mininglamp-OSS/octo-marketplace/internal/db"
+	pluginrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/plugin"
+	pluginsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/plugin"
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/storage"
 )
 
 func main() {
 	var mode, dsn, phase string
 	var runMigrations bool
 	flag.StringVar(&mode, "mode", "dry-run", "dry-run, apply, or verify")
-	flag.StringVar(&phase, "phase", "plan", "plan (deterministic historical backfill), enrich (icons, connector categories, tool counts, metrics migration), or repackage (migrate stored packages to the plugin-lib layout)")
+	flag.StringVar(&phase, "phase", "plan", "plan (deterministic historical backfill), enrich (icons, connector categories, tool counts, metrics migration), repackage (migrate stored packages to the plugin-lib layout), or expand-skills (STORAGE-AWARE: expand skill packages into the per-file attachment tree; needs object-storage credentials)")
 	flag.StringVar(&dsn, "dsn", os.Getenv("MYSQL_DSN"), "MySQL DSN (default MYSQL_DSN)")
 	flag.BoolVar(&runMigrations, "migrate", false, "run the embedded schema migrations (same set marketplace-api applies at startup) before the data phase; lets the standalone image prepare a database ahead of the service deploy")
 	flag.Parse()
@@ -74,8 +79,56 @@ func main() {
 		if mode == "verify" && report.Remaining != (backfill.RepackageCounts{}) {
 			os.Exit(2)
 		}
+	case "expand-skills":
+		expander := newSkillExpander(db)
+		report, e := backfill.New(db).ExpandSkills(ctx, backfill.Options{Mode: backfill.Mode(mode)}, expander)
+		if e != nil {
+			fatal(e)
+		}
+		if e = enc.Encode(report); e != nil {
+			fatal(e)
+		}
+		if mode == "verify" && report.Remaining != (backfill.ExpandCounts{}) {
+			os.Exit(2)
+		}
 	default:
 		fatal(fmt.Errorf("invalid phase %q", phase))
 	}
+}
+
+// newSkillExpander builds a storage-backed plugin service whose ExpandSkillPackage
+// the expand-skills phase drives. Storage config comes from the same environment
+// the marketplace-api reads, so this phase requires object-storage credentials
+// (STORAGE_DRIVER + OSS_*/LOCAL_STORAGE_DIR) that the pure DB phases do not.
+func newSkillExpander(db *sql.DB) *pluginsvc.Service {
+	cfg := config.Load()
+	var store storage.Storage
+	switch cfg.StorageDriver {
+	case "local":
+		store = storage.NewLocal(cfg.LocalStorageDir, cfg.PublicBaseURL)
+	case "oss":
+		oss, err := storage.NewOSS(storage.OSSConfig{
+			Endpoint:        cfg.OSSEndpoint,
+			Bucket:          cfg.OSSBucket,
+			AccessKey:       cfg.OSSAccessKey,
+			SecretKey:       cfg.OSSSecretKey,
+			Region:          cfg.OSSRegion,
+			KeyPrefix:       cfg.OSSKeyPrefix,
+			PathStyle:       cfg.OSSPathStyle,
+			PublicEndpoint:  cfg.OSSPublicEndpoint,
+			PublicPathStyle: cfg.OSSPublicPathStyle,
+			SigningHost:     cfg.OSSSigningHost,
+			DownloadSigned:  cfg.OSSDownloadSigned,
+		})
+		if err != nil {
+			fatal(fmt.Errorf("storage driver oss: %w", err))
+		}
+		store = oss
+	default:
+		fatal(fmt.Errorf("unsupported STORAGE_DRIVER %q for expand-skills", cfg.StorageDriver))
+	}
+	svc := pluginsvc.New(pluginrepo.New(db), store)
+	svc.SetArtifactLimits(int64(cfg.MaxUploadMB) << 20)
+	return svc
 }
 func fatal(e error) { fmt.Fprintln(os.Stderr, "plugin-backfill:", e); os.Exit(1) }

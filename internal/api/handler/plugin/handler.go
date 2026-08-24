@@ -36,7 +36,7 @@ type Service interface {
 	Install(context.Context, pluginsvc.Caller, string, pluginsvc.InstallParams) (*pluginsvc.InstallOutcome, error)
 	Import(context.Context, pluginsvc.Caller, pluginsvc.ImportParams) (*pluginsvc.Detail, error)
 	SkillMarkdown(context.Context, pluginsvc.Caller, string) (string, error)
-	OpenSkillPackage(context.Context, pluginsvc.Caller, string) (*pluginsvc.AttachmentDownload, error)
+	OpenSkillPackage(context.Context, pluginsvc.Caller, string) (*pluginsvc.SkillPackageStream, error)
 	ListTags(context.Context, pluginsvc.Caller, pluginsvc.TagListParams) ([]model.TagFilter, error)
 }
 

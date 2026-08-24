@@ -2,9 +2,7 @@ package plugin
 
 import (
 	"errors"
-	"io"
 	"net/http"
-	"strconv"
 
 	apiresponse "github.com/Mininglamp-OSS/octo-marketplace/internal/api/response"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/logging"
@@ -141,13 +139,13 @@ func (h *Handler) DownloadSkillPackage(c *gin.Context) {
 		writeServiceError(c, err, "plugin.skill_download")
 		return
 	}
-	defer result.Body.Close()
-	c.Header("Content-Type", result.ContentType)
-	c.Header("Content-Disposition", contentDisposition(result.Path))
-	c.Header("Content-Length", strconv.FormatInt(result.Size, 10))
+	// The zip is reconstructed or copied lazily; its total size is unknown, so
+	// stream without a Content-Length rather than buffering to measure it.
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", contentDisposition(result.FileName))
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Status(http.StatusOK)
-	if _, err := io.CopyN(c.Writer, result.Body, result.Size); err != nil {
+	if err := result.Write(c.Writer); err != nil {
 		logging.Error("plugin_skill_package_stream_failed", logging.ErrorField(err))
 	}
 }

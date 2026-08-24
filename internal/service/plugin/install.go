@@ -10,9 +10,11 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/logging"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
@@ -192,9 +194,11 @@ func (s *Service) squadMemberFromPlugin(ctx context.Context, caller Caller, rel 
 	}, nil
 }
 
-// skillRefsFromRelations loads every expert_skill relation target and maps its
-// skill/ref.json attachment onto the legacy SkillRef the provisioner reads
-// (SKILL.md object key + packaged zip key in the shared storage).
+// skillRefsFromRelations loads every expert_skill relation target and resolves
+// it into a SkillRef the provisioner installs. Tree-shaped skills resolve their
+// SKILL.md and supporting text files inline (fetching any storage-backed text
+// through this service's object store); legacy pointer skills keep their
+// object/zip keys for the provisioner to fetch.
 func (s *Service) skillRefsFromRelations(ctx context.Context, caller Caller, relations []model.PluginRelation) ([]model.SkillRef, error) {
 	skillRelations := relationsOfType(relations, "expert_skill")
 	refs := make([]model.SkillRef, 0, len(skillRelations))
@@ -203,12 +207,18 @@ func (s *Service) skillRefsFromRelations(ctx context.Context, caller Caller, rel
 		if err != nil {
 			return nil, err
 		}
-		refs = append(refs, skillRefFromPlugin(target.Plugin))
+		refs = append(refs, s.skillRefFromPlugin(ctx, target.Plugin))
 	}
 	return refs, nil
 }
 
-func skillRefFromPlugin(p *model.Plugin) model.SkillRef {
+// skillRefFromPlugin resolves a skill Plugin into a SkillRef. A tree-shaped
+// package (no skill/ref.json pointer) resolves its SKILL.md and supporting text
+// files inline; a legacy package keeps its object/zip pointers for the
+// provisioner. Storage-backed supporting files are fetched here and included
+// only when they are UTF-8 text (binaries are skipped, mirroring the fleet
+// text-only skill-file store).
+func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin) model.SkillRef {
 	ref := model.SkillRef{Name: p.Name}
 	var legacy struct {
 		FileName     string   `json:"file_name"`
@@ -217,21 +227,64 @@ func skillRefFromPlugin(p *model.Plugin) model.SkillRef {
 		ObjectKey    string   `json:"object_key"`
 		ZipObjectKey string   `json:"zip_object_key"`
 	}
+	hasRef := false
 	if raw, ok := rawAttachmentContent(p.Package, "skill/ref.json"); ok && json.Unmarshal([]byte(raw), &legacy) == nil {
+		hasRef = true
 		ref.ObjectKey = legacy.ObjectKey
 		ref.ZipObjectKey = legacy.ZipObjectKey
 		ref.FileName = legacy.FileName
 		ref.FileSize = legacy.FileSize
 		ref.Files = legacy.Files
 	}
-	// Import-created skills store the packaged zip as a storage attachment in
-	// the managed prefix; prefer it when the legacy pointer is absent.
-	if ref.ZipObjectKey == "" {
-		if key, ok := storageAttachmentKey(p.Package, "skill/package.zip"); ok {
+	if _, ok := storageAttachmentKey(p.Package, "skill/package.zip"); ok {
+		hasRef = true
+		if ref.ZipObjectKey == "" {
+			key, _ := storageAttachmentKey(p.Package, "skill/package.zip")
 			ref.ZipObjectKey = key
 		}
 	}
+	// Legacy pointer shape: leave object/zip keys for the provisioner to fetch.
+	if hasRef {
+		return ref
+	}
+	// Tree shape: resolve SKILL.md and supporting text files from the attachments.
+	if md, ok := rawAttachmentContent(p.Package, "SKILL.md"); ok {
+		ref.Markdown = md
+	}
+	for _, a := range decodePackageAttachments(p.Package) {
+		if a.Path == "SKILL.md" {
+			continue
+		}
+		if a.ContentType == "raw" {
+			if utf8.ValidString(a.RawContent) {
+				ref.SupportingFiles = append(ref.SupportingFiles, model.SkillFile{Path: a.Path, Content: a.RawContent})
+			}
+			continue
+		}
+		if content, ok := s.readStorageText(ctx, p.SpaceID, a.StorageURI); ok {
+			ref.SupportingFiles = append(ref.SupportingFiles, model.SkillFile{Path: a.Path, Content: content})
+		}
+	}
 	return ref
+}
+
+// readStorageText fetches a storage attachment from this plugin's managed prefix
+// and returns it only when it is valid UTF-8 text (binary attachments are
+// skipped, matching the text-only downstream skill-file store).
+func (s *Service) readStorageText(ctx context.Context, spaceID *string, key string) (string, bool) {
+	if s.storage == nil || spaceID == nil || !validReferencedObjectKey(key, *spaceID) {
+		return "", false
+	}
+	body, err := s.storage.GetObject(ctx, key)
+	if err != nil {
+		return "", false
+	}
+	defer body.Close()
+	data, err := io.ReadAll(io.LimitReader(body, s.maxAttachmentBytes))
+	if err != nil || !utf8.Valid(data) {
+		return "", false
+	}
+	return string(data), true
 }
 
 func relationsOfType(relations []model.PluginRelation, relationType string) []model.PluginRelation {

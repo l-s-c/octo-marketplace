@@ -170,6 +170,80 @@ func ExtractSkillFiles(zipPath string, maxZipSize int64, maxFiles int) (files []
 	return files, skipped, "", ""
 }
 
+// SkillEntry is one regular-file entry of a skill package, carrying its raw
+// bytes and whether those bytes are valid UTF-8 text. Unlike ExtractSkillFiles
+// it retains binary entries (IsText=false) so a caller can materialize them as
+// object-storage attachments rather than silently dropping them.
+type SkillEntry struct {
+	Path   string
+	Bytes  []byte
+	IsText bool
+}
+
+// ExtractSkillTree reads every regular-file entry (SKILL.md included) from a zip
+// provided as an in-memory reader, applying the same zip-slip/symlink/bomb guards
+// and total-size cap as ExtractZip, and enforcing the single-SKILL.md rule. Each
+// entry is read whole (up to maxFileSize) so binary files survive with their
+// bytes; exceeding maxFileSize or maxFiles is a hard error rather than a silent
+// skip, so no file vanishes from the reconstructed package. Directories are
+// excluded. Entry paths are returned verbatim (archive order); the caller is
+// responsible for rooting them at the SKILL.md directory.
+func ExtractSkillTree(ra io.ReaderAt, size, maxZipSize, maxFileSize int64, maxFiles int) ([]SkillEntry, string, string) {
+	if size > maxZipSize {
+		return nil, "FILE_TOO_LARGE", fmt.Sprintf("zip file exceeds %dMB limit", maxZipSize/(1024*1024))
+	}
+	zr, err := zip.NewReader(ra, size)
+	if err != nil {
+		return nil, "INVALID_ZIP", "cannot open zip file: " + err.Error()
+	}
+	if maxFiles <= 0 {
+		maxFiles = maxManifestFiles
+	}
+
+	var totalSize uint64
+	skillMDCount := 0
+	entries := make([]SkillEntry, 0, len(zr.File))
+	for _, f := range zr.File {
+		if errCode, errMsg := validateZipEntry(f); errCode != "" {
+			return nil, errCode, errMsg
+		}
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		totalSize += f.UncompressedSize64
+		if totalSize > uint64(maxExtractedSize) {
+			return nil, "FILE_TOO_LARGE", fmt.Sprintf("extracted content exceeds %dMB limit", maxExtractedSize/(1024*1024))
+		}
+		if isSkillMDCandidate(f.Name) {
+			skillMDCount++
+		}
+		if len(entries) >= maxFiles {
+			return nil, "TOO_MANY_FILES", fmt.Sprintf("package exceeds %d files", maxFiles)
+		}
+		if int64(f.UncompressedSize64) > maxFileSize {
+			return nil, "FILE_TOO_LARGE", fmt.Sprintf("entry %s exceeds %dMB limit", f.Name, maxFileSize/(1024*1024))
+		}
+		data, err := readZipFileLimited(f, maxFileSize)
+		if err != nil {
+			return nil, "INVALID_ZIP", "cannot read entry " + f.Name + ": " + err.Error()
+		}
+		entries = append(entries, SkillEntry{Path: f.Name, Bytes: data, IsText: utf8.Valid(data)})
+	}
+
+	if skillMDCount == 0 {
+		return nil, "SKILL_MD_NOT_FOUND", "zip 包中未找到 SKILL.md 文件"
+	}
+	if skillMDCount > 1 {
+		return nil, "MULTIPLE_SKILL_MD", "zip 包中包含多个 SKILL.md 文件，请只保留一个"
+	}
+	return entries, "", ""
+}
+
+// IsSkillMDCandidate reports whether an entry path is the package's SKILL.md
+// (root or exactly one directory deep). Exported for callers that reconstruct
+// the attachment tree and must root it at the SKILL.md directory.
+func IsSkillMDCandidate(name string) bool { return isSkillMDCandidate(name) }
+
 // isSkillMDCandidate reports whether name is a SKILL.md (case-insensitive) at
 // the root or exactly one directory deep — the only two locations the catalog
 // recognises. Backslashes are normalised to "/" first so a Windows-style path

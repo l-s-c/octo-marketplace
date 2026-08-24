@@ -8,17 +8,52 @@
 package plugin
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"path"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/logging"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 	"go.uber.org/zap"
 )
+
+// fixedZipModTime stamps every reconstructed zip entry so download output is
+// byte-stable (archive/zip requires a MS-DOS time no earlier than 1980).
+var fixedZipModTime = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// SkillPackageStream is an authorized skill package emitted lazily: a download
+// filename plus a callback that writes the zip bytes. The zip is either a stored
+// object copied through or reconstructed from the attachment tree, so its total
+// size is unknown ahead of time (no Content-Length).
+type SkillPackageStream struct {
+	FileName string
+	Write    func(io.Writer) error
+}
+
+// attachmentView is the read projection of one package attachment.
+type attachmentView struct {
+	Path        string `json:"path"`
+	ContentType string `json:"content_type"`
+	RawContent  string `json:"raw_content"`
+	StorageURI  string `json:"storage_uri"`
+}
+
+// decodePackageAttachments returns every attachment of a package document.
+func decodePackageAttachments(pkg json.RawMessage) []attachmentView {
+	var doc struct {
+		Attachments []attachmentView `json:"attachments"`
+	}
+	if json.Unmarshal(pkg, &doc) != nil {
+		return nil
+	}
+	return doc.Attachments
+}
 
 // skillRefDocument is the persisted skill/ref.json shape shared by backfill
 // and import. Top-level backfilled skills carry the legacy zip pointer in
@@ -83,11 +118,13 @@ func (s *Service) SkillMarkdown(ctx context.Context, caller Caller, pluginID str
 	return "", ErrNotFound
 }
 
-// OpenSkillPackage streams the packaged zip of a visible skill Plugin: the
-// managed skill/package.zip storage attachment when present, else the legacy
-// zip object referenced by skill/ref.json. A successful open bumps the plugin
-// download counter (best-effort).
-func (s *Service) OpenSkillPackage(ctx context.Context, caller Caller, pluginID string) (*AttachmentDownload, error) {
+// OpenSkillPackage resolves an authorized, lazily-streamed skill package. New
+// and expanded skills carry a flat attachment tree with no stored zip, so the
+// package is reconstructed on the fly from the attachments; legacy backfilled
+// skills that still carry a skill/ref.json or skill/package.zip pointer stream
+// the stored object instead. Either way the total size is unknown in advance,
+// so the caller streams SkillPackageStream.Write without a Content-Length.
+func (s *Service) OpenSkillPackage(ctx context.Context, caller Caller, pluginID string) (*SkillPackageStream, error) {
 	if validateCaller(caller) != nil || s.storage == nil {
 		return nil, ErrInvalidRequest
 	}
@@ -103,34 +140,104 @@ func (s *Service) OpenSkillPackage(ctx context.Context, caller Caller, pluginID 
 		return nil, ErrInvalidRequest
 	}
 	ref := s.skillRef(p)
-	key := ""
-	if managed, ok := storageAttachmentKey(p.Package, "skill/package.zip"); ok && p.SpaceID != nil && validReferencedObjectKey(managed, *p.SpaceID) {
-		key = managed
-	} else if trustedArtifactKey(ref.zipKey(), p.SpaceID) {
-		// Legacy pointer written by the deterministic backfill; the trusted-key
-		// rule keeps caller-forged pointers into other Spaces out.
-		key = ref.zipKey()
+
+	// Legacy shape: a resolvable stored zip pointer streams the stored object.
+	if key, ok := s.legacyZipKey(p, ref); ok {
+		info, err := s.storage.StatObject(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("stat skill package: %w", err)
+		}
+		if info.Size <= 0 || info.Size > s.maxArchiveBytes {
+			return nil, ErrTooLarge
+		}
+		fileName := strings.TrimSpace(ref.FileName)
+		if fileName == "" {
+			fileName = p.Name + ".zip"
+		}
+		s.trackDownload(ctx, p.ID)
+		return &SkillPackageStream{FileName: fileName, Write: func(w io.Writer) error {
+			body, err := s.storage.GetObject(ctx, key)
+			if err != nil {
+				return err
+			}
+			defer body.Close()
+			_, err = io.CopyN(w, body, info.Size)
+			return err
+		}}, nil
 	}
-	if key == "" {
+
+	// Tree shape: reconstruct the zip from the attachment tree. Legacy skills
+	// whose only attachments are unresolved pointers have no real files to serve.
+	attachments := decodePackageAttachments(p.Package)
+	real := 0
+	for _, a := range attachments {
+		if a.Path != "skill/ref.json" && a.Path != "skill/package.zip" {
+			real++
+		}
+	}
+	if real == 0 {
 		return nil, ErrNotFound
 	}
-	info, err := s.storage.StatObject(ctx, key)
-	if err != nil {
-		return nil, fmt.Errorf("stat skill package: %w", err)
-	}
-	if info.Size <= 0 || info.Size > s.maxArchiveBytes {
-		return nil, ErrTooLarge
-	}
-	body, err := s.storage.GetObject(ctx, key)
-	if err != nil {
-		return nil, fmt.Errorf("open skill package: %w", err)
-	}
-	fileName := strings.TrimSpace(ref.FileName)
-	if fileName == "" {
-		fileName = p.Name + ".zip"
-	}
 	s.trackDownload(ctx, p.ID)
-	return &AttachmentDownload{Body: body, Path: fileName, ContentType: "application/zip", Size: info.Size}, nil
+	return &SkillPackageStream{FileName: p.Name + ".zip", Write: func(w io.Writer) error {
+		return s.writeSkillZip(ctx, p, attachments, w)
+	}}, nil
+}
+
+// legacyZipKey returns the stored-zip object key for a pre-expansion skill: the
+// managed skill/package.zip storage attachment, else the legacy pointer in
+// skill/ref.json. Expanded and freshly imported skills carry neither and fall
+// through to attachment-tree reconstruction.
+func (s *Service) legacyZipKey(p *model.Plugin, ref skillRefDocument) (string, bool) {
+	if managed, ok := storageAttachmentKey(p.Package, "skill/package.zip"); ok && p.SpaceID != nil && validReferencedObjectKey(managed, *p.SpaceID) {
+		return managed, true
+	}
+	if trustedArtifactKey(ref.zipKey(), p.SpaceID) {
+		return ref.zipKey(), true
+	}
+	return "", false
+}
+
+// writeSkillZip assembles a zip from the attachment tree in sorted-path order
+// with a fixed modification time (stable output). Raw attachments write their
+// inline bytes; storage attachments stream the referenced object, but only when
+// the key sits in this plugin's own managed prefix. Any lingering legacy pointer
+// attachments are skipped.
+func (s *Service) writeSkillZip(ctx context.Context, p *model.Plugin, attachments []attachmentView, w io.Writer) error {
+	sorted := make([]attachmentView, len(attachments))
+	copy(sorted, attachments)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
+
+	zw := zip.NewWriter(w)
+	for _, a := range sorted {
+		if a.Path == "skill/ref.json" || a.Path == "skill/package.zip" {
+			continue
+		}
+		header := &zip.FileHeader{Name: a.Path, Method: zip.Deflate, Modified: fixedZipModTime}
+		fw, err := zw.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		if a.ContentType == "raw" {
+			if _, err := io.WriteString(fw, a.RawContent); err != nil {
+				return err
+			}
+			continue
+		}
+		if p.SpaceID == nil || !validReferencedObjectKey(a.StorageURI, *p.SpaceID) {
+			continue
+		}
+		body, err := s.storage.GetObject(ctx, a.StorageURI)
+		if err != nil {
+			return err
+		}
+		_, err = io.CopyN(fw, body, s.maxAttachmentBytes)
+		body.Close()
+		if err != nil && err != io.EOF {
+			return err
+		}
+	}
+	return zw.Close()
 }
 
 // trackDownload bumps the plugin download counter; best-effort and detached
