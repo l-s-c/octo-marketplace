@@ -308,3 +308,34 @@ func TestSkillRefsFromRelationsFailsLoudOnExhaustedTargets(t *testing.T) {
 		t.Fatalf("err = %v, want ErrTooLarge (loud truncation)", err)
 	}
 }
+
+// TestSquadFromPluginStopsWhenMemberDocsExhaustByteBudget is the P1-2
+// regression: a team whose members carry instruction bytes but NO expert_skill
+// relations must still charge those documents against the shared install byte
+// budget and fail loudly once it is exhausted. Before the fix the member loop
+// gated on budget.targets only, so a member-only team charged budget.bytes into
+// deep-negative territory (the only byte gate lived in the skill loop, which
+// never runs for a skill-less member) and returned success while retaining every
+// member document past the aggregate ceiling.
+func TestSquadFromPluginStopsWhenMemberDocsExhaustByteBudget(t *testing.T) {
+	space := "space-a"
+	big := strings.Repeat("x", 300) // per-member AGENTS.md bytes
+	plugins := map[string]*model.Plugin{
+		"team-1": {ID: "team-1", Name: "Team", Type: model.PluginTypeExpertTeam, OwnerUID: "user-1", SpaceID: &space, Manifest: json.RawMessage(`{"description":"t"}`), Package: packageWith(rawAtt("AGENTS.md", "# Team"))},
+	}
+	rels := make([]model.PluginRelation, 0, 5)
+	for i := 0; i < 5; i++ {
+		id := fmt.Sprintf("m%d", i)
+		// Each member carries an instruction but no expert_skill relation of its own.
+		plugins[id] = &model.Plugin{ID: id, Name: id, Type: model.PluginTypeExpert, OwnerUID: "user-1", SpaceID: &space, Manifest: json.RawMessage(`{}`), Package: packageWith(rawAtt("AGENTS.md", big))}
+		rels = append(rels, model.PluginRelation{ID: "r" + id, SourcePluginID: "team-1", TargetPluginID: id, TargetPluginType: model.PluginTypeExpert, Type: "expert_team_expert", SortOrder: i, Status: 1, Data: json.RawMessage(`{"member_key":"` + id + `","role":"member"}`)})
+	}
+	f := &fakeStore{plugins: plugins, relations: map[string][]model.PluginRelation{"team-1": rels}}
+	detail := &Detail{Plugin: plugins["team-1"], Relations: rels}
+	// Budget below the sum of member instructions (5 × 300 = 1500), so the
+	// fan-out must trip the byte gate before all members are materialized.
+	budget := &installBudget{bytes: 700, targets: maxInstallRelationTargets}
+	if _, err := fixedService(f).squadFromPlugin(context.Background(), testCaller, detail, budget); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("member-only team over byte budget err = %v, want ErrTooLarge", err)
+	}
+}

@@ -95,6 +95,17 @@ func writeInstallError(c *gin.Context, err error) {
 		validation(c, "body")
 		return
 	}
+	// ErrTooLarge on the install path is a relation-topology cap
+	// (maxInstallRelationTargets), not an upload: the shared catalog mapping's
+	// "reduce the attachment size" hint would send the caller looking in the
+	// wrong place, so surface the real cause here (P2-2).
+	if errors.Is(err, pluginsvc.ErrTooLarge) {
+		apiresponse.Fail(c, http.StatusRequestEntityTooLarge, errcode.FileTooLarge,
+			"install expands to too many skills or team members",
+			map[string]any{"resource": "plugin"},
+			"Reduce the number of skills or team members in this plugin and try again.")
+		return
+	}
 	writeServiceError(c, err, "plugin.install")
 }
 

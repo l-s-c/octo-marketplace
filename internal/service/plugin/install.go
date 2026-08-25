@@ -153,10 +153,14 @@ func (s *Service) squadFromPlugin(ctx context.Context, caller Caller, detail *De
 	members := make([]model.SquadMember, 0, len(memberRelations))
 	for _, rel := range memberRelations {
 		// Loud structural truncation (see skillRefsFromRelations): refuse rather
-		// than install a squad missing members once the install-wide target
-		// budget is spent — a silently leaderless/partial team is worse than an
-		// error the caller can act on.
-		if budget.targets <= 0 {
+		// than install a squad missing members once the install-wide target OR
+		// byte budget is spent — a silently leaderless/partial team is worse than
+		// an error the caller can act on. The byte gate sits here, before
+		// s.Detail, so a team whose members carry large instructions but no skills
+		// (the skill loop that used to be the only byte gate never runs for them)
+		// still stops the fan-out instead of charging budget.bytes into deep
+		// negative territory and retaining every member's document (P1-2).
+		if budget.targets <= 0 || budget.bytes <= 0 {
 			return nil, ErrTooLarge
 		}
 		budget.targets--
