@@ -141,6 +141,7 @@ type importFields struct {
 	visibility  model.PluginVisibility
 	categoryID  *string
 	icon        string
+	changelog   *string
 }
 
 func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdmin bool) (*importFields, error) {
@@ -148,6 +149,7 @@ func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdm
 		pluginName:  strings.TrimSpace(p.PluginName),
 		name:        strings.TrimSpace(p.Name),
 		description: strings.TrimSpace(p.Description),
+		changelog:   trimOptional(p.Changelog),
 		version:     strings.TrimSpace(p.Version),
 		visibility:  p.Visibility,
 		categoryID:  trimOptional(p.CategoryID),
@@ -243,7 +245,7 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 	// conflict was pre-flighted before mutation; a conflict here can only come
 	// from a concurrent publish racing between that check and this write.
 	placement := PlacementRequest{PlacementCode: "default", CategoryID: f.categoryID, Visible: true}
-	if _, err := s.Publish(ctx, caller, detail.Plugin.ID, PublishRequest{Version: f.version, Changelog: nil, Placements: []PlacementRequest{placement}}); err != nil {
+	if _, err := s.Publish(ctx, caller, detail.Plugin.ID, PublishRequest{Version: f.version, Changelog: f.changelog, Placements: []PlacementRequest{placement}}); err != nil {
 		if updateID == "" {
 			// Create rollback: nothing else references the fresh objects yet.
 			_ = s.Delete(ctx, caller, detail.Plugin.ID)

@@ -32,6 +32,12 @@ type Scope struct {
 	// marketplace-admin surface can operate on any plugin (system connectors,
 	// global skills) regardless of owner or Space. It is set ONLY by the admin
 	// service; a caller can never influence it.
+	//
+	// The admin service itself was split out of this PR (see the
+	// `feat/unified-plugin-admin-backend` branch and the brief's divergence
+	// record); no production caller sets Admin here yet. The mechanism is
+	// retained deliberately so that follow-up lands without re-plumbing the
+	// repository. The redaction read path (visibleTargetIDs) also branches on it.
 	Admin bool
 }
 
