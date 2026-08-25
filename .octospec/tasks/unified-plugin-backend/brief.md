@@ -130,10 +130,12 @@ PR #67; this note is the decision record the brief's earlier wording predates.
   text inline as `raw`, binary/oversize as own-Space `storage`), replacing the
   earlier `skill/ref.json` + `skill/package.zip` shape. Legacy pointers survive
   only on backfilled rows until `expand-skills` rewrites them.
-- **Admin surface added.** `/api/v1/admin/plugins*` (+ read-only
-  `/admin/plugin_categories`) manages system connectors and global
-  skills/experts cross-Space, behind the admin role gate. Admin category WRITES
-  are intentionally withheld until the placement model supports runtime creation.
+- **Admin surface split to a follow-up.** An `/api/v1/admin/plugins*` surface
+  was prototyped but removed from this PR (commit `84620e9`) and moved to the
+  `feat/unified-plugin-admin-backend` branch, to land as a focused follow-up
+  once the placement lifecycle for admin-created rows is designed. This PR ships
+  the tenant catalog + migration only; the repo-layer `Scope.Admin` mechanism is
+  retained for that follow-up.
 - **IDs are opaque UUIDv7**, not the ULID/prefixed forms some older docs
   describe; see `internal/service/plugin/id_boundary.go` and the banner in
   `docs/api/plugin-id.md`.
