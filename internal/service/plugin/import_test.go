@@ -233,6 +233,24 @@ func TestImportReuploadVersionConflictLeavesDocumentUnchanged(t *testing.T) {
 	}
 }
 
+// TestImportReuploadPreservesIconWhenOmitted is the B2 regression: a
+// package-only re-upload omits the icon, and the full-replace import must keep
+// the existing row's icon rather than clearing it.
+func TestImportReuploadPreservesIconWhenOmitted(t *testing.T) {
+	store, _, _, svc := importFixtures(t)
+	space := "space-a"
+	existing := &model.Plugin{ID: "skill-1", Name: "Existing", Type: model.PluginTypeSkill, OwnerUID: "user-1", SpaceID: &space, Visibility: model.PluginVisibilitySpace, Icon: "icons/kept.png", Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{"attachments":[]}`)}
+	store.plugins["skill-1"] = existing
+
+	// Re-upload to a fresh version with NO icon in the request.
+	if _, err := svc.Import(context.Background(), testCaller, ImportParams{ParseTaskID: "task-1", PluginID: "skill-1", Version: "3.0.0"}); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if store.update == nil || store.update.Icon != "icons/kept.png" {
+		t.Fatalf("icon not preserved on package-only re-upload: %#v", store.update)
+	}
+}
+
 func TestImportRejectsForeignUnfinishedOrReboundTasks(t *testing.T) {
 	for _, mutate := range []func(*skillrepo.ParseTaskRow){
 		func(task *skillrepo.ParseTaskRow) { task.OwnerID = "attacker" },

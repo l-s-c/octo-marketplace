@@ -186,6 +186,12 @@ func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdm
 }
 
 func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *skillrepo.ParseTaskRow, f *importFields, updateID string, oldPlugin *model.Plugin, oldRels []model.PluginRelation) (*Detail, error) {
+	// A package-only re-upload omits the icon (nothing to change); the import is
+	// a full replace, so fall back to the existing row's icon rather than
+	// clearing it. A fresh create has no prior icon, so this only affects updates.
+	if updateID != "" && f.icon == "" && oldPlugin != nil {
+		f.icon = oldPlugin.Icon
+	}
 	zipData, err := s.readVerifiedUpload(ctx, task)
 	if err != nil {
 		return nil, err
