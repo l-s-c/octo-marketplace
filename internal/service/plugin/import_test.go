@@ -43,7 +43,7 @@ func (s *importStorage) GetObject(_ context.Context, key string) (io.ReadCloser,
 func (s *importStorage) StatObject(_ context.Context, key string) (storage.ObjectInfo, error) {
 	value, ok := s.objects[key]
 	if !ok {
-		return storage.ObjectInfo{}, errors.New("missing object " + key)
+		return storage.ObjectInfo{}, storage.ErrObjectNotFound
 	}
 	return storage.ObjectInfo{Size: int64(len(value))}, nil
 }

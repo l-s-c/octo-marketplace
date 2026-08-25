@@ -93,6 +93,33 @@ func TestAdminUpdateRejectsTypeChange(t *testing.T) {
 	}
 }
 
+// TestAdminUpdatePreservesTenantVisibilityAndOwner is the A1 regression: an
+// admin metadata edit of a tenant-private, cross-Space row must NOT force-flip
+// it public, and must leave the owner provenance intact.
+func TestAdminUpdatePreservesTenantVisibilityAndOwner(t *testing.T) {
+	tenantSpace := "tenant-space"
+	existing := &model.Plugin{ID: "skill-1", Name: "Tenant Skill", Type: model.PluginTypeSkill, OwnerUID: "tenant-user", SpaceID: &tenantSpace, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	f := &fakeStore{plugins: map[string]*model.Plugin{"skill-1": existing}}
+	// The request even tries to set a public visibility; it must be ignored.
+	req := adminSkillRequest()
+	req.Visibility = model.PluginVisibilityPublic
+	if _, err := fixedService(f).AdminUpdate(context.Background(), adminCaller, "skill-1", req); err != nil {
+		t.Fatalf("AdminUpdate: %v", err)
+	}
+	if f.update == nil {
+		t.Fatal("no update issued")
+	}
+	if f.update.Visibility != model.PluginVisibilityPrivate {
+		t.Fatalf("visibility force-flipped to %q; tenant-private row would be published", f.update.Visibility)
+	}
+	if f.update.SpaceID == nil || *f.update.SpaceID != tenantSpace {
+		t.Fatalf("space not preserved: %v", f.update.SpaceID)
+	}
+	if f.update.OwnerUID != "tenant-user" {
+		t.Fatalf("owner rewritten to %q, want tenant-user", f.update.OwnerUID)
+	}
+}
+
 // TestAdminDeleteUsesAdminScope confirms delete runs cross-Space with no owner
 // predicate (Scope.Admin), unlike the owner-gated Delete.
 func TestAdminDeleteUsesAdminScope(t *testing.T) {

@@ -237,6 +237,12 @@ func (s *Service) writeSkillZip(ctx context.Context, p *model.Plugin, attachment
 		if a.Path == "skill/ref.json" || a.Path == "skill/package.zip" {
 			continue
 		}
+		// Validate a storage key BEFORE creating the entry (Q11'): an untrusted or
+		// cross-Space reference is skipped entirely rather than left as a silently
+		// empty file in the delivered archive.
+		if a.ContentType != "raw" && (p.SpaceID == nil || !validReferencedObjectKey(a.StorageURI, *p.SpaceID)) {
+			continue
+		}
 		if entries >= maxSkillZipEntries {
 			return ErrTooLarge
 		}
@@ -254,9 +260,6 @@ func (s *Service) writeSkillZip(ctx context.Context, p *model.Plugin, attachment
 			if _, err := io.WriteString(fw, a.RawContent); err != nil {
 				return err
 			}
-			continue
-		}
-		if p.SpaceID == nil || !validReferencedObjectKey(a.StorageURI, *p.SpaceID) {
 			continue
 		}
 		// Bound each object read by both the per-attachment cap and the remaining

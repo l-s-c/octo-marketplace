@@ -113,3 +113,27 @@ without adding shortened-field compatibility aliases. In particular:
   immutability tests, and migration tests pass.
 - `make openapi-check`, `make openapi-diff`, and `go test ./...` pass, or any
   pre-existing/tooling blocker is documented precisely.
+
+## Implementation divergences (recorded post-implementation)
+
+These deliberate deviations from the pre-implementation brief above ship in
+PR #67; this note is the decision record the brief's earlier wording predates.
+
+- **Routes are public, not `/internal/`.** Handlers mount `/api/v1/plugins/*`
+  (not `/internal/plugins/*`). The `duplicate`, `audit_logs`, `archive`, and
+  `attachment/upload|download` actions are out of scope for this PR; only
+  `publish` shipped.
+- **No `manifest.json` package attachment.** The package carries the outer
+  Manifest via the row's `manifest_json` column, not a duplicated in-package
+  attachment; the backfill/repackage path strips any such attachment.
+- **Skill package layout is a flat attachment tree** (one attachment per file;
+  text inline as `raw`, binary/oversize as own-Space `storage`), replacing the
+  earlier `skill/ref.json` + `skill/package.zip` shape. Legacy pointers survive
+  only on backfilled rows until `expand-skills` rewrites them.
+- **Admin surface added.** `/api/v1/admin/plugins*` (+ read-only
+  `/admin/plugin_categories`) manages system connectors and global
+  skills/experts cross-Space, behind the admin role gate. Admin category WRITES
+  are intentionally withheld until the placement model supports runtime creation.
+- **IDs are opaque UUIDv7**, not the ULID/prefixed forms some older docs
+  describe; see `internal/service/plugin/id_boundary.go` and the banner in
+  `docs/api/plugin-id.md`.

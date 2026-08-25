@@ -171,11 +171,6 @@ components:
           type: array
           uniqueItems: false
       type: object
-    github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_adminCategoryResponse:
-      properties:
-        data:
-          $ref: '#/components/schemas/internal_api_handler_plugin.adminCategoryResponse'
-      type: object
     github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_deleteResponse:
       properties:
         data:
@@ -1486,25 +1481,6 @@ components:
         resource_id:
           type: string
         resource_type:
-          type: string
-      type: object
-    internal_api_handler_plugin.adminCategoryRequest:
-      properties:
-        icon_key:
-          type: string
-        name:
-          type: string
-        plugin_types:
-          items:
-            $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginType'
-          type: array
-          uniqueItems: false
-        sort_order:
-          type: integer
-      type: object
-    internal_api_handler_plugin.adminCategoryResponse:
-      properties:
-        category_id:
           type: string
       type: object
     internal_api_handler_plugin.categoryResponse:
@@ -3136,100 +3112,27 @@ paths:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-array_internal_api_handler_plugin_categoryResponse'
           description: OK
-      security:
-      - Bearer: []
-      summary: List plugin categories (admin)
-      tags:
-      - admin_plugin
-    post:
-      description: Mint a category for the unified plugin taxonomy, scoped to one
-        or more plugin types. Admin only.
-      operationId: admin_plugin_category.create
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/internal_api_handler_plugin.adminCategoryRequest'
-                description: Category
-                summary: body
-        description: Category
-        required: true
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_adminCategoryResponse'
-          description: OK
-      security:
-      - Bearer: []
-      summary: Create plugin category (admin)
-      tags:
-      - admin_plugin
-  /admin/plugin_categories/{category_id}:
-    delete:
-      description: Soft-delete a category; refused with CONFLICT while live plugins
-        still reference it.
-      operationId: admin_plugin_category.delete
-      parameters:
-      - description: Category ID
-        in: path
-        name: category_id
-        required: true
-        schema:
-          type: string
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_adminCategoryResponse'
-          description: OK
-        '409':
+        '401':
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: CONFLICT
-      security:
-      - Bearer: []
-      summary: Delete plugin category (admin)
-      tags:
-      - admin_plugin
-    patch:
-      description: Update a category's name, icon, applicable plugin types, and sort
-        order. Admin only.
-      operationId: admin_plugin_category.update
-      parameters:
-      - description: Category ID
-        in: path
-        name: category_id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/internal_api_handler_plugin.adminCategoryRequest'
-                description: Category
-                summary: body
-        description: Category
-        required: true
-      responses:
-        '200':
+          description: AUTH_REQUIRED
+        '403':
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_adminCategoryResponse'
-          description: OK
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
       security:
       - Bearer: []
-      summary: Update plugin category (admin)
+      summary: List plugin categories (admin)
       tags:
       - admin_plugin
   /admin/plugins:

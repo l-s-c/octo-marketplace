@@ -194,7 +194,7 @@ func TestSkillRefPrefersStoragePackageWhenLegacyPointerAbsent(t *testing.T) {
 	space := "space-a"
 	pkg := json.RawMessage(`{"attachments":[{"path":"skill/package.zip","content_type":"storage","storage_uri":"plugins/space-a/attachments/x.zip"}]}`)
 	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
-	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", SpaceID: &space, Package: pkg})
+	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", SpaceID: &space, Package: pkg}, freshBudget())
 	if ref.Name != "New Skill" || ref.ZipObjectKey != "plugins/space-a/attachments/x.zip" {
 		t.Fatalf("ref = %#v", ref)
 	}
@@ -202,7 +202,7 @@ func TestSkillRefPrefersStoragePackageWhenLegacyPointerAbsent(t *testing.T) {
 	// Q5: a package.zip key outside this plugin's own Space prefix is dropped
 	// rather than handed to the provisioner, matching skill/ref.json scoping.
 	forged := json.RawMessage(`{"attachments":[{"path":"skill/package.zip","content_type":"storage","storage_uri":"plugins/space-b/attachments/x.zip"}]}`)
-	ref = svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", SpaceID: &space, Package: forged})
+	ref = svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", SpaceID: &space, Package: forged}, freshBudget())
 	if ref.ZipObjectKey != "" {
 		t.Fatalf("cross-Space package.zip key trusted: %#v", ref)
 	}
@@ -223,7 +223,7 @@ func TestSkillRefResolvesTreeContentInline(t *testing.T) {
 		binKey: {0x00, 0xff, 0xfe},
 	}}
 	svc := New(&fakeStore{}, blobs)
-	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "Tree Skill", SpaceID: &space, Package: pkg})
+	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "Tree Skill", SpaceID: &space, Package: pkg}, freshBudget())
 
 	if ref.Markdown != "# doc" || ref.ObjectKey != "" || ref.ZipObjectKey != "" {
 		t.Fatalf("tree ref should resolve inline: %#v", ref)
@@ -254,8 +254,12 @@ func TestSkillRefCapsSupportingFilesBeforeFetching(t *testing.T) {
 	}
 	b.WriteString(`]}`)
 	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
-	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "Big Skill", SpaceID: &space, Package: json.RawMessage(b.String())})
+	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "Big Skill", SpaceID: &space, Package: json.RawMessage(b.String())}, freshBudget())
 	if len(ref.SupportingFiles) != maxInstallSupportingFiles {
 		t.Fatalf("supporting files = %d, want capped at %d", len(ref.SupportingFiles), maxInstallSupportingFiles)
 	}
 }
+
+// freshBudget returns a large per-call install byte budget for direct
+// skillRefFromPlugin tests (the aggregate cap is exercised via the install flow).
+func freshBudget() *int64 { b := int64(100) << 20; return &b }

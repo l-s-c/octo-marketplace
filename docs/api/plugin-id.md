@@ -1,5 +1,12 @@
 # Unified Plugin ID boundary
 
+> **⚠️ Forward-looking design note — not the shipped contract.** The current
+> implementation does NOT use typed, prefixed IDs and there is no
+> `internal/service/plugin/pluginid` package. Wire plugin IDs are opaque,
+> unprefixed UUIDv7 strings validated by `internal/service/plugin/id_boundary.go`
+> (`storageIDPattern` rejects `:`). This document describes a possible future
+> prefixed-ID scheme; do not implement clients against it yet.
+
 The cowork-v3 unified Plugin API uses typed, prefixed IDs. Encoding and strict
 parsing live in `internal/service/plugin/pluginid`; callers must not concatenate
 or split these values themselves.

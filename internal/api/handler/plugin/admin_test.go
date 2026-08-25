@@ -51,28 +51,14 @@ func (f *fakeAdminService) AdminDelete(_ context.Context, c pluginsvc.Caller, id
 }
 
 type fakeAdminCategories struct {
-	listType  model.PluginType
-	list      []model.PluginCategory
-	createdID string
-	updatedID string
-	deleteCnt int
-	deleteErr error
-	err       error
+	listType model.PluginType
+	list     []model.PluginCategory
+	err      error
 }
 
 func (f *fakeAdminCategories) AdminListCategories(_ context.Context, typ model.PluginType) ([]model.PluginCategory, error) {
 	f.listType = typ
 	return f.list, f.err
-}
-func (f *fakeAdminCategories) AdminCreateCategory(_ context.Context, _, _ string, _ []model.PluginType, _ int) (string, error) {
-	return f.createdID, f.err
-}
-func (f *fakeAdminCategories) AdminUpdateCategory(_ context.Context, id, _, _ string, _ []model.PluginType, _ int) error {
-	f.updatedID = id
-	return f.err
-}
-func (f *fakeAdminCategories) AdminDeleteCategory(_ context.Context, _ string) (int, error) {
-	return f.deleteCnt, f.deleteErr
 }
 
 // adminTestEngine mounts the admin surface behind the dev admin authenticator,
@@ -157,15 +143,47 @@ func TestAdminDeleteReturnsPluginID(t *testing.T) {
 }
 
 func TestAdminDeleteCategoryInUseIsConflictWithCount(t *testing.T) {
-	cats := &fakeAdminCategories{deleteCnt: 4, deleteErr: pluginsvc.ErrCategoryInUse}
+	// The unified admin category-write endpoints were withdrawn until the
+	// placement model supports runtime creation; only the read remains.
 	rec := httptest.NewRecorder()
-	adminTestEngine(&fakeAdminService{}, cats).ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/admin/plugin_categories/cat-1", nil))
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	adminTestEngine(&fakeAdminService{}, &fakeAdminCategories{}).ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/admin/plugin_categories/cat-1", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("category delete should be unmounted, status=%d", rec.Code)
 	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"CONFLICT"`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"plugin_count":4`)) {
-		t.Fatalf("body=%s", rec.Body.String())
+}
+
+// TestAdminRoutesAreRoleGated proves the admin surface is behind the admin
+// authenticator: with auth enabled and no token, every route is refused (Q10').
+func TestAdminRoutesAreRoleGated(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(logging.RequestID())
+	// Enabled authenticator with a resolver that admits nothing → no token = 401.
+	adminAuth := marketmiddleware.NewAdminAuthenticator(true, denyResolver{}, model.Identity{})
+	NewAdmin(&fakeAdminService{}, &fakeAdminCategories{}).RegisterAdmin(r, adminAuth)
+
+	for _, tc := range []struct {
+		method, path string
+	}{
+		{http.MethodGet, "/api/v1/admin/plugins?plugin_type=skill"},
+		{http.MethodPost, "/api/v1/admin/plugins"},
+		{http.MethodGet, "/api/v1/admin/plugins/p1"},
+		{http.MethodPatch, "/api/v1/admin/plugins/p1"},
+		{http.MethodDelete, "/api/v1/admin/plugins/p1"},
+		{http.MethodGet, "/api/v1/admin/plugin_categories?plugin_type=skill"},
+	} {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s status=%d, want 401 (route not gated)", tc.method, tc.path, rec.Code)
+		}
 	}
+}
+
+type denyResolver struct{}
+
+func (denyResolver) Resolve(context.Context, string) (model.Identity, error) {
+	return model.Identity{}, nil
 }
 
 func TestAdminListCategoriesRendersSnakeCaseDTO(t *testing.T) {

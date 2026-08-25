@@ -188,7 +188,7 @@ Full record for `GET /experts/{expert_id}`, `POST /experts`,
 
 Field notes:
 
-- `expert_id`: server-generated, ULID-style opaque 26-char string. Opaque to
+- `expert_id`: server-generated opaque UUIDv7 (36-char) string. Opaque to
   clients; never derived from `name`.
 - `short_name`: 1–4 char tile label. Server-derived from `name` (first 2
   characters) when the client omits it.

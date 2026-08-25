@@ -23,10 +23,31 @@ func adminScope(caller Caller) pluginrepo.Scope {
 	return pluginrepo.Scope{CallerUID: caller.UID, Admin: true}
 }
 
+// validAdminListSort accepts the empty default plus the fixed sort whitelist the
+// repository's listOrder recognizes, excluding "placement" (which needs a
+// placement code the admin list never supplies).
+func validAdminListSort(sort string) bool {
+	switch sort {
+	case "", "newest", "oldest", "updated", "name", "views", "installs", "downloads", "comprehensive":
+		return true
+	default:
+		return false
+	}
+}
+
 // AdminList lists plugins of one type across all Spaces, optionally narrowed to
 // a visibility class (e.g. system connectors, public skills).
 func (s *Service) AdminList(ctx context.Context, caller Caller, typ model.PluginType, visibility model.PluginVisibility, p ListParams) ([]model.Plugin, int64, error) {
 	if !validPluginType(typ) {
+		return nil, 0, ErrInvalidRequest
+	}
+	// Optional filters, but when supplied they must be known values — an unknown
+	// visibility must not silently return an empty page, nor an unknown sort
+	// silently fall back to the default (Q12').
+	if visibility != "" && !validVisibility(visibility, true) {
+		return nil, 0, ErrInvalidRequest
+	}
+	if !validAdminListSort(p.Sort) {
 		return nil, 0, ErrInvalidRequest
 	}
 	if p.Limit < 0 || p.Limit > maxListLimit || p.Offset < 0 {
@@ -73,21 +94,33 @@ func (s *Service) AdminDetail(ctx context.Context, caller Caller, pluginID strin
 	return &Detail{Plugin: p, Relations: rels}, nil
 }
 
-// adminEffectiveWrite fixes the caller identity and per-type visibility/Space so
-// buildWrite mints the admin conventions: system connectors (NULL Space) and
-// public skills (empty global Space). Returns the built plugin + relations.
-func (s *Service) adminEffectiveWrite(ctx context.Context, caller Caller, pluginID string, req WriteRequest) (*model.Plugin, []model.PluginRelation, error) {
-	eff := caller
-	eff.IsSystemAdmin = true // admins may mint system visibility
-	eff.SpaceID = adminGlobalSpace
-	switch req.Type {
+// conventionVisibility is the visibility an admin CREATE stamps by type: system
+// connectors, public skills/experts. Update never forces a visibility — it
+// preserves the row's existing one (see AdminUpdate) so a metadata edit cannot
+// publish a tenant-private plugin.
+func conventionVisibility(typ model.PluginType) (model.PluginVisibility, bool) {
+	switch typ {
 	case model.PluginTypeConnector:
-		req.Visibility = model.PluginVisibilitySystem
+		return model.PluginVisibilitySystem, true
 	case model.PluginTypeSkill, model.PluginTypeExpert, model.PluginTypeExpertTeam:
-		req.Visibility = model.PluginVisibilityPublic
+		return model.PluginVisibilityPublic, true
 	default:
+		return "", false
+	}
+}
+
+// adminEffectiveWrite fixes the caller identity and Space and stamps the given
+// visibility so buildWrite mints the admin conventions: system connectors (NULL
+// Space) and public skills (empty global Space) on create; the row's preserved
+// visibility on update. Returns the built plugin + relations.
+func (s *Service) adminEffectiveWrite(ctx context.Context, caller Caller, pluginID string, req WriteRequest, visibility model.PluginVisibility) (*model.Plugin, []model.PluginRelation, error) {
+	if !conventionType(req.Type) {
 		return nil, nil, ErrInvalidRequest
 	}
+	eff := caller
+	eff.IsSystemAdmin = true // admins may mint/preserve system visibility
+	eff.SpaceID = adminGlobalSpace
+	req.Visibility = visibility
 	p, rels, err := s.buildWrite(ctx, eff, pluginID, req, s.now())
 	if err != nil {
 		return nil, nil, err
@@ -100,9 +133,22 @@ func (s *Service) adminEffectiveWrite(ctx context.Context, caller Caller, plugin
 	return p, rels, nil
 }
 
+func conventionType(typ model.PluginType) bool {
+	switch typ {
+	case model.PluginTypeConnector, model.PluginTypeSkill, model.PluginTypeExpert, model.PluginTypeExpertTeam:
+		return true
+	default:
+		return false
+	}
+}
+
 // AdminCreate mints a new admin plugin (system connector or public skill).
 func (s *Service) AdminCreate(ctx context.Context, caller Caller, req WriteRequest) (*Detail, error) {
-	p, rels, err := s.adminEffectiveWrite(ctx, caller, "", req)
+	visibility, ok := conventionVisibility(req.Type)
+	if !ok {
+		return nil, ErrInvalidRequest
+	}
+	p, rels, err := s.adminEffectiveWrite(ctx, caller, "", req, visibility)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +164,10 @@ func (s *Service) AdminCreate(ctx context.Context, caller Caller, req WriteReque
 	return &Detail{Plugin: p, Relations: rels, RelationResult: relationResult(sync)}, nil
 }
 
-// AdminUpdate updates any admin plugin by id, regardless of owner/Space.
+// AdminUpdate updates any admin plugin by id, regardless of owner/Space. It
+// PRESERVES the row's existing visibility, Space, and owner: an admin metadata
+// edit must never force-publish a plugin (A1) — a tenant-private row stays
+// private — and the owner/creator provenance is immutable.
 func (s *Service) AdminUpdate(ctx context.Context, caller Caller, pluginID string, req WriteRequest) (*Detail, error) {
 	storageID, err := parseStorageID(pluginID)
 	if err != nil {
@@ -131,14 +180,15 @@ func (s *Service) AdminUpdate(ctx context.Context, caller Caller, pluginID strin
 	if req.Type != old.Type {
 		return nil, ErrInvalidRequest
 	}
-	p, rels, err := s.adminEffectiveWrite(ctx, caller, storageID, req)
+	p, rels, err := s.adminEffectiveWrite(ctx, caller, storageID, req, old.Visibility)
 	if err != nil {
 		return nil, err
 	}
 	p.CreatedAt, p.CurrentVersionID = old.CreatedAt, old.CurrentVersionID
 	p.CreatorName, p.CreatedByType = old.CreatorName, old.CreatedByType
 	p.CreatedByBotUID, p.CreatedByBotName = old.CreatedByBotUID, old.CreatedByBotName
-	p.SpaceID = old.SpaceID // preserve the row's existing Space on update
+	p.SpaceID = old.SpaceID   // preserve the row's existing Space on update
+	p.OwnerUID = old.OwnerUID // owner provenance is immutable (Q7')
 	for i := range rels {
 		rels[i].SourcePluginID = storageID
 	}

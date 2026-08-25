@@ -202,12 +202,16 @@ func (s *Service) squadMemberFromPlugin(ctx context.Context, caller Caller, rel 
 func (s *Service) skillRefsFromRelations(ctx context.Context, caller Caller, relations []model.PluginRelation) ([]model.SkillRef, error) {
 	skillRelations := relationsOfType(relations, "expert_skill")
 	refs := make([]model.SkillRef, 0, len(skillRelations))
+	// One aggregate byte budget shared across every skill in the install, so an
+	// expert_team fanning out to many skills cannot multiply the resident-memory
+	// bound (A4). Mirrors the download path's maxArchiveBytes ceiling.
+	remaining := s.maxArchiveBytes
 	for _, rel := range skillRelations {
 		target, err := s.Detail(ctx, caller, rel.TargetPluginID, false)
 		if err != nil {
 			return nil, err
 		}
-		refs = append(refs, s.skillRefFromPlugin(ctx, target.Plugin))
+		refs = append(refs, s.skillRefFromPlugin(ctx, target.Plugin, &remaining))
 	}
 	return refs, nil
 }
@@ -218,7 +222,7 @@ func (s *Service) skillRefsFromRelations(ctx context.Context, caller Caller, rel
 // provisioner. Storage-backed supporting files are fetched here and included
 // only when they are UTF-8 text (binaries are skipped, mirroring the fleet
 // text-only skill-file store).
-func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin) model.SkillRef {
+func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, remaining *int64) model.SkillRef {
 	ref := model.SkillRef{Name: p.Name}
 	var legacy struct {
 		FileName     string   `json:"file_name"`
@@ -267,24 +271,27 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin) model
 	// downstream per-skill fan-out budget (expert.maxSkillFilesPerSkill). Counting
 	// every processed attachment — not just accepted text — bounds both the
 	// GetObject fan-out and the in-memory SupportingFiles slice for a plugin whose
-	// plugin_json packs thousands of storage attachments.
+	// plugin_json packs thousands of storage attachments. The shared *remaining
+	// byte budget additionally caps aggregate resident bytes across the install.
 	processed := 0
 	for _, a := range decodePackageAttachments(p.Package) {
 		if a.Path == "SKILL.md" {
 			continue
 		}
-		if processed >= maxInstallSupportingFiles {
+		if processed >= maxInstallSupportingFiles || *remaining <= 0 {
 			break
 		}
 		processed++
 		if a.ContentType == "raw" {
-			if utf8.ValidString(a.RawContent) {
+			if utf8.ValidString(a.RawContent) && int64(len(a.RawContent)) <= *remaining {
 				ref.SupportingFiles = append(ref.SupportingFiles, model.SkillFile{Path: a.Path, Content: a.RawContent})
+				*remaining -= int64(len(a.RawContent))
 			}
 			continue
 		}
-		if content, ok := s.readStorageText(ctx, p.SpaceID, a.StorageURI); ok {
+		if content, ok := s.readStorageText(ctx, p.SpaceID, a.StorageURI); ok && int64(len(content)) <= *remaining {
 			ref.SupportingFiles = append(ref.SupportingFiles, model.SkillFile{Path: a.Path, Content: content})
+			*remaining -= int64(len(content))
 		}
 	}
 	return ref

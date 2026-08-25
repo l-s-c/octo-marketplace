@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -16,6 +17,7 @@ import (
 	libplugin "codex.mlamp.cn/dmwork/octo-plugin-lib/plugin"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/service/parse"
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/storage"
 )
 
 const (
@@ -126,12 +128,14 @@ func (s *Service) buildSkillAttachmentTree(ctx context.Context, spaceID, pluginI
 			}
 			key := deterministicSkillObjectKey(spaceID, pluginID, it.path, it.bytes)
 			// Content-addressed: an object already at this key holds identical bytes
-			// (a prior import/version or a live row already references it). Skip the
-			// re-upload and — crucially — do NOT record it for rollback. Deleting a
-			// shared content-addressed object on a later failure would strand the
-			// live rows and immutable version snapshots still pointing at it (Q3);
-			// only genuinely-new keys are safe to roll back.
-			if _, statErr := s.storage.StatObject(ctx, key); statErr != nil {
+			// (a prior import/version or a live row already references it). Only a
+			// CONFIRMED absence (ErrObjectNotFound) is recorded for rollback; a
+			// transient stat error is treated as "may exist" so a later failure never
+			// deletes a shared, live-referenced object (Q3'). The upload itself is an
+			// idempotent overwrite, so it is always safe to (re)issue.
+			_, statErr := s.storage.StatObject(ctx, key)
+			exists := statErr == nil
+			if !exists {
 				contentType := "application/octet-stream"
 				if it.isText {
 					contentType = attachmentMIME(it.path, true)
@@ -140,7 +144,9 @@ func (s *Service) buildSkillAttachmentTree(ctx context.Context, spaceID, pluginI
 					s.deleteObjects(ctx, uploaded...)
 					return nil, nil, nil, fmt.Errorf("upload skill file %s: %w", it.path, putErr)
 				}
-				uploaded = append(uploaded, key)
+				if errors.Is(statErr, storage.ErrObjectNotFound) {
+					uploaded = append(uploaded, key)
+				}
 			}
 			if it.isText {
 				spilled = append(spilled, it.path)
@@ -256,11 +262,16 @@ func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID stri
 		var md string
 		var ok bool
 		if migrationArtifactKey(ref.ObjectKey, p.SpaceID) {
-			if data, err := s.getObjectBytes(ctx, ref.ObjectKey, s.maxAttachmentBytes); err == nil {
-				md, ok = string(data), true
+			// A trusted object pointer is authoritative: a read failure (throttle,
+			// transient 5xx, timeout) must FAIL this row rather than silently
+			// degrading to the one-line stub — expand-skills is one-way, so a
+			// fallback here would permanently destroy the real SKILL.md (A3).
+			data, err := s.getObjectBytes(ctx, ref.ObjectKey, s.maxAttachmentBytes)
+			if err != nil {
+				return nil, false, fmt.Errorf("read skill markdown object %s: %w", ref.ObjectKey, err)
 			}
-		}
-		if !ok {
+			md, ok = string(data), true
+		} else {
 			md, ok = rawAttachmentContent(pkg, "SKILL.md")
 		}
 		if !ok || !utf8.ValidString(md) {

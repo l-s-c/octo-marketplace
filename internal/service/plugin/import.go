@@ -19,9 +19,11 @@ import (
 	"io"
 	"strings"
 
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/logging"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 	skillrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/skill"
 	skillsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/skill"
+	"go.uber.org/zap"
 )
 
 // ErrInvalidParseTask covers absent, foreign, unfinished, and already-consumed
@@ -251,6 +253,12 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 		if oldPlugin != nil {
 			if _, restoreErr := s.Update(ctx, caller, updateID, restoreWriteRequest(oldPlugin, oldRels)); restoreErr == nil {
 				s.deleteObjects(ctx, uploaded...)
+			} else {
+				logging.Error("import_restore_failed",
+					zap.String("operation", "plugin.import.restore"),
+					zap.String("plugin_id", updateID),
+					logging.ErrorField(restoreErr),
+				)
 			}
 		}
 		return nil, err

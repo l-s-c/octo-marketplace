@@ -2,11 +2,8 @@ package plugin
 
 import (
 	"context"
-	"errors"
-	"net/http"
 	"strconv"
 
-	"github.com/Mininglamp-OSS/octo-marketplace/internal/api/errcode"
 	apiresponse "github.com/Mininglamp-OSS/octo-marketplace/internal/api/response"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/logging"
 	marketmiddleware "github.com/Mininglamp-OSS/octo-marketplace/internal/middleware"
@@ -26,12 +23,10 @@ type AdminService interface {
 }
 
 // AdminCategoryService is the handler-facing boundary over the admin taxonomy
-// (list/create/update/delete plugin categories).
+// read. Category writes go through the legacy per-type category surfaces until
+// the unified placement model supports runtime category creation.
 type AdminCategoryService interface {
 	AdminListCategories(context.Context, model.PluginType) ([]model.PluginCategory, error)
-	AdminCreateCategory(context.Context, string, string, []model.PluginType, int) (string, error)
-	AdminUpdateCategory(context.Context, string, string, string, []model.PluginType, int) error
-	AdminDeleteCategory(context.Context, string) (int, error)
 }
 
 // AdminHandler serves the marketplace-admin plugin surface (/api/v1/admin/plugins*).
@@ -62,9 +57,6 @@ func (h *AdminHandler) RegisterAdmin(r *gin.Engine, adminAuth *marketmiddleware.
 
 	admin := r.Group("/api/v1/admin", adminAuth.Handler(marketmiddleware.RoleMarketAdmin))
 	admin.GET("/plugin_categories", h.ListCategories)
-	admin.POST("/plugin_categories", h.CreateCategory)
-	admin.PATCH("/plugin_categories/:category_id", h.UpdateCategory)
-	admin.DELETE("/plugin_categories/:category_id", h.DeleteCategory)
 }
 
 // adminCaller builds a caller from the admin identity. Unlike caller(c) it does
@@ -264,17 +256,6 @@ func (h *AdminHandler) Delete(c *gin.Context) {
 	apiresponse.OK(c, deleteResponse{PluginID: id, Deleted: true})
 }
 
-type adminCategoryRequest struct {
-	Name        string             `json:"name"`
-	IconKey     string             `json:"icon_key,omitempty"`
-	PluginTypes []model.PluginType `json:"plugin_types"`
-	SortOrder   int                `json:"sort_order"`
-}
-
-type adminCategoryResponse struct {
-	CategoryID string `json:"category_id"`
-}
-
 // ListCategories godoc
 // @Summary List plugin categories (admin)
 // @Description List every category applicable to a plugin type with its live-plugin usage count, including empty ones. Admin only.
@@ -284,6 +265,9 @@ type adminCategoryResponse struct {
 // @Security Bearer
 // @Param plugin_type query string true "Plugin type"
 // @Success 200 {object} apiresponse.Data[[]categoryResponse]
+// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
+// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /admin/plugin_categories [get]
 func (h *AdminHandler) ListCategories(c *gin.Context) {
 	if _, ok := adminCaller(c); !ok {
@@ -300,90 +284,4 @@ func (h *AdminHandler) ListCategories(c *gin.Context) {
 		out[i] = categoryResponse{CategoryID: x.ID, Name: x.Name, IconKey: x.IconKey, PluginTypes: stringSlice(x.PluginTypes), SortOrder: x.SortOrder, PluginCount: x.PluginCount}
 	}
 	apiresponse.OK(c, out)
-}
-
-// CreateCategory godoc
-// @Summary Create plugin category (admin)
-// @Description Mint a category for the unified plugin taxonomy, scoped to one or more plugin types. Admin only.
-// @Tags admin_plugin
-// @ID admin_plugin_category.create
-// @Accept json
-// @Produce json
-// @Security Bearer
-// @Param body body adminCategoryRequest true "Category"
-// @Success 200 {object} apiresponse.Data[adminCategoryResponse]
-// @Router /admin/plugin_categories [post]
-func (h *AdminHandler) CreateCategory(c *gin.Context) {
-	if _, ok := adminCaller(c); !ok {
-		unauthorized(c)
-		return
-	}
-	var req adminCategoryRequest
-	if !decode(c, &req) {
-		return
-	}
-	id, err := h.cats.AdminCreateCategory(c.Request.Context(), req.Name, req.IconKey, req.PluginTypes, req.SortOrder)
-	if err != nil {
-		writeServiceError(c, err, "plugin.admin.category.create")
-		return
-	}
-	apiresponse.OK(c, adminCategoryResponse{CategoryID: id})
-}
-
-// UpdateCategory godoc
-// @Summary Update plugin category (admin)
-// @Description Update a category's name, icon, applicable plugin types, and sort order. Admin only.
-// @Tags admin_plugin
-// @ID admin_plugin_category.update
-// @Accept json
-// @Produce json
-// @Security Bearer
-// @Param category_id path string true "Category ID"
-// @Param body body adminCategoryRequest true "Category"
-// @Success 200 {object} apiresponse.Data[adminCategoryResponse]
-// @Router /admin/plugin_categories/{category_id} [patch]
-func (h *AdminHandler) UpdateCategory(c *gin.Context) {
-	if _, ok := adminCaller(c); !ok {
-		unauthorized(c)
-		return
-	}
-	var req adminCategoryRequest
-	if !decode(c, &req) {
-		return
-	}
-	id := c.Param("category_id")
-	if err := h.cats.AdminUpdateCategory(c.Request.Context(), id, req.Name, req.IconKey, req.PluginTypes, req.SortOrder); err != nil {
-		writeServiceError(c, err, "plugin.admin.category.update")
-		return
-	}
-	apiresponse.OK(c, adminCategoryResponse{CategoryID: id})
-}
-
-// DeleteCategory godoc
-// @Summary Delete plugin category (admin)
-// @Description Soft-delete a category; refused with CONFLICT while live plugins still reference it.
-// @Tags admin_plugin
-// @ID admin_plugin_category.delete
-// @Produce json
-// @Security Bearer
-// @Param category_id path string true "Category ID"
-// @Success 200 {object} apiresponse.Data[adminCategoryResponse]
-// @Failure 409 {object} apiresponse.Error "CONFLICT"
-// @Router /admin/plugin_categories/{category_id} [delete]
-func (h *AdminHandler) DeleteCategory(c *gin.Context) {
-	if _, ok := adminCaller(c); !ok {
-		unauthorized(c)
-		return
-	}
-	id := c.Param("category_id")
-	count, err := h.cats.AdminDeleteCategory(c.Request.Context(), id)
-	if errors.Is(err, pluginsvc.ErrCategoryInUse) {
-		apiresponse.Fail(c, http.StatusConflict, errcode.CategoryInUse, "category is still referenced by live plugins", map[string]any{"plugin_count": count}, "Reassign or remove the plugins in this category first.")
-		return
-	}
-	if err != nil {
-		writeServiceError(c, err, "plugin.admin.category.delete")
-		return
-	}
-	apiresponse.OK(c, adminCategoryResponse{CategoryID: id})
 }
