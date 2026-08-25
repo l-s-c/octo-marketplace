@@ -194,7 +194,10 @@ func TestSkillRefPrefersStoragePackageWhenLegacyPointerAbsent(t *testing.T) {
 	space := "space-a"
 	pkg := json.RawMessage(`{"attachments":[{"path":"skill/package.zip","content_type":"storage","storage_uri":"plugins/space-a/attachments/x.zip"}]}`)
 	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
-	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", SpaceID: &space, Package: pkg}, freshBudget())
+	ref, err := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", SpaceID: &space, Package: pkg}, freshBudget())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if ref.Name != "New Skill" || ref.ZipObjectKey != "plugins/space-a/attachments/x.zip" {
 		t.Fatalf("ref = %#v", ref)
 	}
@@ -202,7 +205,10 @@ func TestSkillRefPrefersStoragePackageWhenLegacyPointerAbsent(t *testing.T) {
 	// Q5: a package.zip key outside this plugin's own Space prefix is dropped
 	// rather than handed to the provisioner, matching skill/ref.json scoping.
 	forged := json.RawMessage(`{"attachments":[{"path":"skill/package.zip","content_type":"storage","storage_uri":"plugins/space-b/attachments/x.zip"}]}`)
-	ref = svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", SpaceID: &space, Package: forged}, freshBudget())
+	ref, err = svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", SpaceID: &space, Package: forged}, freshBudget())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if ref.ZipObjectKey != "" {
 		t.Fatalf("cross-Space package.zip key trusted: %#v", ref)
 	}
@@ -223,7 +229,10 @@ func TestSkillRefResolvesTreeContentInline(t *testing.T) {
 		binKey: {0x00, 0xff, 0xfe},
 	}}
 	svc := New(&fakeStore{}, blobs)
-	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "Tree Skill", SpaceID: &space, Package: pkg}, freshBudget())
+	ref, err := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "Tree Skill", SpaceID: &space, Package: pkg}, freshBudget())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if ref.Markdown != "# doc" || ref.ObjectKey != "" || ref.ZipObjectKey != "" {
 		t.Fatalf("tree ref should resolve inline: %#v", ref)
@@ -254,7 +263,10 @@ func TestSkillRefCapsSupportingFilesBeforeFetching(t *testing.T) {
 	}
 	b.WriteString(`]}`)
 	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
-	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "Big Skill", SpaceID: &space, Package: json.RawMessage(b.String())}, freshBudget())
+	ref, err := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "Big Skill", SpaceID: &space, Package: json.RawMessage(b.String())}, freshBudget())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(ref.SupportingFiles) != maxInstallSupportingFiles {
 		t.Fatalf("supporting files = %d, want capped at %d", len(ref.SupportingFiles), maxInstallSupportingFiles)
 	}
@@ -269,7 +281,10 @@ func TestSkillRefChargesMarkdownAgainstBudget(t *testing.T) {
 	budget := &installBudget{bytes: 10, targets: maxInstallRelationTargets} // exactly the SKILL.md length below
 	pkg := json.RawMessage(`{"attachments":[{"path":"SKILL.md","content_type":"raw","raw_content":"0123456789"},{"path":"f.txt","content_type":"raw","raw_content":"x"}]}`)
 	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
-	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "S", SpaceID: &space, Package: pkg}, budget)
+	ref, err := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "S", SpaceID: &space, Package: pkg}, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if ref.Markdown != "0123456789" {
 		t.Fatalf("markdown = %q", ref.Markdown)
 	}
@@ -278,6 +293,22 @@ func TestSkillRefChargesMarkdownAgainstBudget(t *testing.T) {
 	}
 	if len(ref.SupportingFiles) != 0 {
 		t.Fatalf("supporting files should be dropped once SKILL.md exhausted the budget: %#v", ref.SupportingFiles)
+	}
+}
+
+// TestSkillRefFromPluginFailsLoudWhenSkillMDOverBudget is the P1-2 regression:
+// a tree-shaped skill whose SKILL.md exists but does not fit the remaining byte
+// budget (0 < budget.bytes < len(md)) must fail loudly with ErrTooLarge, not
+// return a document-less ref the provisioner silently drops. The caller-level
+// budget.bytes<=0 gate does not cover this window because the budget is still
+// positive when this skill is reached.
+func TestSkillRefFromPluginFailsLoudWhenSkillMDOverBudget(t *testing.T) {
+	space := "space-a"
+	budget := &installBudget{bytes: 5, targets: maxInstallRelationTargets} // < len(SKILL.md) below, but > 0
+	pkg := json.RawMessage(`{"attachments":[{"path":"SKILL.md","content_type":"raw","raw_content":"0123456789"}]}`)
+	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
+	if _, err := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "S", SpaceID: &space, Package: pkg}, budget); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("over-budget SKILL.md err = %v, want ErrTooLarge (loud, not a dropped skill)", err)
 	}
 }
 

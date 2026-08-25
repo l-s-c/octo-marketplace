@@ -172,7 +172,7 @@ func jsonAttachment(path string, value any) (rawAttachment, error) {
 
 // canonicalDocs runs draft documents through the service write validator so
 // backfilled rows can never bypass or drift from the API contract: the same
-// manifest/package schema rules, secret scan, canonicalization, and hash
+// manifest/package schema rules, canonicalization, and hash
 // formulas apply. The package embeds the service-canonical manifest bytes.
 func canonicalDocs(outerName, pluginType string, tags []string, draftManifest []byte, extras []rawAttachment, spaceID string) (*pluginsvc.CanonicalDocuments, error) {
 	return canonicalConnectorDocs(outerName, pluginType, tags, draftManifest, extras, spaceID, nil)

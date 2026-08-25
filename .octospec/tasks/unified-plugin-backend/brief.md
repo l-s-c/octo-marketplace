@@ -162,8 +162,13 @@ PR #67; this note is the decision record the brief's earlier wording predates.
   - `/plugins/import` is a server-side ingestion path with no frontend toggle;
     an imported connector carrying a literal secret persists unchanged and is
     then distributed via download/install to every installing Space.
-  - Backfill migrations carry any secret values in legacy rows forward into the
-    new plugin tables instead of skipping them.
+  - The connector *backfill* path is NOT part of this exposure:
+    `SanitizeConnectorJSON` (`internal/backfill/plugin/mapping.go`) blanks every
+    `env`/`headers` value and rejects secret-shaped keys before a legacy
+    `mcp_servers` row is migrated, and it survived `b3497e9`. What is genuinely
+    unguarded after the removal is only the skill package expansion/repackage
+    *content* path (`expand.go`/`repackage.go`), which no longer runs a value
+    scan over the rewritten package.
 
   The "must not persist secret values" invariant in the load-bearing section is
   therefore **not enforced at the backend**. The tradeoff (accept this exposure

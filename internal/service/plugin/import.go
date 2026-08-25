@@ -3,7 +3,7 @@
 // (one attachment per file — text inlined as raw, binary/oversize files
 // uploaded to the managed plugins/<space>/attachments/ prefix under
 // deterministic keys and referenced as storage attachments). Everything funnels
-// through Create/Update, so validation, secret scanning, hashing, and audit are
+// through Create/Update, so validation, hashing, and audit are
 // identical to a direct upsert.
 
 package plugin

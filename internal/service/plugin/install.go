@@ -232,8 +232,10 @@ func (s *Service) skillRefsFromRelations(ctx context.Context, caller Caller, rel
 		// Structural truncation must be loud: if the install-wide target or byte
 		// budget is exhausted, a skill would be silently dropped — fail with the
 		// too-large error instead so the caller sees a partial topology was
-		// refused, not installed. (Intra-skill content degradation inside
-		// skillRefFromPlugin stays silent — that is pre-existing and bounded.)
+		// refused, not installed. skillRefFromPlugin is loud too: a SKILL.md that
+		// does not fit the remaining budget errors rather than yielding a
+		// document-less ref the provisioner drops (P1-2). (Supporting-file
+		// degradation inside it stays silent — pre-existing and bounded.)
 		if budget.targets <= 0 || budget.bytes <= 0 {
 			return nil, ErrTooLarge
 		}
@@ -242,7 +244,11 @@ func (s *Service) skillRefsFromRelations(ctx context.Context, caller Caller, rel
 		if err != nil {
 			return nil, err
 		}
-		refs = append(refs, s.skillRefFromPlugin(ctx, target.Plugin, budget))
+		ref, err := s.skillRefFromPlugin(ctx, target.Plugin, budget)
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
 	}
 	return refs, nil
 }
@@ -253,7 +259,7 @@ func (s *Service) skillRefsFromRelations(ctx context.Context, caller Caller, rel
 // provisioner. Storage-backed supporting files are fetched here and included
 // only when they are UTF-8 text (binaries are skipped, mirroring the fleet
 // text-only skill-file store).
-func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, budget *installBudget) model.SkillRef {
+func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, budget *installBudget) (model.SkillRef, error) {
 	ref := model.SkillRef{Name: p.Name}
 	var legacy struct {
 		FileName     string   `json:"file_name"`
@@ -300,15 +306,21 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, budge
 	}
 	// Legacy pointer shape: leave object/zip keys for the provisioner to fetch.
 	if hasRef {
-		return ref
+		return ref, nil
 	}
 	// Tree shape: resolve SKILL.md and supporting text files from the attachments.
-	// Bound the inline document by the shared budget BEFORE assigning it — it is
-	// the single largest inline payload per skill, so over a large fan-out it must
-	// be gated, not charged after the fact (which let the budget go negative and
-	// the memory unbounded, P1-3). Once the budget is exhausted, later skills get
-	// an empty ref rather than more resident bytes.
-	if md, ok := rawAttachmentContent(p.Package, "SKILL.md"); ok && int64(len(md)) <= budget.bytes {
+	// SKILL.md is the skill's required document; a tree-shaped ref with neither a
+	// pointer key nor Markdown is silently dropped downstream
+	// (expert/install.go), so truncating it here must be LOUD, matching the
+	// sibling fan-out gates (P1-2). The caller's budget.bytes<=0 gate covers full
+	// exhaustion; this covers the 0<budget.bytes<len(md) window, where the doc
+	// exists but does not fit — fail the install rather than provision a skill
+	// missing its instructions.
+	md, hasMD := rawAttachmentContent(p.Package, "SKILL.md")
+	if hasMD {
+		if int64(len(md)) > budget.bytes {
+			return model.SkillRef{}, ErrTooLarge
+		}
 		ref.Markdown = md
 		budget.bytes -= int64(len(md))
 	}
@@ -343,7 +355,7 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, budge
 			budget.bytes -= int64(len(content))
 		}
 	}
-	return ref
+	return ref, nil
 }
 
 // maxInstallSupportingFiles bounds how many non-SKILL.md attachments one skill

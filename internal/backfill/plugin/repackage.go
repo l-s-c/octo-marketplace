@@ -49,6 +49,12 @@ type repackageAction struct {
 	count func(*RepackageCounts) *int
 	query string
 	args  []any
+	// guard marks an optimistic-concurrency statement (plugins/plugin_versions,
+	// WHERE ... AND plugin_hash=?). A guarded statement changing zero rows means a
+	// concurrent live write moved the row off the planned hash, so the plan is
+	// stale and the whole transaction must abort rather than commit the unguarded
+	// audit-chain rewrite against a state that never existed. Mirrors expand.go.
+	guard bool
 }
 
 type repackagePlan struct {
@@ -83,8 +89,16 @@ func (r *Runner) Repackage(ctx context.Context, o Options) (RepackageReport, err
 			if err != nil {
 				return RepackageReport{}, fmt.Errorf("repackage apply: %w", err)
 			}
-			if n, err := res.RowsAffected(); err == nil && n > 0 {
+			n, err := res.RowsAffected()
+			if err == nil && n > 0 {
 				*action.count(&rep.Applied)++
+			}
+			// A guarded CAS (plugins/plugin_versions) changing zero rows means a
+			// concurrent live write moved the row off the planned hash: abort the
+			// transaction rather than commit the unguarded audit rewrite against a
+			// vanished state (silent chain break). Re-run against fresh state.
+			if action.guard && err == nil && n == 0 {
+				return RepackageReport{}, fmt.Errorf("repackage apply: optimistic guard failed (row changed since plan; re-run repackage against current state)")
 			}
 		}
 		if err := tx.Commit(); err != nil {
@@ -179,6 +193,7 @@ func (r *Runner) repackagePlugins(ctx context.Context, p *repackagePlan) error {
 			count: func(c *RepackageCounts) *int { return &c.Plugins },
 			query: `UPDATE plugins SET plugin_json=?, plugin_hash=? WHERE plugin_id=? AND plugin_hash=?`,
 			args:  []any{string(newPkg), newHash, id, oldHash},
+			guard: true,
 		})
 	}
 	return rows.Err()
@@ -229,6 +244,7 @@ func (r *Runner) repackageVersions(ctx context.Context, types map[string]string,
 			count: func(c *RepackageCounts) *int { return &c.Versions },
 			query: `UPDATE plugin_versions SET plugin_json=?, relations_json=?, plugin_hash=? WHERE version_id=? AND plugin_hash=?`,
 			args:  []any{string(newPkg), string(newRelations), newHash, id, oldHash},
+			guard: true,
 		})
 	}
 	return rows.Err()

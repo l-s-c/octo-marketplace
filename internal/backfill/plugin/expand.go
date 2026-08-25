@@ -49,6 +49,14 @@ type expandAction struct {
 	count func(*ExpandCounts) *int
 	query string
 	args  []any
+	// guard marks a statement that carries an optimistic-concurrency predicate
+	// (WHERE ... AND plugin_hash=?): the plugins and plugin_versions rewrites are
+	// planned against a specific pre-scan hash. A guarded statement that changes
+	// zero rows means the row was mutated by a concurrent live write between plan
+	// and apply, so the plan no longer matches reality and the whole transaction
+	// must abort rather than commit the unguarded audit-chain rewrite against a
+	// state that never existed (a silent, unrecoverable chain break).
+	guard bool
 }
 
 type expandPlan struct {
@@ -83,14 +91,8 @@ func (r *Runner) ExpandSkills(ctx context.Context, o Options, exp SkillExpander)
 			return ExpandReport{}, err
 		}
 		defer tx.Rollback()
-		for _, action := range p.actions {
-			res, err := tx.ExecContext(ctx, action.query, action.args...)
-			if err != nil {
-				return ExpandReport{}, fmt.Errorf("expand apply: %w", err)
-			}
-			if n, err := res.RowsAffected(); err == nil && n > 0 {
-				*action.count(&rep.Applied)++
-			}
+		if err := applyExpandActions(ctx, tx, p.actions, &rep.Applied); err != nil {
+			return ExpandReport{}, err
 		}
 		if err := tx.Commit(); err != nil {
 			return ExpandReport{}, err
@@ -107,6 +109,30 @@ func (r *Runner) ExpandSkills(ctx context.Context, o Options, exp SkillExpander)
 	}
 	rep.FinishedAt = r.now()
 	return rep, nil
+}
+
+// applyExpandActions executes a planned rewrite inside the caller's transaction.
+// A guarded action (the plugins/plugin_versions optimistic CAS) that changes
+// zero rows means a concurrent live write moved the row off the hash the plan
+// was built against; the plan is stale, so it returns an error and the caller's
+// deferred Rollback aborts the whole transaction rather than committing the
+// unguarded audit-chain rewrite against a state that never existed. The phase is
+// idempotent, so the operator simply re-runs against fresh state.
+func applyExpandActions(ctx context.Context, tx *sql.Tx, actions []expandAction, applied *ExpandCounts) error {
+	for _, action := range actions {
+		res, err := tx.ExecContext(ctx, action.query, action.args...)
+		if err != nil {
+			return fmt.Errorf("expand apply: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err == nil && n > 0 {
+			*action.count(applied)++
+		}
+		if action.guard && err == nil && n == 0 {
+			return fmt.Errorf("expand apply: optimistic guard failed (row changed since plan; re-run expand-skills against current state)")
+		}
+	}
+	return nil
 }
 
 // buildExpand scans the three tables for skill rows still in the legacy pointer
@@ -193,6 +219,7 @@ func (r *Runner) expandPlugins(ctx context.Context, exp SkillExpander, apply boo
 			count: func(c *ExpandCounts) *int { return &c.Plugins },
 			query: `UPDATE plugins SET plugin_json=?, plugin_hash=? WHERE plugin_id=? AND plugin_hash=?`,
 			args:  []any{string(newPkg), newHash, w.id, w.oldHash},
+			guard: true,
 		})
 	}
 	return nil
@@ -235,6 +262,7 @@ func (r *Runner) expandVersions(ctx context.Context, exp SkillExpander, apply bo
 			count: func(c *ExpandCounts) *int { return &c.Versions },
 			query: `UPDATE plugin_versions SET plugin_json=?, plugin_hash=? WHERE version_id=? AND plugin_hash=?`,
 			args:  []any{string(newPkg), newHash, w.id, w.oldHash},
+			guard: true,
 		})
 	}
 	return nil
@@ -348,9 +376,9 @@ func (r *Runner) expandAudits(ctx context.Context, exp SkillExpander, apply bool
 	return nil
 }
 
-// expandRow runs the expander for one plugins/plugin_versions row, gating on the
-// secret scan and recomputing the lib hash. It returns ok=false (recording an
-// issue) when the package fails to expand or the scan rejects it.
+// expandRow runs the expander for one plugins/plugin_versions row and recomputes
+// the lib hash. It returns ok=false (recording an issue) when the package fails
+// to expand.
 func (r *Runner) expandRow(ctx context.Context, exp SkillExpander, spaceID, pluginID, source string, manifest, pkg []byte, p *expandPlan) (newPkg []byte, newHash string, ok bool) {
 	expanded, changed, err := exp.ExpandSkillPackage(ctx, spaceID, pluginID, pkg)
 	if err != nil {

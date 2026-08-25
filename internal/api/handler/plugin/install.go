@@ -43,6 +43,7 @@ type installResponse struct {
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 409 {object} apiresponse.Error "CONFLICT"
+// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
 // @Failure 503 {object} apiresponse.Error "UPSTREAM_UNAVAILABLE"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /plugins/install [post]

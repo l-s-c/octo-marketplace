@@ -12,7 +12,7 @@ import (
 // CanonicalDocuments carries contract-canonical plugin documents and their
 // hashes. Canonicalization, schema validation, per-type file rules, and the
 // plugin_hash formula all come from octo-plugin-lib; the marketplace adds only
-// host-owned rules on top (secret scan, storage-key scoping, tags==labels).
+// host-owned rules on top (storage-key scoping, tags==labels).
 type CanonicalDocuments struct {
 	Manifest     json.RawMessage
 	Package      json.RawMessage
@@ -64,7 +64,7 @@ func CanonicalizeManifest(name string, typ model.PluginType, tags, manifest json
 
 // CanonicalizeDocuments validates a manifest/package pair through the
 // octo-plugin-lib contract (canonical form, per-type file rules, connector
-// descriptor, hash), then applies the host-only rules: secret scan, approved
+// descriptor, hash), then applies the host-only rules: approved
 // storage-key scoping, and size caps. plugin_hash uses the lib formula
 // sha256(canonicalManifest || canonicalPackage); manifest_hash stays a
 // host-only column over the canonical manifest.
