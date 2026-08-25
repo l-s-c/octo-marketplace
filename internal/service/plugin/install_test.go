@@ -286,3 +286,25 @@ func TestSkillRefChargesMarkdownAgainstBudget(t *testing.T) {
 func freshBudget() *installBudget {
 	return &installBudget{bytes: int64(100) << 20, targets: maxInstallRelationTargets}
 }
+
+// TestSkillRefsFromRelationsFailsLoudOnExhaustedTargets is the r10 fix: once the
+// install-wide target budget is spent, the fan-out must return ErrTooLarge
+// rather than silently dropping targets (a partial/leaderless install reported
+// as success).
+func TestSkillRefsFromRelationsFailsLoudOnExhaustedTargets(t *testing.T) {
+	space := "space-a"
+	skillPkg := packageWith(rawAtt("SKILL.md", "# doc"))
+	f := &fakeStore{plugins: map[string]*model.Plugin{
+		"skill-a": {ID: "skill-a", Name: "A", Type: model.PluginTypeSkill, OwnerUID: "user-1", SpaceID: &space, Manifest: json.RawMessage(`{}`), Package: skillPkg},
+		"skill-b": {ID: "skill-b", Name: "B", Type: model.PluginTypeSkill, OwnerUID: "user-1", SpaceID: &space, Manifest: json.RawMessage(`{}`), Package: skillPkg},
+	}}
+	rels := []model.PluginRelation{
+		{TargetPluginID: "skill-a", Type: "expert_skill", Status: 1},
+		{TargetPluginID: "skill-b", Type: "expert_skill", Status: 1},
+	}
+	budget := &installBudget{bytes: int64(100) << 20, targets: 1} // room for one target only
+	_, err := fixedService(f).skillRefsFromRelations(context.Background(), testCaller, rels, budget)
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge (loud truncation)", err)
+	}
+}

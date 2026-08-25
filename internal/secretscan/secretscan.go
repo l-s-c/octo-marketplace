@@ -172,7 +172,7 @@ func containerHasValue(value any, container string) bool {
 			// ANY key name — env/headers allow ordinary literals but not a leaked
 			// "sk-live-…"/"ghp_…" the key name (OPENAI_KEY, GH_PAT, DB_PASS) would
 			// otherwise let slip past the key-name check below.
-			if s, ok := child.(string); ok && hasCredentialPrefix(s) {
+			if s, ok := child.(string); ok && looksLikeCredentialValue(s) {
 				return true
 			}
 			if isDeclaration(normalizedKey) {
@@ -204,7 +204,7 @@ func containerHasValue(value any, container string) bool {
 			if strictContainer && nonEmptyLiteral(child) {
 				return true
 			}
-			if s, ok := child.(string); ok && hasCredentialPrefix(s) {
+			if s, ok := child.(string); ok && looksLikeCredentialValue(s) {
 				return true
 			}
 			if containerHasValue(child, container) {
@@ -216,7 +216,7 @@ func containerHasValue(value any, container string) bool {
 		// — a string child is never a declaration object, so scan it directly. For
 		// the strict containers any non-reference literal is a secret value; env
 		// and header string values stay lenient EXCEPT a known credential prefix.
-		return (strictContainer && nonEmptyLiteral(x)) || hasCredentialPrefix(x)
+		return (strictContainer && nonEmptyLiteral(x)) || looksLikeCredentialValue(x)
 	}
 	return false
 }
@@ -288,11 +288,11 @@ func looksLikeSecretValue(v string) bool {
 }
 
 // hasCredentialPrefix reports whether a value begins with a well-known
-// credential prefix (sk-, ghp_, xoxb-, …). Unlike looksLikeSecretValue it omits
-// the entropy branch, so it stays safe to apply to env/header scalar VALUES
-// under any key name — where option A allows ordinary literals (REGION, UUIDs)
-// but a prefixed credential like "sk-live-…" or "ghp_…" is still a secret that
-// must not be persisted, regardless of the key's name.
+// credential prefix. It is used ONLY on the declaration-NAME side (via
+// looksLikeSecretValue), where the surface is narrow and a short stem is safe.
+// For arbitrary config VALUES use looksLikeCredentialValue instead — a short
+// stem there collides with ordinary config ("Asia/Shanghai", "sk-SK",
+// "npm_config_registry").
 func hasCredentialPrefix(v string) bool {
 	s := strings.ToLower(strings.TrimSpace(v))
 	if s == "" || isReference(s) {
@@ -300,6 +300,49 @@ func hasCredentialPrefix(v string) bool {
 	}
 	for _, p := range secretValuePrefixes {
 		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// credentialValueShapes are anchored, high-confidence credential SHAPES for
+// scanning arbitrary config VALUES under env/headers. Unlike the name-side
+// short-stem list, each requires enough structure (a fixed prefix plus a
+// minimum body of the right character class) that it does not collide with
+// ordinary configuration such as "Asia/Shanghai", "sk-SK",
+// "npm_config_registry", locale codes, UUIDs, or version strings.
+var credentialValueShapes = []*regexp.Regexp{
+	regexp.MustCompile(`^(AKIA|ASIA)[A-Z0-9]{16}$`),                                 // AWS access key id
+	regexp.MustCompile(`^AIza[0-9A-Za-z_-]{35}$`),                                   // Google API key
+	regexp.MustCompile(`^gh[pousr]_[A-Za-z0-9]{20,255}$`),                           // GitHub token
+	regexp.MustCompile(`^github_pat_[A-Za-z0-9_]{30,255}$`),                         // GitHub fine-grained PAT
+	regexp.MustCompile(`^glpat-[A-Za-z0-9_-]{20,}$`),                                // GitLab PAT
+	regexp.MustCompile(`^xox[baprs]-[A-Za-z0-9-]{10,}$`),                            // Slack
+	regexp.MustCompile(`^xapp-[A-Za-z0-9-]{10,}$`),                                  // Slack app-level
+	regexp.MustCompile(`^(sk|pk|rk)_live_[A-Za-z0-9]{16,}$`),                        // Stripe live
+	regexp.MustCompile(`^sk-[A-Za-z0-9_-]{20,}$`),                                   // OpenAI / Anthropic sk-
+	regexp.MustCompile(`^eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+$`), // JWT (three base64url segments)
+	regexp.MustCompile(`^ya29\.[A-Za-z0-9_-]{20,}$`),                                // Google OAuth access token
+	regexp.MustCompile(`^dop_v1_[a-f0-9]{64}$`),                                     // DigitalOcean
+	regexp.MustCompile(`^shp(at|pa)_[a-f0-9]{32}$`),                                 // Shopify
+	regexp.MustCompile(`^sq0atp-[A-Za-z0-9_-]{22,}$`),                               // Square
+	regexp.MustCompile(`^npm_[A-Za-z0-9]{36}$`),                                     // npm automation token
+}
+
+// looksLikeCredentialValue reports whether a config VALUE matches a full,
+// anchored credential shape. It deliberately requires the whole token to match
+// (not just a prefix), so it catches a real "sk-…"/"ghp_…"/AWS/JWT credential
+// leaked under an ordinary env/header key while leaving ordinary literals
+// (regions, timezones, locale codes, UUIDs, version tags) writable under
+// option A. It does NOT use the entropy branch, which would over-flag UUIDs.
+func looksLikeCredentialValue(v string) bool {
+	s := strings.TrimSpace(v)
+	if s == "" || isReference(s) {
+		return false
+	}
+	for _, re := range credentialValueShapes {
+		if re.MatchString(s) {
 			return true
 		}
 	}

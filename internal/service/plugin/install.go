@@ -121,6 +121,10 @@ func (s *Service) agentSpecFromPlugin(ctx context.Context, caller Caller, detail
 	p := detail.Plugin
 	instruction, _ := rawAttachmentContent(p.Package, "AGENTS.md")
 	mcpConfig, _ := rawAttachmentContent(p.Package, "mcp.json")
+	// Charge the agent's own inline documents against the shared budget so the
+	// invariant "aggregate resident bytes are bounded across the fan-out" holds
+	// for members too, not just their skills (P1-3).
+	budget.bytes -= int64(len(instruction) + len(mcpConfig))
 	skills, err := s.skillRefsFromRelations(ctx, caller, detail.Relations, budget)
 	if err != nil {
 		return nil, err
@@ -148,10 +152,12 @@ func (s *Service) squadFromPlugin(ctx context.Context, caller Caller, detail *De
 	memberRelations := relationsOfType(detail.Relations, "expert_team_expert")
 	members := make([]model.SquadMember, 0, len(memberRelations))
 	for _, rel := range memberRelations {
-		// Members count against the same install-wide target budget as skills, so
-		// a large team cannot multiply into an unbounded Detail fan-out.
+		// Loud structural truncation (see skillRefsFromRelations): refuse rather
+		// than install a squad missing members once the install-wide target
+		// budget is spent — a silently leaderless/partial team is worse than an
+		// error the caller can act on.
 		if budget.targets <= 0 {
-			break
+			return nil, ErrTooLarge
 		}
 		budget.targets--
 		memberDetail, err := s.Detail(ctx, caller, rel.TargetPluginID, true)
@@ -192,6 +198,9 @@ func (s *Service) squadMemberFromPlugin(ctx context.Context, caller Caller, rel 
 	}
 	instruction, _ := rawAttachmentContent(mp.Package, "AGENTS.md")
 	mcpConfig, _ := rawAttachmentContent(mp.Package, "mcp.json")
+	// Charge the member's inline documents against the shared budget (P1-3), so a
+	// large team's member instructions count toward the aggregate memory bound.
+	budget.bytes -= int64(len(instruction) + len(mcpConfig))
 	skills, err := s.skillRefsFromRelations(ctx, caller, memberDetail.Relations, budget)
 	if err != nil {
 		return nil, err
@@ -216,10 +225,13 @@ func (s *Service) skillRefsFromRelations(ctx context.Context, caller Caller, rel
 	skillRelations := relationsOfType(relations, "expert_skill")
 	refs := make([]model.SkillRef, 0, len(skillRelations))
 	for _, rel := range skillRelations {
-		// Stop the fan-out once the install-wide target or byte budget is spent,
-		// bounding both the Detail query storm and resident memory.
+		// Structural truncation must be loud: if the install-wide target or byte
+		// budget is exhausted, a skill would be silently dropped — fail with the
+		// too-large error instead so the caller sees a partial topology was
+		// refused, not installed. (Intra-skill content degradation inside
+		// skillRefFromPlugin stays silent — that is pre-existing and bounded.)
 		if budget.targets <= 0 || budget.bytes <= 0 {
-			break
+			return nil, ErrTooLarge
 		}
 		budget.targets--
 		target, err := s.Detail(ctx, caller, rel.TargetPluginID, false)

@@ -83,31 +83,35 @@ func TestPresentEnvHeadersLenient(t *testing.T) {
 }
 
 // TestPresentEnvHeadersCatchesPrefixedValueUnderOrdinaryKey is the r8/r9
-// regression: a credential-shaped VALUE (known prefix) must be caught even when
-// the KEY name is ordinary and would otherwise slip the key-name check —
-// OPENAI_KEY / GH_PAT / X-Custom carrying sk-/ghp_/xoxb- tokens. The
-// prefix-only heuristic must NOT re-flag ordinary long values (UUIDs, region
-// strings), which option A deliberately allows.
+// regression: a credential-shaped VALUE must be caught even when the KEY name
+// is ordinary — OPENAI_KEY / GH_PAT / X-Custom carrying full sk-/ghp_/xoxb-
+// tokens. The shape-anchored heuristic (r10 fix) must NOT re-flag ordinary
+// values that merely share a short stem (Asia/Shanghai, sk-SK,
+// npm_config_registry) or long non-credentials (UUIDs, version tags).
 func TestPresentEnvHeadersCatchesPrefixedValueUnderOrdinaryKey(t *testing.T) {
 	bad := []string{
-		`{"env":{"OPENAI_KEY":"sk-proj-abcdef0123456789"}}`,
-		`{"env":{"GH_PAT":"ghp_abcdef0123456789"}}`,
-		`{"env":{"ANTHROPIC":"sk-ant-abcdef0123456789"}}`,
-		`{"headers":{"X-Custom":"xoxb-1111-2222-abcdef"}}`,
+		`{"env":{"OPENAI_KEY":"sk-proj-aaaaaaaaaaaaaaaaaaaaaa"}}`, // gitleaks:allow
+		`{"env":{"GH_PAT":"ghp_aaaaaaaaaaaaaaaaaaaaaaaa"}}`,       // gitleaks:allow
+		`{"env":{"ANTHROPIC":"sk-ant-aaaaaaaaaaaaaaaaaaaaaa"}}`,   // gitleaks:allow
+		`{"headers":{"X-Custom":"xoxb-1111111111111111"}}`,        // gitleaks:allow
+		`{"env":{"CREDS":"AKIAAAAAAAAAAAAAAAAA"}}`,                // gitleaks:allow
 	}
 	for _, doc := range bad {
 		if !Present(decode(t, doc)) {
-			t.Fatalf("prefixed credential under ordinary key accepted: %s", doc)
+			t.Fatalf("shaped credential under ordinary key accepted: %s", doc)
 		}
 	}
 	good := []string{
-		`{"env":{"BUILD_ID":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}}`, // UUID, not a credential prefix
+		`{"env":{"TZ":"Asia/Shanghai"}}`,                              // short "asia" stem, not a credential
+		`{"env":{"LOCALE":"sk-SK"}}`,                                  // "sk-" stem, far too short to be a key
+		`{"env":{"NPM_CFG":"npm_config_registry"}}`,                   // "npm_" stem, wrong shape
+		`{"env":{"BUILD_ID":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}}`, // UUID, not a credential shape
 		`{"env":{"REGION":"us-east-1","IMAGE_TAG":"v2.0.0-rc1-longbuildhash1234"}}`,
 		`{"headers":{"User-Agent":"octo-marketplace/1.0 (+https://example.com)"}}`,
 	}
 	for _, doc := range good {
 		if Present(decode(t, doc)) {
-			t.Fatalf("ordinary long env/header value over-flagged: %s", doc)
+			t.Fatalf("ordinary env/header value over-flagged: %s", doc)
 		}
 	}
 }
