@@ -37,9 +37,11 @@ compatibility after cutover.
   two JSON snapshot pairs exist in the row.
 - Point placement is represented by `placement_code`, not separate scene/slot
   columns. Category and Plugin placement records carry visibility and order.
-- Connector package/version/audit data must not persist or log secret values;
-  this invariant is enforced client-side (see the secret-handling divergence
-  record), not by a backend value scanner.
+- Connector package/version/audit data must not persist or log secret values.
+  NOTE: this invariant is **no longer enforced at the backend** — see the
+  ratified secret-handling divergence record below; the interactive connector
+  form applies a client-side `${PLACEHOLDER}` control, but the import and
+  direct-API paths are unguarded by deliberate decision.
 - Existing legacy routes and tables continue to operate during backend rollout;
   no long-term dual-write or compatibility layer is introduced.
 - API success and error envelopes follow the repository OpenAPI standard.
@@ -141,16 +143,31 @@ PR #67; this note is the decision record the brief's earlier wording predates.
 - **IDs are opaque UUIDv7**, not the ULID/prefixed forms some older docs
   describe; see `internal/service/plugin/id_boundary.go` and the banner in
   `docs/api/plugin-id.md`.
-- **Secret handling is client-side, not a backend scanner.** An earlier
-  iteration ran a heuristic secret-value scanner (`internal/secretscan`, wired
-  into the service write path and a repository persistence guard) that rejected
-  connector writes carrying credential-shaped values. It was removed: string
-  heuristics cannot reliably separate a secret from ordinary configuration
-  (regions, timezones, locale codes, version tags), and placing that
-  classification on a hard write gate produced oscillating false
-  positives/negatives. The connector form's "需要用户自行配置" (user-supplied)
-  toggle is now authoritative — toggled keys are written as `${PLACEHOLDER}`
-  references so no real secret reaches persistence, and the backend makes no
-  value judgment. The `must not persist secret values` invariant above still
-  holds; it is enforced at the point of entry (the frontend) rather than by a
-  backend guess.
+- **Backend no longer enforces "no persisted secret values" — ratified
+  removal.** An earlier iteration ran a heuristic secret-value scanner
+  (`internal/secretscan`, wired into the service write path and a repository
+  persistence guard) that rejected connector writes carrying credential-shaped
+  values. It was removed (commit `b3497e9`): string heuristics cannot reliably
+  separate a secret from ordinary configuration (regions, timezones, locale
+  codes, version tags), and placing that classification on a hard write gate
+  produced oscillating false positives/negatives across review rounds 8–11.
+  The connector form's "需要用户自行配置" (user-supplied) toggle now handles the
+  interactive path: toggled keys are written as `${PLACEHOLDER}` references so
+  no real secret is submitted from the form. **This is a client-side control,
+  not a backend guarantee**, and the following residual exposure is a
+  deliberate, owner-ratified decision rather than an oversight:
+  - The marketplace API is directly callable; an authenticated caller with
+    connector write access can upsert a connector whose `mcp.json`/env carries
+    a literal credential, and it persists.
+  - `/plugins/import` is a server-side ingestion path with no frontend toggle;
+    an imported connector carrying a literal secret persists unchanged and is
+    then distributed via download/install to every installing Space.
+  - Backfill migrations carry any secret values in legacy rows forward into the
+    new plugin tables instead of skipping them.
+
+  The "must not persist secret values" invariant in the load-bearing section is
+  therefore **not enforced at the backend**. The tradeoff (accept this exposure
+  vs. keep an unstable heuristic on a hard write gate, or run it advisory-only)
+  was decided in favor of removal; if the exposure proves unacceptable, the
+  restoration path is the shape-anchored detector from `77b6c11` (verified
+  stable) run as an advisory/audit signal rather than a reject gate.
