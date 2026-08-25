@@ -5,25 +5,22 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/Mininglamp-OSS/octo-marketplace/internal/id"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 	pluginrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/plugin"
 )
 
 type categoryStore interface {
 	ListPlacementCategories(context.Context, pluginrepo.Scope, string, model.PluginType) ([]model.PluginCategory, error)
-	ListAdminCategories(context.Context, model.PluginType) ([]model.PluginCategory, error)
 }
 
 // Categories serves the placement-aware category read, which stays separate
 // from Service because it needs only the read-side repository.
 type Categories struct {
 	repo categoryStore
-	id   func() string
 }
 
 func NewCategories(repo categoryStore) *Categories {
-	return &Categories{repo: repo, id: id.New}
+	return &Categories{repo: repo}
 }
 
 func (s *Categories) ListCategories(ctx context.Context, caller Caller, placement string, typ model.PluginType) ([]model.PluginCategory, error) {
@@ -40,11 +37,3 @@ func (s *Categories) ListCategories(ctx context.Context, caller Caller, placemen
 	return items, err
 }
 
-// AdminListCategories lists every category applicable to a plugin type with its
-// live-plugin count (admin taxonomy management).
-func (s *Categories) AdminListCategories(ctx context.Context, typ model.PluginType) ([]model.PluginCategory, error) {
-	if !validPluginType(typ) {
-		return nil, ErrInvalidRequest
-	}
-	return s.repo.ListAdminCategories(ctx, typ)
-}

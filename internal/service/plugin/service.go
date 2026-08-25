@@ -174,17 +174,6 @@ type PlacementRequest struct {
 
 func scope(c Caller) pluginrepo.Scope { return pluginrepo.Scope{CallerUID: c.UID, SpaceID: c.SpaceID} }
 
-// writeScope is the scope relation targets are resolved under during a write:
-// the caller's tenant scope normally, but the cross-Space admin scope on the
-// admin write path so a space-scoped target stays visible (matching the repo's
-// admin-aware lockRelationTargets).
-func writeScope(c Caller, admin bool) pluginrepo.Scope {
-	if admin {
-		return adminScope(c)
-	}
-	return scope(c)
-}
-
 func (s *Service) List(ctx context.Context, caller Caller, p ListParams) ([]model.Plugin, int64, error) {
 	if err := validateCaller(caller); err != nil {
 		return nil, 0, err
@@ -376,7 +365,7 @@ func (s *Service) createWithID(ctx context.Context, caller Caller, req WriteRequ
 		return nil, err
 	}
 	now := s.now()
-	p, rels, err := s.buildWrite(ctx, caller, "", req, now, false)
+	p, rels, err := s.buildWrite(ctx, caller, "", req, now)
 	if err != nil {
 		return nil, err
 	}
@@ -417,7 +406,7 @@ func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, re
 		return nil, ErrInvalidRequest
 	}
 	now := s.now()
-	p, rels, err := s.buildWrite(ctx, caller, storageID, req, now, false)
+	p, rels, err := s.buildWrite(ctx, caller, storageID, req, now)
 	if err != nil {
 		return nil, err
 	}
@@ -523,7 +512,7 @@ func (s *Service) Publish(ctx context.Context, caller Caller, pluginID string, r
 	return version, nil
 }
 
-func (s *Service) buildWrite(ctx context.Context, c Caller, pluginID string, req WriteRequest, now time.Time, admin bool) (*model.Plugin, []model.PluginRelation, error) {
+func (s *Service) buildWrite(ctx context.Context, c Caller, pluginID string, req WriteRequest, now time.Time) (*model.Plugin, []model.PluginRelation, error) {
 	name := strings.TrimSpace(req.Name)
 	if !validName(name) || !validPluginType(req.Type) || !validVisibility(req.Visibility, c.IsSystemAdmin) {
 		return nil, nil, ErrInvalidRequest
@@ -543,14 +532,14 @@ func (s *Service) buildWrite(ctx context.Context, c Caller, pluginID string, req
 	spaceID := c.SpaceID
 	createdBy, botUID, botName := provenance(c)
 	p := &model.Plugin{ID: pluginID, Name: name, Type: req.Type, CategoryID: trimOptional(req.CategoryID), Tags: docs.Tags, Publisher: strings.TrimSpace(req.Publisher), OwnerUID: c.UID, SpaceID: &spaceID, Visibility: req.Visibility, CreatorName: c.Name, CreatedByType: createdBy, CreatedByBotUID: botUID, CreatedByBotName: botName, Icon: icon, IconURL: s.resolveIcon(ctx, icon), ToolCount: toolCount, Manifest: docs.Manifest, Package: docs.Package, ManifestHash: docs.ManifestHash, PluginHash: docs.PluginHash, Status: 1, CreatedAt: now, UpdatedAt: now}
-	rels, err := s.buildRelations(ctx, c, admin, p, req.Relations, now)
+	rels, err := s.buildRelations(ctx, c, p, req.Relations, now)
 	if err != nil {
 		return nil, nil, err
 	}
 	return p, rels, nil
 }
 
-func (s *Service) buildRelations(ctx context.Context, c Caller, admin bool, source *model.Plugin, in []RelationRequest, now time.Time) ([]model.PluginRelation, error) {
+func (s *Service) buildRelations(ctx context.Context, c Caller, source *model.Plugin, in []RelationRequest, now time.Time) ([]model.PluginRelation, error) {
 	if len(in) > maxRelations {
 		return nil, ErrInvalidRequest
 	}
@@ -582,7 +571,7 @@ func (s *Service) buildRelations(ctx context.Context, c Caller, admin bool, sour
 		// On the admin write path the target must resolve cross-Space, matching
 		// the repo layer's admin-aware lockRelationTargets; the tenant scope would
 		// hide a space-scoped target and either 404 the edit or drop every edge.
-		target, _, err := s.repo.GetWithRelations(ctx, writeScope(c, admin), targetID)
+		target, _, err := s.repo.GetWithRelations(ctx, scope(c), targetID)
 		if err != nil {
 			return nil, mapStoreError(err)
 		}
