@@ -168,6 +168,13 @@ func containerHasValue(value any, container string) bool {
 			if strictContainer && nonEmptyLiteral(child) {
 				return true
 			}
+			// A scalar VALUE carrying a known credential prefix is a secret under
+			// ANY key name — env/headers allow ordinary literals but not a leaked
+			// "sk-live-…"/"ghp_…" the key name (OPENAI_KEY, GH_PAT, DB_PASS) would
+			// otherwise let slip past the key-name check below.
+			if s, ok := child.(string); ok && hasCredentialPrefix(s) {
+				return true
+			}
 			if isDeclaration(normalizedKey) {
 				if declarationSafe(normalizedKey, child) {
 					continue
@@ -197,6 +204,9 @@ func containerHasValue(value any, container string) bool {
 			if strictContainer && nonEmptyLiteral(child) {
 				return true
 			}
+			if s, ok := child.(string); ok && hasCredentialPrefix(s) {
+				return true
+			}
 			if containerHasValue(child, container) {
 				return true
 			}
@@ -205,8 +215,8 @@ func containerHasValue(value any, container string) bool {
 		// A container mapping directly to a scalar string (e.g. {"secrets":"..."})
 		// — a string child is never a declaration object, so scan it directly. For
 		// the strict containers any non-reference literal is a secret value; env
-		// and header string values stay lenient (harmless literals).
-		return strictContainer && nonEmptyLiteral(x)
+		// and header string values stay lenient EXCEPT a known credential prefix.
+		return (strictContainer && nonEmptyLiteral(x)) || hasCredentialPrefix(x)
 	}
 	return false
 }
@@ -266,16 +276,32 @@ func looksLikeSecretValue(v string) bool {
 	if s == "" || isReference(s) {
 		return false
 	}
-	lower := strings.ToLower(s)
-	for _, p := range secretValuePrefixes {
-		if strings.HasPrefix(lower, p) {
-			return true
-		}
+	if hasCredentialPrefix(s) {
+		return true
 	}
 	// A long single token with mixed character classes is opaque credential
 	// material, not a human-readable name (which stays short or spaced).
 	if len(s) >= 24 && !strings.ContainsAny(s, " \t\r\n") && mixedCharClasses(s) {
 		return true
+	}
+	return false
+}
+
+// hasCredentialPrefix reports whether a value begins with a well-known
+// credential prefix (sk-, ghp_, xoxb-, …). Unlike looksLikeSecretValue it omits
+// the entropy branch, so it stays safe to apply to env/header scalar VALUES
+// under any key name — where option A allows ordinary literals (REGION, UUIDs)
+// but a prefixed credential like "sk-live-…" or "ghp_…" is still a secret that
+// must not be persisted, regardless of the key's name.
+func hasCredentialPrefix(v string) bool {
+	s := strings.ToLower(strings.TrimSpace(v))
+	if s == "" || isReference(s) {
+		return false
+	}
+	for _, p := range secretValuePrefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
 	}
 	return false
 }

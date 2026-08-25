@@ -85,10 +85,10 @@ func (s *Service) Install(ctx context.Context, caller Caller, pluginID string, p
 	// skill of every member, so an expert_team fanning out to many members ×
 	// skills cannot multiply the resident-memory bound (A4/P1-3). Mirrors the
 	// download path's maxArchiveBytes ceiling.
-	budget := s.maxArchiveBytes
+	budget := newInstallBudget(s.maxArchiveBytes)
 	switch detail.Plugin.Type {
 	case model.PluginTypeExpert:
-		spec, err := s.agentSpecFromPlugin(ctx, caller, detail, &budget)
+		spec, err := s.agentSpecFromPlugin(ctx, caller, detail, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -99,7 +99,7 @@ func (s *Service) Install(ctx context.Context, caller Caller, pluginID string, p
 		s.trackInstall(ctx, detail.Plugin.ID)
 		return &InstallOutcome{AgentID: agentID}, nil
 	case model.PluginTypeExpertTeam:
-		squad, err := s.squadFromPlugin(ctx, caller, detail, &budget)
+		squad, err := s.squadFromPlugin(ctx, caller, detail, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -117,7 +117,7 @@ func (s *Service) Install(ctx context.Context, caller Caller, pluginID string, p
 // agentSpecFromPlugin materializes one expert Plugin into a provisioning spec:
 // the AGENTS.md instruction entry and root mcp.json from its package
 // attachments, packaged skills from its expert_skill relation targets.
-func (s *Service) agentSpecFromPlugin(ctx context.Context, caller Caller, detail *Detail, budget *int64) (*expertsvc.ProvisionAgentSpec, error) {
+func (s *Service) agentSpecFromPlugin(ctx context.Context, caller Caller, detail *Detail, budget *installBudget) (*expertsvc.ProvisionAgentSpec, error) {
 	p := detail.Plugin
 	instruction, _ := rawAttachmentContent(p.Package, "AGENTS.md")
 	mcpConfig, _ := rawAttachmentContent(p.Package, "mcp.json")
@@ -138,7 +138,7 @@ func (s *Service) agentSpecFromPlugin(ctx context.Context, caller Caller, detail
 // expert provisioner consumes: leader and strategies from team/config.json,
 // members from expert_team_expert relations (relation_json carries role,
 // is_leader, and member_key), each member's spec from its own Plugin.
-func (s *Service) squadFromPlugin(ctx context.Context, caller Caller, detail *Detail, budget *int64) (*model.Squad, error) {
+func (s *Service) squadFromPlugin(ctx context.Context, caller Caller, detail *Detail, budget *installBudget) (*model.Squad, error) {
 	p := detail.Plugin
 	// Contract layout: the team package is a single AGENTS.md document that
 	// carries the collaboration/dispatch prose; it becomes the Loop squad's
@@ -148,6 +148,12 @@ func (s *Service) squadFromPlugin(ctx context.Context, caller Caller, detail *De
 	memberRelations := relationsOfType(detail.Relations, "expert_team_expert")
 	members := make([]model.SquadMember, 0, len(memberRelations))
 	for _, rel := range memberRelations {
+		// Members count against the same install-wide target budget as skills, so
+		// a large team cannot multiply into an unbounded Detail fan-out.
+		if budget.targets <= 0 {
+			break
+		}
+		budget.targets--
 		memberDetail, err := s.Detail(ctx, caller, rel.TargetPluginID, true)
 		if err != nil {
 			return nil, err
@@ -167,7 +173,7 @@ func (s *Service) squadFromPlugin(ctx context.Context, caller Caller, detail *De
 	}, nil
 }
 
-func (s *Service) squadMemberFromPlugin(ctx context.Context, caller Caller, rel model.PluginRelation, memberDetail *Detail, budget *int64) (*model.SquadMember, error) {
+func (s *Service) squadMemberFromPlugin(ctx context.Context, caller Caller, rel model.PluginRelation, memberDetail *Detail, budget *installBudget) (*model.SquadMember, error) {
 	mp := memberDetail.Plugin
 	// relation_json is authoritative for squad wiring; expert/context.json is
 	// the snapshot fallback carried inside the member package.
@@ -206,15 +212,21 @@ func (s *Service) squadMemberFromPlugin(ctx context.Context, caller Caller, rel 
 // SKILL.md and supporting text files inline (fetching any storage-backed text
 // through this service's object store); legacy pointer skills keep their
 // object/zip keys for the provisioner to fetch.
-func (s *Service) skillRefsFromRelations(ctx context.Context, caller Caller, relations []model.PluginRelation, remaining *int64) ([]model.SkillRef, error) {
+func (s *Service) skillRefsFromRelations(ctx context.Context, caller Caller, relations []model.PluginRelation, budget *installBudget) ([]model.SkillRef, error) {
 	skillRelations := relationsOfType(relations, "expert_skill")
 	refs := make([]model.SkillRef, 0, len(skillRelations))
 	for _, rel := range skillRelations {
+		// Stop the fan-out once the install-wide target or byte budget is spent,
+		// bounding both the Detail query storm and resident memory.
+		if budget.targets <= 0 || budget.bytes <= 0 {
+			break
+		}
+		budget.targets--
 		target, err := s.Detail(ctx, caller, rel.TargetPluginID, false)
 		if err != nil {
 			return nil, err
 		}
-		refs = append(refs, s.skillRefFromPlugin(ctx, target.Plugin, remaining))
+		refs = append(refs, s.skillRefFromPlugin(ctx, target.Plugin, budget))
 	}
 	return refs, nil
 }
@@ -225,7 +237,7 @@ func (s *Service) skillRefsFromRelations(ctx context.Context, caller Caller, rel
 // provisioner. Storage-backed supporting files are fetched here and included
 // only when they are UTF-8 text (binaries are skipped, mirroring the fleet
 // text-only skill-file store).
-func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, remaining *int64) model.SkillRef {
+func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, budget *installBudget) model.SkillRef {
 	ref := model.SkillRef{Name: p.Name}
 	var legacy struct {
 		FileName     string   `json:"file_name"`
@@ -275,32 +287,34 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, remai
 		return ref
 	}
 	// Tree shape: resolve SKILL.md and supporting text files from the attachments.
-	if md, ok := rawAttachmentContent(p.Package, "SKILL.md"); ok {
+	// Bound the inline document by the shared budget BEFORE assigning it — it is
+	// the single largest inline payload per skill, so over a large fan-out it must
+	// be gated, not charged after the fact (which let the budget go negative and
+	// the memory unbounded, P1-3). Once the budget is exhausted, later skills get
+	// an empty ref rather than more resident bytes.
+	if md, ok := rawAttachmentContent(p.Package, "SKILL.md"); ok && int64(len(md)) <= budget.bytes {
 		ref.Markdown = md
-		// Charge the skill's own document against the shared budget too — it is the
-		// single largest inline payload per skill (P1-3). SKILL.md is required, so
-		// it is always included; the decrement bounds the subsequent fan-out.
-		*remaining -= int64(len(md))
+		budget.bytes -= int64(len(md))
 	}
 	// Cap the supporting files materialized here BEFORE fetching, mirroring the
 	// downstream per-skill fan-out budget (expert.maxSkillFilesPerSkill). Counting
 	// every processed attachment — not just accepted text — bounds both the
 	// GetObject fan-out and the in-memory SupportingFiles slice for a plugin whose
-	// plugin_json packs thousands of storage attachments. The shared *remaining
+	// plugin_json packs thousands of storage attachments. The shared budget.bytes
 	// byte budget additionally caps aggregate resident bytes across the install.
 	processed := 0
 	for _, a := range decodePackageAttachments(p.Package) {
 		if a.Path == "SKILL.md" {
 			continue
 		}
-		if processed >= maxInstallSupportingFiles || *remaining <= 0 {
+		if processed >= maxInstallSupportingFiles || budget.bytes <= 0 {
 			break
 		}
 		processed++
 		if a.ContentType == "raw" {
-			if utf8.ValidString(a.RawContent) && int64(len(a.RawContent)) <= *remaining {
+			if utf8.ValidString(a.RawContent) && int64(len(a.RawContent)) <= budget.bytes {
 				ref.SupportingFiles = append(ref.SupportingFiles, model.SkillFile{Path: a.Path, Content: a.RawContent})
-				*remaining -= int64(len(a.RawContent))
+				budget.bytes -= int64(len(a.RawContent))
 			}
 			continue
 		}
@@ -308,9 +322,9 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, remai
 		// object is not pulled in full only to be discarded (P1-3); readStorageText
 		// reads at most limit+1 and reports too-large rather than truncating (B2),
 		// and verifies the recorded content_hash/content_size before use.
-		if content, ok := s.readStorageText(ctx, p.SpaceID, a.StorageURI, *remaining, a.ContentSize, a.ContentHash); ok {
+		if content, ok := s.readStorageText(ctx, p.SpaceID, a.StorageURI, budget.bytes, a.ContentSize, a.ContentHash); ok {
 			ref.SupportingFiles = append(ref.SupportingFiles, model.SkillFile{Path: a.Path, Content: content})
-			*remaining -= int64(len(content))
+			budget.bytes -= int64(len(content))
 		}
 	}
 	return ref
@@ -321,6 +335,26 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, remai
 // provisioner's per-skill file budget so this pre-fetch cap can never admit more
 // than the downstream stage would accept anyway.
 const maxInstallSupportingFiles = 50
+
+// maxInstallRelationTargets caps how many relation targets (skills, squad
+// members) one install resolves in total. maxRelations (200) is per-plugin, so
+// without an install-wide cap an expert_team could fan out to 200 members ×
+// 200 skills = 40k Detail round-trips and SkillRefs. This bounds both the query
+// count and the resident memory across the whole fan-out.
+const maxInstallRelationTargets = 500
+
+// installBudget is the shared, mutable budget threaded through the relation
+// fan-out of one install: an aggregate reconstructed-byte ceiling and a total
+// resolved-target ceiling. Both are decremented as targets/documents are
+// materialized and stop the fan-out once exhausted.
+type installBudget struct {
+	bytes   int64
+	targets int
+}
+
+func newInstallBudget(bytes int64) *installBudget {
+	return &installBudget{bytes: bytes, targets: maxInstallRelationTargets}
+}
 
 // readStorageText fetches a storage attachment from this plugin's managed prefix
 // and returns it only when it is valid UTF-8 text within the caller's remaining
