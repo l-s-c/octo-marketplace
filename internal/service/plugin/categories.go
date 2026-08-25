@@ -36,4 +36,3 @@ func (s *Categories) ListCategories(ctx context.Context, caller Caller, placemen
 	}
 	return items, err
 }
-
