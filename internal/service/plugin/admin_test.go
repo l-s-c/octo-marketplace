@@ -120,6 +120,40 @@ func TestAdminUpdatePreservesTenantVisibilityAndOwner(t *testing.T) {
 	}
 }
 
+// TestAdminUpdateResolvesRelationTargetsUnderAdminScope is the regression for
+// the admin relation-target scope loss: an admin edit of a space-scoped expert
+// that relates to a space-scoped skill must validate the relation target
+// cross-Space (admin scope). Under the tenant scope the target is invisible, so
+// the edit would 404 (echo) or silently drop every edge (omit).
+func TestAdminUpdateResolvesRelationTargetsUnderAdminScope(t *testing.T) {
+	tenant := "tenant-space"
+	expert := &model.Plugin{ID: "expert-1", Name: "E", Type: model.PluginTypeExpert, OwnerUID: "tenant-user", SpaceID: &tenant, Visibility: model.PluginVisibilitySpace, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	skill := &model.Plugin{ID: "skill-1", Name: "S", Type: model.PluginTypeSkill, OwnerUID: "tenant-user", SpaceID: &tenant, Visibility: model.PluginVisibilitySpace, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	f := &fakeStore{
+		scopeAware: true,
+		plugins:    map[string]*model.Plugin{"expert-1": expert, "skill-1": skill},
+		relations:  map[string][]model.PluginRelation{"expert-1": {{ID: "r1", SourcePluginID: "expert-1", TargetPluginID: "skill-1", Type: "expert_skill", Status: 1}}},
+	}
+	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"E","plugin_type":"expert","name":"e","description":"d","labels":[],"examples":[]}`)
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[{"path":"AGENTS.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# doc"}]}`)
+	req := WriteRequest{
+		Name:       "E",
+		Type:       model.PluginTypeExpert,
+		Visibility: model.PluginVisibilitySpace,
+		Tags:       json.RawMessage(`[]`),
+		Manifest:   manifest,
+		Package:    pkg,
+		Relations:  []RelationRequest{{TargetPluginID: "skill-1", Type: "expert_skill", SortOrder: 0}},
+	}
+	if _, err := fixedService(f).AdminUpdate(context.Background(), adminCaller, "expert-1", req); err != nil {
+		t.Fatalf("admin update echoing a space-scoped relation failed: %v", err)
+	}
+	// The relation survived to the repo — not dropped by a lost-scope 404.
+	if f.update == nil || len(f.updateRels) != 1 || f.updateRels[0].TargetPluginID != "skill-1" {
+		t.Fatalf("relation not carried to Update: %#v", f.updateRels)
+	}
+}
+
 // TestAdminDeleteUsesAdminScope confirms delete runs cross-Space with no owner
 // predicate (Scope.Admin), unlike the owner-gated Delete.
 func TestAdminDeleteUsesAdminScope(t *testing.T) {

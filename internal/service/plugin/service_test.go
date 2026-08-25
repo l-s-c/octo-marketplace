@@ -24,12 +24,14 @@ type fakeStore struct {
 	createRels     []model.PluginRelation
 	createAudit    model.PluginAuditLog
 	update         *model.Plugin
+	updateRels     []model.PluginRelation
 	deleteScope    pluginrepo.Scope
 	deleteID       string
 	versionID      string
 	publishParams  pluginrepo.PublishParams
 	versions       []model.PluginVersion
 	versionExists  bool
+	scopeAware     bool
 	versionTotal   int64
 	list           []model.Plugin
 	memberCounts   map[string]int
@@ -49,7 +51,7 @@ func (f *fakeStore) ListTags(_ context.Context, _ pluginrepo.Scope, filter plugi
 	f.tagFilter = filter
 	return f.tags, f.err
 }
-func (f *fakeStore) GetWithRelations(_ context.Context, _ pluginrepo.Scope, id string) (*model.Plugin, []model.PluginRelation, error) {
+func (f *fakeStore) GetWithRelations(_ context.Context, sc pluginrepo.Scope, id string) (*model.Plugin, []model.PluginRelation, error) {
 	f.getIDs = append(f.getIDs, id)
 	if f.err != nil {
 		return nil, nil, f.err
@@ -57,6 +59,15 @@ func (f *fakeStore) GetWithRelations(_ context.Context, _ pluginrepo.Scope, id s
 	p := f.plugins[id]
 	if p == nil {
 		return nil, nil, pluginrepo.ErrNotFound
+	}
+	// Optional visibilitySQL emulation: a space/private row is visible only to a
+	// caller in its own Space, unless the scope is Admin (cross-Space). Lets a
+	// test reproduce the admin-vs-tenant relation-target scope divergence.
+	if f.scopeAware && !sc.Admin {
+		spaceScoped := p.Visibility == model.PluginVisibilitySpace || p.Visibility == model.PluginVisibilityPrivate
+		if spaceScoped && (p.SpaceID == nil || *p.SpaceID != sc.SpaceID) {
+			return nil, nil, pluginrepo.ErrNotFound
+		}
 	}
 	copy := *p
 	rels := append([]model.PluginRelation(nil), f.relations[id]...)
@@ -81,7 +92,7 @@ func (f *fakeStore) Create(_ context.Context, s pluginrepo.Scope, m pluginrepo.M
 }
 func (f *fakeStore) Update(_ context.Context, _ pluginrepo.Scope, m pluginrepo.Mutation) (*pluginrepo.RelationSync, error) {
 	p := m.Plugin
-	f.update = &p
+	f.update, f.updateRels = &p, m.Relations
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -468,7 +479,7 @@ func TestSecretScanCoversEmbeddedAttachmentJSONForAllTypes(t *testing.T) {
 
 func TestSecretScanFailsClosedOnPathologicalNesting(t *testing.T) {
 	payload := `{"note":"harmless"}`
-	for i := 0; i < maxEmbeddedSecretScanDepth+1; i++ {
+	for i := 0; i < 7; i++ {
 		payload = `{"nested":` + quoted(payload) + `}`
 	}
 	r := expertRequestWithConfigAttachment(payload)

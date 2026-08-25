@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +34,53 @@ func TestListVersionsReturnsExactScopedTotalForEmptyPage(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestListVersionsRedactsCrossSpaceRelationTargets(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	now := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
+	mock.ExpectQuery(`SELECT .* FROM plugins p.*p.plugin_id=\?.*p.status=1.*p.space_id = \?.*p.owner_uid = \?`).
+		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID).
+		WillReturnRows(visiblePluginRow("plugin-id", scope, now))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugin_versions v JOIN plugins p ON p.plugin_id=v.plugin_id WHERE v.plugin_id=\? AND p.status=1.*p.space_id = \?.*p.owner_uid = \?`).
+		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	// The immutable snapshot embeds two relation targets; one is a private target
+	// the reading caller cannot see.
+	relJSON := `[{"target_plugin_id":"vis-target","relation_type":"expert_skill"},{"target_plugin_id":"priv-target","relation_type":"expert_skill","data":{"secret":"x"}}]`
+	mock.ExpectQuery(`SELECT v.version_id.*WHERE v.plugin_id=\? AND p.status=1.*p.space_id = \?.*p.owner_uid = \?.*LIMIT \? OFFSET \?`).
+		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID, 20, 0).
+		WillReturnRows(sqlmock.NewRows([]string{"version_id", "plugin_id", "version", "manifest_json", "plugin_json", "manifest_hash", "plugin_hash", "relations_json", "changelog", "created_by", "created_at"}).
+			AddRow("v1", "plugin-id", "1.0.0", "{}", "{}", "mh", "ph", relJSON, nil, "creator", now))
+	// The visibility re-check returns only the visible target (args order is
+	// map-iteration dependent, so match the query shape, not the args).
+	mock.ExpectQuery(`SELECT plugin_id FROM plugins WHERE plugin_id IN \(.*\?.*\) AND status=1 AND deleted_at IS NULL AND `).
+		WillReturnRows(sqlmock.NewRows([]string{"plugin_id"}).AddRow("vis-target"))
+
+	items, _, err := r.ListVersions(context.Background(), scope, "plugin-id", 20, 0)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items=%#v err=%v", items, err)
+	}
+	var kept []map[string]any
+	if err := json.Unmarshal(items[0].Relations, &kept); err != nil {
+		t.Fatal(err)
+	}
+	if len(kept) != 1 || kept[0]["target_plugin_id"] != "vis-target" {
+		t.Fatalf("relations not redacted to visible target: %s", items[0].Relations)
+	}
+	if bytesContains(items[0].Relations, "priv-target") {
+		t.Fatalf("private target leaked in version snapshot: %s", items[0].Relations)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func bytesContains(raw json.RawMessage, sub string) bool {
+	return strings.Contains(string(raw), sub)
 }
 
 func TestListVersionsCrossSpaceReturnsNotFoundBeforeCount(t *testing.T) {

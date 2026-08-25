@@ -121,7 +121,7 @@ func (s *Service) adminEffectiveWrite(ctx context.Context, caller Caller, plugin
 	eff.IsSystemAdmin = true // admins may mint/preserve system visibility
 	eff.SpaceID = adminGlobalSpace
 	req.Visibility = visibility
-	p, rels, err := s.buildWrite(ctx, eff, pluginID, req, s.now())
+	p, rels, err := s.buildWrite(ctx, eff, pluginID, req, s.now(), true)
 	if err != nil {
 		return nil, nil, err
 	}

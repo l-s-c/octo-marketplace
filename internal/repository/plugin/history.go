@@ -1,10 +1,12 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 	"github.com/go-sql-driver/mysql"
@@ -60,7 +62,94 @@ FROM plugin_versions v JOIN plugins p ON p.plugin_id=v.plugin_id WHERE v.plugin_
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
+	if err := r.redactVersionRelations(ctx, scope, out); err != nil {
+		return nil, 0, err
+	}
 	return out, total, nil
+}
+
+// redactVersionRelations drops, from each immutable version snapshot, any
+// relation whose target the reading caller cannot currently see. The snapshot is
+// denormalized JSON captured at the PUBLISHER's visibility, so a public plugin
+// relating to a same-Space private target would otherwise leak that target's id,
+// relation type, sort order and data to a cross-Space caller — the current-state
+// read (GetWithRelations) already filters this way. An unparseable snapshot is
+// redacted to empty (fail closed).
+func (r *Repo) redactVersionRelations(ctx context.Context, scope Scope, versions []model.PluginVersion) error {
+	parsed := make([][]map[string]any, len(versions))
+	targets := map[string]struct{}{}
+	for i := range versions {
+		if len(bytes.TrimSpace(versions[i].Relations)) == 0 {
+			continue
+		}
+		var rels []map[string]any
+		if err := json.Unmarshal(versions[i].Relations, &rels); err != nil {
+			versions[i].Relations = json.RawMessage("[]")
+			continue
+		}
+		parsed[i] = rels
+		for _, rel := range rels {
+			if id, ok := rel["target_plugin_id"].(string); ok && id != "" {
+				targets[id] = struct{}{}
+			}
+		}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	visible, err := r.visibleTargetIDs(ctx, scope, targets)
+	if err != nil {
+		return err
+	}
+	for i := range versions {
+		if parsed[i] == nil {
+			continue
+		}
+		kept := make([]map[string]any, 0, len(parsed[i]))
+		for _, rel := range parsed[i] {
+			id, _ := rel["target_plugin_id"].(string)
+			if _, ok := visible[id]; ok {
+				kept = append(kept, rel)
+			}
+		}
+		raw, err := json.Marshal(kept)
+		if err != nil {
+			return err
+		}
+		versions[i].Relations = raw
+	}
+	return nil
+}
+
+// visibleTargetIDs returns the subset of ids the caller may currently see, under
+// the same visibility predicate as the catalog read (admin scope sees all).
+func (r *Repo) visibleTargetIDs(ctx context.Context, scope Scope, ids map[string]struct{}) (map[string]struct{}, error) {
+	idList := make([]any, 0, len(ids))
+	for id := range ids {
+		idList = append(idList, id)
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(idList)), ",")
+	where := visibilitySQL
+	args := append([]any{}, idList...)
+	if scope.Admin {
+		where = "1=1"
+	} else {
+		args = append(args, scope.SpaceID, scope.CallerUID)
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT plugin_id FROM plugins WHERE plugin_id IN (`+placeholders+`) AND status=1 AND deleted_at IS NULL AND `+where, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	visible := make(map[string]struct{}, len(idList))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		visible[id] = struct{}{}
+	}
+	return visible, rows.Err()
 }
 
 func scanPluginVersion(s interface{ Scan(...any) error }) (*model.PluginVersion, error) {
