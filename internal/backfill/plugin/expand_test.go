@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	libplugin "codex.mlamp.cn/dmwork/octo-plugin-lib/plugin"
 	"github.com/DATA-DOG/go-sqlmock"
+	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
 )
 
 type stubExpander struct{ out string }

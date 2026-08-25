@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	libplugin "codex.mlamp.cn/dmwork/octo-plugin-lib/plugin"
+	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
 )
 
 type Mode string

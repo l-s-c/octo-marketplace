@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	libplugin "codex.mlamp.cn/dmwork/octo-plugin-lib/plugin"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
 )
 
 // CanonicalDocuments carries contract-canonical plugin documents and their

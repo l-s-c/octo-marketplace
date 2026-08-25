@@ -14,8 +14,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	libplugin "codex.mlamp.cn/dmwork/octo-plugin-lib/plugin"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/service/parse"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/storage"
 )

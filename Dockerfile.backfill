@@ -1,9 +1,12 @@
 FROM docker.m.daocloud.io/golang:1.25-alpine AS builder
 WORKDIR /app
-# Dependencies (including the private codex.mlamp.cn plugin lib) are vendored,
-# so the build needs no network or git credentials.
+# All dependencies are public (the plugin contract is inlined under
+# internal/plugincontract), so modules are fetched from the Go proxy — no
+# vendor tree, no git credentials, no private hosts.
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -mod=vendor -o /bin/plugin-backfill ./cmd/plugin-backfill
+RUN CGO_ENABLED=0 go build -o /bin/plugin-backfill ./cmd/plugin-backfill
 
 FROM docker.m.daocloud.io/alpine:3.21
 ENV TZ=Asia/Shanghai
