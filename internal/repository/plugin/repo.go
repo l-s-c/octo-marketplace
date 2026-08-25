@@ -22,8 +22,6 @@ var (
 	ErrInvalidPlacement = errors.New("invalid plugin placement")
 	// ErrUnsafeConnectorData prevents copying persisted connector secret values.
 	ErrUnsafeConnectorData = errors.New("unsafe connector secret data")
-	// ErrCategoryInUse blocks deleting a category still referenced by live plugins.
-	ErrCategoryInUse = errors.New("plugin category in use")
 )
 
 // Scope is authoritative caller context; it must never come from request data.

@@ -136,7 +136,7 @@ func (r *Repo) visibleTargetIDs(ctx context.Context, scope Scope, ids map[string
 	} else {
 		args = append(args, scope.SpaceID, scope.CallerUID)
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT plugin_id FROM plugins WHERE plugin_id IN (`+placeholders+`) AND status=1 AND deleted_at IS NULL AND `+where, args...)
+	rows, err := r.db.QueryContext(ctx, `SELECT p.plugin_id FROM plugins p WHERE p.plugin_id IN (`+placeholders+`) AND p.status=1 AND p.deleted_at IS NULL AND `+where, args...)
 	if err != nil {
 		return nil, err
 	}

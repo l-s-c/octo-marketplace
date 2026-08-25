@@ -167,6 +167,10 @@ func (r *Runner) repackagePlugins(ctx context.Context, p *repackagePlan) error {
 				p.issues = append(p.issues, Issue{"skip", "repackage_secret_rejected", "plugins", id, err.Error()})
 				continue
 			}
+			if err := decodablePackage(newPkg, typ); err != nil {
+				p.issues = append(p.issues, Issue{"skip", "repackage_invalid_package", "plugins", id, err.Error()})
+				continue
+			}
 		}
 		newHash, err := libplugin.ComputePluginHash(manifest, newPkg)
 		if err != nil {
@@ -210,6 +214,10 @@ func (r *Runner) repackageVersions(ctx context.Context, types map[string]string,
 		if changed {
 			if err := pluginsvc.RejectSecretValues(newPkg); err != nil {
 				p.issues = append(p.issues, Issue{"skip", "repackage_secret_rejected", "plugin_versions", id, err.Error()})
+				continue
+			}
+			if err := decodablePackage(newPkg, typ); err != nil {
+				p.issues = append(p.issues, Issue{"skip", "repackage_invalid_package", "plugin_versions", id, err.Error()})
 				continue
 			}
 		}
@@ -279,6 +287,11 @@ func (r *Runner) repackageAudits(ctx context.Context, types map[string]string, p
 					lastHash[pluginID] = oldAfter
 					continue
 				}
+				if err := decodablePackage(newPkg, typ); err != nil {
+					p.issues = append(p.issues, Issue{"skip", "repackage_invalid_package", "plugin_audit_logs", id, err.Error()})
+					lastHash[pluginID] = oldAfter
+					continue
+				}
 			}
 		}
 		snapshotHash := ""
@@ -300,7 +313,13 @@ func (r *Runner) repackageAudits(ctx context.Context, types map[string]string, p
 		if oldAfter != "" && snapshotHash != "" {
 			newAfter = snapshotHash
 		}
-		lastHash[pluginID] = newAfter
+		// A delete audit carries a NULL after_hash (newAfter==""); it must NOT
+		// become the chain link for the following row, or that row's before_hash
+		// repair is skipped (previous=="") and the chain breaks. Keep the last
+		// non-null after so a subsequent audit still links to a real predecessor.
+		if newAfter != "" {
+			lastHash[pluginID] = newAfter
+		}
 		if !changed && newBefore == oldBefore && newAfter == oldAfter {
 			continue
 		}
@@ -332,6 +351,20 @@ func (r *Runner) repackageRelations(ctx context.Context, p *repackagePlan) error
 		newID := id
 		if id == deterministicRelationID(source, legacyTeamRelation, order, target) {
 			newID = deterministicRelationID(source, contractTeamRelation, order, target)
+		}
+		if newID != id {
+			// Re-keying to a deterministic contract ID that already exists would
+			// raise a duplicate-key error inside the apply transaction and roll back
+			// every unrelated rewrite with no way to identify the offender. Detect
+			// the collision at plan time and record a skip instead (P2).
+			exists, err := r.rowExists(ctx, `SELECT COUNT(*) FROM plugin_relations WHERE relation_id=?`, newID)
+			if err != nil {
+				return err
+			}
+			if exists {
+				p.issues = append(p.issues, Issue{"skip", "relation_rekey_conflict", "plugin_relations", id, "target relation_id " + newID + " already exists"})
+				continue
+			}
 		}
 		p.actions = append(p.actions, repackageAction{
 			count: func(c *RepackageCounts) *int { return &c.Relations },
@@ -417,6 +450,20 @@ func hashColumn(value string, wasNull bool) any {
 //
 // Changed output is re-canonicalized with the lib encoder so persisted bytes
 // match what a fresh backfill would emit.
+// decodablePackage guards against committing a transformed package that only
+// ComputePluginHash-validates but DecodePackage-rejects (duplicate attachment
+// paths, a second AGENTS.md, a missing entry file). Such a row would be
+// permanently uneditable through the API, which runs DecodePackage on every
+// upsert — and migration is one-way, so we record a skip and leave the row
+// rather than write an unrepairable package (P1-4).
+func decodablePackage(pkg []byte, pluginType string) error {
+	if len(strings.TrimSpace(string(pkg))) == 0 {
+		return nil
+	}
+	_, err := libplugin.DecodePackage(libplugin.Type(pluginType), pkg)
+	return err
+}
+
 func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, bool, error) {
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		return raw, false, nil
@@ -551,10 +598,16 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 	return out, true, nil
 }
 
-// renameAttachment updates the path (content bytes and hash metadata stay).
+// renameAttachment updates the path (content bytes and hash metadata stay). It
+// refuses to rename onto an already-present target path, which would create two
+// attachments with the same path (a duplicate the lib's DecodePackage rejects);
+// callers treat a false return as "target already exists, leave it".
 func renameAttachment(attachments []any, from, to string) bool {
 	idx := attachmentIndex(attachments, from)
 	if idx < 0 {
+		return false
+	}
+	if attachmentIndex(attachments, to) >= 0 {
 		return false
 	}
 	entry, _ := attachments[idx].(map[string]any)

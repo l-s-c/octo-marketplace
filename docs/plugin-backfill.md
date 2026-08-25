@@ -10,13 +10,13 @@
 - Skill tags are resolved only through `skill_tags`; Expert and Expert Team tags are resolved separately through `expert_tags`. Unknown IDs reject the owning legacy row.
 - Experts and Expert Teams are imported as top-level Plugins with deterministic UUIDs. Legacy Expert `public` visibility becomes unified `space`, preserving its original Space-scoped visibility semantics.
 - Embedded Expert skills, Squad member snapshots, and each member's embedded skills become deterministic standalone Plugins; parent packages keep only their own files and never embed copies of related-plugin content, which lives solely in the standalone Plugin reachable through the relation edge. Stable persisted `member_key`, `object_key`, or `zip_object_key` values are used when present; otherwise identity includes the parent and source array position. Names, filenames, commands, and URLs are never used to infer catalog identity.
-- Relations are deterministic and retain source array order: `expert_team_member` for Team→member and `expert_skill` for Expert/member→Skill. Every version snapshots its sorted outgoing relations.
+- Relations are deterministic and retain source array order: `expert_team_expert` for Team→member and `expert_skill` for Expert/member→Skill. Every version snapshots its sorted outgoing relations.
 - Generated relation graphs must be acyclic, no deeper than 16 nodes, and contain no more than 500 nodes per connected component. A violation aborts planning before any write.
 - Top-level, member, and Connector MCP configurations are strictly sanitized. Exactly one JSON object is accepted; `env` and `headers` string values are blanked; non-empty or non-string secret-shaped fields reject the entire owning graph. Secret values are never written to Plugin, version, relation, audit, hash, or report data.
 - Placements are migrated to the confirmed `default` placement: every active category registers for each of its plugin types (ordered by its legacy `sort_order`), and every active top-level (non-embedded) Plugin is placed under its own category. Embedded plugins are never placed.
 - Skills, Experts, Expert Teams, generated member/skill snapshots, and MCP servers receive immutable version rows, `current_version_id`, and deterministic `import` audits. Existing Skill version history is retained; a deterministic snapshot is created only when no version row exists.
 - Planning validates every generated category, relation source/target, version owner, and `current_version_id` reference before writes; the command does not rely on database foreign keys.
-- Apply preflights every deterministic primary key against the complete expected row. An exact match is counted as existing; any mismatch aborts and rolls back instead of being hidden by `INSERT IGNORE`. Re-running resumes without a checkpoint table. Verify covers generated Plugins, relations, relation-bearing versions, and audits and reports missing or conflicting rows.
+- Apply preflights every deterministic primary key against the complete expected row. An exact match is counted as existing; any mismatch aborts and rolls back instead of being hidden by `INSERT IGNORE`. Re-running the SAME phase resumes without a checkpoint table; run phases in order (`plan` → `enrich` → `repackage` → `expand-skills`), because a later phase mutates columns a re-run of an earlier phase would otherwise flag (e.g. `enrich` populates `category_id`). Verify covers generated Plugins, relations, relation-bearing versions, and audits and reports missing or conflicting rows.
 
 ## Usage
 
@@ -34,7 +34,7 @@ Review every `issues` entry before cutover. A skipped field or row requires a pr
 
 ## Phases
 
-The command carries three idempotent phases (all support `dry-run` / `apply` / `verify`):
+The command carries four idempotent phases (all support `dry-run` / `apply` / `verify`):
 
 | Phase | What it does | When to run |
 | --- | --- | --- |
@@ -58,7 +58,10 @@ data phases above do NOT — run them explicitly right after deploying a new bac
    - fresh environment: `plan` apply → verify, then `enrich` apply → verify;
    - previously-deployed environment: `enrich` apply → verify (if pending), then
      `repackage` apply → verify, then `expand-skills` apply → verify
-     (each `remaining` must be all zeros; exit code 2 otherwise).
+     (each `remaining` must be all zeros AND `issues` empty; the command exits 2
+     in ANY mode — including `apply` — when a phase leaves a non-zero remaining
+     count or records an error/skip issue, so review the reported issues before
+     proceeding).
    `expand-skills` additionally needs object-storage env (`STORAGE_DRIVER` +
    `OSS_*` / `LOCAL_STORAGE_DIR`); the other phases run DB-only.
 4. Release the matching octo-web build in the same window — old and new frontends read

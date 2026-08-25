@@ -154,6 +154,30 @@ func TestAdminUpdateResolvesRelationTargetsUnderAdminScope(t *testing.T) {
 	}
 }
 
+// TestAdminUpdateAcceptsStorageAttachmentUnderRowSpace is the P1-1 regression:
+// an admin edit of a tenant-owned skill whose package carries a storage
+// attachment (the normal shape after expand-skills spills a file to object
+// storage) must canonicalize the storage key against the ROW's real Space, not
+// the empty global Space. Before the fix the empty Space failed safeObjectSegment
+// and the whole edit returned ErrInvalidRequest.
+func TestAdminUpdateAcceptsStorageAttachmentUnderRowSpace(t *testing.T) {
+	tenantSpace := "tenant-space"
+	existing := &model.Plugin{ID: "skill-1", Name: "Tenant Skill", Type: model.PluginTypeSkill, OwnerUID: "tenant-user", SpaceID: &tenantSpace, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	f := &fakeStore{plugins: map[string]*model.Plugin{"skill-1": existing}}
+	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"Tenant Skill","plugin_type":"skill","name":"tenant-skill","description":"d","labels":[],"examples":[]}`)
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+		`{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# Tenant Skill"},` +
+		`{"path":"assets/logo.bin","content_type":"storage","mime_type":"application/octet-stream","storage_uri":"plugins/tenant-space/attachments/skill-skill-1-deadbeefdeadbeef.bin"}` +
+		`]}`)
+	req := WriteRequest{Name: "Tenant Skill", Type: model.PluginTypeSkill, Tags: json.RawMessage(`[]`), Manifest: manifest, Package: pkg}
+	if _, err := fixedService(f).AdminUpdate(context.Background(), adminCaller, "skill-1", req); err != nil {
+		t.Fatalf("AdminUpdate with storage attachment under row space failed: %v", err)
+	}
+	if f.update == nil || f.update.SpaceID == nil || *f.update.SpaceID != tenantSpace {
+		t.Fatalf("row space not preserved: %#v", f.update)
+	}
+}
+
 // TestAdminDeleteUsesAdminScope confirms delete runs cross-Space with no owner
 // predicate (Scope.Admin), unlike the owner-gated Delete.
 func TestAdminDeleteUsesAdminScope(t *testing.T) {

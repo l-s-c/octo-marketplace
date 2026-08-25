@@ -54,9 +54,7 @@ func main() {
 		if e = enc.Encode(report); e != nil {
 			fatal(e)
 		}
-		if report.Observed.Missing > 0 || report.Observed.Conflicts > 0 {
-			os.Exit(2)
-		}
+		gateExit(report.Observed.Missing > 0 || report.Observed.Conflicts > 0, report.Issues)
 	case "enrich":
 		report, e := backfill.New(db).Enrich(ctx, backfill.Options{Mode: backfill.Mode(mode)})
 		if e != nil {
@@ -65,9 +63,7 @@ func main() {
 		if e = enc.Encode(report); e != nil {
 			fatal(e)
 		}
-		if mode == "verify" && report.Remaining != (backfill.EnrichCounts{}) {
-			os.Exit(2)
-		}
+		gateExit(report.Remaining != (backfill.EnrichCounts{}), report.Issues)
 	case "repackage":
 		report, e := backfill.New(db).Repackage(ctx, backfill.Options{Mode: backfill.Mode(mode)})
 		if e != nil {
@@ -76,9 +72,7 @@ func main() {
 		if e = enc.Encode(report); e != nil {
 			fatal(e)
 		}
-		if mode == "verify" && report.Remaining != (backfill.RepackageCounts{}) {
-			os.Exit(2)
-		}
+		gateExit(report.Remaining != (backfill.RepackageCounts{}), report.Issues)
 	case "expand-skills":
 		expander := newSkillExpander(db)
 		report, e := backfill.New(db).ExpandSkills(ctx, backfill.Options{Mode: backfill.Mode(mode)}, expander)
@@ -88,11 +82,25 @@ func main() {
 		if e = enc.Encode(report); e != nil {
 			fatal(e)
 		}
-		if mode == "verify" && report.Remaining != (backfill.ExpandCounts{}) {
-			os.Exit(2)
-		}
+		gateExit(report.Remaining != (backfill.ExpandCounts{}), report.Issues)
 	default:
 		fatal(fmt.Errorf("invalid phase %q", phase))
+	}
+}
+
+// gateExit fails the process (exit 2) when a phase left work undone in ANY mode,
+// not just verify (P1-5): a non-zero Remaining count, or any recorded error/skip
+// Issue (rows that could not be migrated). The runbook treats exit 2 as "review
+// the issues before proceeding", so an apply that silently skipped rows can no
+// longer exit 0 and read as fully migrated.
+func gateExit(remainingNonZero bool, issues []backfill.Issue) {
+	if remainingNonZero {
+		os.Exit(2)
+	}
+	for _, is := range issues {
+		if is.Level == "error" || is.Level == "skip" {
+			os.Exit(2)
+		}
 	}
 }
 

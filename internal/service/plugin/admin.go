@@ -112,14 +112,19 @@ func conventionVisibility(typ model.PluginType) (model.PluginVisibility, bool) {
 // adminEffectiveWrite fixes the caller identity and Space and stamps the given
 // visibility so buildWrite mints the admin conventions: system connectors (NULL
 // Space) and public skills (empty global Space) on create; the row's preserved
-// visibility on update. Returns the built plugin + relations.
-func (s *Service) adminEffectiveWrite(ctx context.Context, caller Caller, pluginID string, req WriteRequest, visibility model.PluginVisibility) (*model.Plugin, []model.PluginRelation, error) {
+// visibility on update. effectiveSpace is the Space storage-attachment keys are
+// namespaced under and must be the ROW's real Space — for an AdminUpdate of a
+// tenant-owned row that is old.SpaceID, not the empty global Space, otherwise
+// CanonicalizeDocuments rejects every storage attachment (safeObjectSegment
+// rejects the empty Space) and admins cannot edit any skill whose package spilled
+// a file to object storage (P1-1). Returns the built plugin + relations.
+func (s *Service) adminEffectiveWrite(ctx context.Context, caller Caller, pluginID string, req WriteRequest, visibility model.PluginVisibility, effectiveSpace string) (*model.Plugin, []model.PluginRelation, error) {
 	if !conventionType(req.Type) {
 		return nil, nil, ErrInvalidRequest
 	}
 	eff := caller
 	eff.IsSystemAdmin = true // admins may mint/preserve system visibility
-	eff.SpaceID = adminGlobalSpace
+	eff.SpaceID = effectiveSpace
 	req.Visibility = visibility
 	p, rels, err := s.buildWrite(ctx, eff, pluginID, req, s.now(), true)
 	if err != nil {
@@ -148,7 +153,7 @@ func (s *Service) AdminCreate(ctx context.Context, caller Caller, req WriteReque
 	if !ok {
 		return nil, ErrInvalidRequest
 	}
-	p, rels, err := s.adminEffectiveWrite(ctx, caller, "", req, visibility)
+	p, rels, err := s.adminEffectiveWrite(ctx, caller, "", req, visibility, adminGlobalSpace)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +185,14 @@ func (s *Service) AdminUpdate(ctx context.Context, caller Caller, pluginID strin
 	if req.Type != old.Type {
 		return nil, ErrInvalidRequest
 	}
-	p, rels, err := s.adminEffectiveWrite(ctx, caller, storageID, req, old.Visibility)
+	// Storage-attachment keys are namespaced under the row's real Space, so
+	// canonicalization must validate against it — not the empty global Space
+	// (P1-1). System connectors are space-less (old.SpaceID nil → empty).
+	effSpace := adminGlobalSpace
+	if old.SpaceID != nil {
+		effSpace = *old.SpaceID
+	}
+	p, rels, err := s.adminEffectiveWrite(ctx, caller, storageID, req, old.Visibility, effSpace)
 	if err != nil {
 		return nil, err
 	}

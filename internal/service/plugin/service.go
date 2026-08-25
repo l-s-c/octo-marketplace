@@ -23,6 +23,10 @@ var (
 	ErrInvalidRequest = errors.New("invalid plugin request")
 	ErrTooLarge       = errors.New("plugin artifact exceeds size limit")
 	ErrSecretValue    = errors.New("connector secret value is not allowed")
+	// ErrIntegrity is returned when a stored artifact's bytes do not match the
+	// content_hash/content_size recorded for it at publish time — a
+	// content-addressed object must never be served under a mismatched digest.
+	ErrIntegrity = errors.New("plugin artifact integrity check failed")
 )
 
 // Caller is populated from verified authentication context, never request JSON.

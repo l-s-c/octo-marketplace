@@ -11,7 +11,6 @@ package id
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"encoding/hex"
 	"time"
 )
@@ -34,15 +33,11 @@ func newAt(t time.Time) string {
 	raw[5] = byte(ms)
 
 	// The remaining 10 bytes are randomness (version and variant bits are
-	// overwritten below).
+	// overwritten below). crypto/rand.Read never returns an error on supported
+	// platforms; panic rather than degrade to a time-derived filler, which would
+	// make every ID minted in the same millisecond identical and collide.
 	if _, err := rand.Read(raw[6:]); err != nil {
-		// crypto/rand.Read never returns an error on supported platforms; fall
-		// back to a time-derived filler so the process still makes progress
-		// rather than panicking on an impossible branch.
-		filler := binary.BigEndian.Uint64([]byte{raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], 0, 0})
-		for i := 6; i < 16; i++ {
-			raw[i] = byte(filler >> (uint(i) % 8 * 8))
-		}
+		panic("id: crypto/rand unavailable: " + err.Error())
 	}
 
 	raw[6] = (raw[6] & 0x0f) | 0x70 // version 7

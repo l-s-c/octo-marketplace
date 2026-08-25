@@ -56,8 +56,10 @@ func TestListVersionsRedactsCrossSpaceRelationTargets(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"version_id", "plugin_id", "version", "manifest_json", "plugin_json", "manifest_hash", "plugin_hash", "relations_json", "changelog", "created_by", "created_at"}).
 			AddRow("v1", "plugin-id", "1.0.0", "{}", "{}", "mh", "ph", relJSON, nil, "creator", now))
 	// The visibility re-check returns only the visible target (args order is
-	// map-iteration dependent, so match the query shape, not the args).
-	mock.ExpectQuery(`SELECT plugin_id FROM plugins WHERE plugin_id IN \(.*\?.*\) AND status=1 AND deleted_at IS NULL AND `).
+	// map-iteration dependent, so match the query shape, not the args). The
+	// aliased `plugins p` table is load-bearing: visibilitySQL references p.*,
+	// so an unaliased FROM would be a runtime ERROR 1054 against a real DB.
+	mock.ExpectQuery(`SELECT p.plugin_id FROM plugins p WHERE p.plugin_id IN \(.*\?.*\) AND p.status=1 AND p.deleted_at IS NULL AND `).
 		WillReturnRows(sqlmock.NewRows([]string{"plugin_id"}).AddRow("vis-target"))
 
 	items, _, err := r.ListVersions(context.Background(), scope, "plugin-id", 20, 0)

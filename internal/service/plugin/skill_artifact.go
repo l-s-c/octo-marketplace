@@ -10,6 +10,8 @@ package plugin
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,12 +45,17 @@ type SkillPackageStream struct {
 	Write    func(io.Writer) error
 }
 
-// attachmentView is the read projection of one package attachment.
+// attachmentView is the read projection of one package attachment. content_size
+// and content_hash are stamped at write time for storage attachments (skill_tree
+// buildSkillAttachmentTree) so read paths can verify the fetched bytes against
+// the recorded digest rather than serving whatever the object store returns.
 type attachmentView struct {
 	Path        string `json:"path"`
 	ContentType string `json:"content_type"`
 	RawContent  string `json:"raw_content"`
 	StorageURI  string `json:"storage_uri"`
+	ContentSize int64  `json:"content_size"`
+	ContentHash string `json:"content_hash"`
 }
 
 // decodePackageAttachments returns every attachment of a package document.
@@ -112,9 +119,14 @@ func (s *Service) SkillMarkdown(ctx context.Context, caller Caller, pluginID str
 		body, err := s.storage.GetObject(ctx, ref.ObjectKey)
 		if err == nil {
 			defer body.Close()
-			data, err := io.ReadAll(io.LimitReader(body, s.maxAttachmentBytes))
+			// Read limit+1 and fail on overflow rather than silently truncating an
+			// oversized object into a partial SKILL.md (B2).
+			data, err := io.ReadAll(io.LimitReader(body, s.maxAttachmentBytes+1))
 			if err != nil {
 				return "", fmt.Errorf("read skill markdown: %w", err)
+			}
+			if int64(len(data)) > s.maxAttachmentBytes {
+				return "", ErrTooLarge
 			}
 			return string(data), nil
 		}
@@ -272,7 +284,11 @@ func (s *Service) writeSkillZip(ctx context.Context, p *model.Plugin, attachment
 		if err != nil {
 			return err
 		}
-		n, err := io.CopyN(fw, body, limit+1)
+		// Hash the streamed bytes as they are written so the reconstructed entry can
+		// be checked against the digest recorded at publish time (B2): a corrupted
+		// or replaced object must not be served under an immutable version.
+		hasher := sha256.New()
+		n, err := io.CopyN(io.MultiWriter(fw, hasher), body, limit+1)
 		body.Close()
 		if err != nil && err != io.EOF {
 			return err
@@ -280,6 +296,12 @@ func (s *Service) writeSkillZip(ctx context.Context, p *model.Plugin, attachment
 		total += n
 		if total > s.maxArchiveBytes || n > s.maxAttachmentBytes {
 			return ErrTooLarge
+		}
+		if a.ContentSize > 0 && a.ContentSize != n {
+			return ErrIntegrity
+		}
+		if a.ContentHash != "" && a.ContentHash != "sha256:"+hex.EncodeToString(hasher.Sum(nil)) {
+			return ErrIntegrity
 		}
 	}
 	return zw.Close()

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
 )
 
@@ -30,8 +31,24 @@ func Present(value any) bool { return present(value, nil, 0) }
 func present(value any, path []string, depth int) bool {
 	switch x := value.(type) {
 	case map[string]any:
+		// An attachment object (mime_type application/json or a .json path)
+		// declares its raw_content as JSON; a truncated declared-JSON payload
+		// fails closed, while free-text raw_content (markdown, prose) does not.
+		declaredJSON := declaresJSON(x)
 		for key, child := range x {
 			normalizedKey := normalizeKey(key)
+			// raw_content is the attachment payload: scan it as embedded JSON, but
+			// pass whether the attachment declared JSON so a "[Draft]" description
+			// or a "{{template}}" markdown body (parse failure, not declared JSON)
+			// is not rejected (P0-2).
+			if key == "raw_content" {
+				if s, ok := child.(string); ok {
+					if embeddedJSONHasSecret(s, declaredJSON, append(path, normalizedKey), depth) {
+						return true
+					}
+					continue
+				}
+			}
 			next := append(path, normalizedKey)
 			insideSecretValues := len(path) > 0 && (path[len(path)-1] == "secrets" || path[len(path)-1] == "credentials")
 			if isDeclaration(normalizedKey) && !insideSecretValues {
@@ -60,16 +77,41 @@ func present(value any, path []string, depth int) bool {
 			}
 		}
 	case string:
-		return embeddedJSONHasSecret(x, path, depth)
+		// A naked string that is not attachment raw_content carries no JSON
+		// declaration (a manifest description, a nested field). Only scan it when
+		// it genuinely parses as a JSON document; a parse failure is treated as
+		// free text and accepted.
+		return embeddedJSONHasSecret(x, false, path, depth)
+	}
+	return false
+}
+
+// declaresJSON reports whether an attachment-like object declares JSON content,
+// so a truncated/trailing raw_content fails closed (a dropped brace in mcp.json
+// must not skip the scan) while free-text markdown/prose does not.
+func declaresJSON(x map[string]any) bool {
+	if mt, ok := x["mime_type"].(string); ok {
+		mt = strings.ToLower(strings.TrimSpace(mt))
+		if mt == "application/json" || strings.HasSuffix(mt, "+json") {
+			return true
+		}
+	}
+	if p, ok := x["path"].(string); ok {
+		if strings.HasSuffix(strings.ToLower(strings.TrimSpace(p)), ".json") {
+			return true
+		}
 	}
 	return false
 }
 
 // embeddedJSONHasSecret re-parses string values that carry whole JSON documents
 // so secrets cannot be smuggled past the walk inside attachment raw_content. A
-// JSON-shaped string (leading { or [) that fails to parse cleanly or carries
-// trailing content fails CLOSED — a dropped brace must not skip the scan.
-func embeddedJSONHasSecret(text string, path []string, depth int) bool {
+// string that parses cleanly as a JSON object/array is scanned recursively. A
+// JSON-shaped string (leading { or [) that fails to parse or carries trailing
+// content fails CLOSED only when declaredJSON is set — a truncated mcp.json must
+// not skip the scan, but free text that merely starts with [ or { (a markdown
+// "[Draft]", a "{{template}}") is not JSON and is accepted.
+func embeddedJSONHasSecret(text string, declaredJSON bool, path []string, depth int) bool {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
 		return false
@@ -81,8 +123,7 @@ func embeddedJSONHasSecret(text string, path []string, depth int) bool {
 	dec.UseNumber()
 	var value any
 	if err := dec.Decode(&value); err != nil || ensureEOF(dec) != nil {
-		// Looks like JSON but is malformed or has trailing content: fail closed.
-		return true
+		return declaredJSON
 	}
 	switch value.(type) {
 	case map[string]any, []any:
@@ -110,8 +151,13 @@ func isContainer(path []string) bool {
 }
 
 func containerHasValue(value any, container string) bool {
+	strictContainer := container == "secrets" || container == "credentials"
 	switch x := value.(type) {
 	case map[string]any:
+		// The declaration-object exemption ({name, ref, ...}) applies in any
+		// container, but isDeclarationObject refuses it when a name/key value is
+		// itself secret-shaped — so {"credentials":{"key":"sk-live-…"}} is not
+		// waved through as a harmless declaration (P1-2).
 		if isDeclarationObject(x) {
 			return false
 		}
@@ -119,7 +165,7 @@ func containerHasValue(value any, container string) bool {
 			normalizedKey := normalizeKey(key)
 			// In value-mapping containers, caller-chosen keys may look like
 			// declarations (for example CUSTOM_NAME) but their values are secrets.
-			if (container == "secrets" || container == "credentials") && nonEmptyLiteral(child) {
+			if strictContainer && nonEmptyLiteral(child) {
 				return true
 			}
 			if isDeclaration(normalizedKey) {
@@ -139,7 +185,7 @@ func containerHasValue(value any, container string) bool {
 			}
 			// A secrets container maps caller-chosen secret names to values. Env and
 			// header containers, by contrast, routinely contain harmless literals.
-			if (container == "secrets" || container == "credentials") && nonEmptyLiteral(child) {
+			if strictContainer && nonEmptyLiteral(child) {
 				return true
 			}
 			if containerHasValue(child, container) {
@@ -148,13 +194,19 @@ func containerHasValue(value any, container string) bool {
 		}
 	case []any:
 		for _, child := range x {
-			if (container == "secrets" || container == "credentials") && nonEmptyLiteral(child) {
+			if strictContainer && nonEmptyLiteral(child) {
 				return true
 			}
 			if containerHasValue(child, container) {
 				return true
 			}
 		}
+	case string:
+		// A container mapping directly to a scalar string (e.g. {"secrets":"..."})
+		// — a string child is never a declaration object, so scan it directly. For
+		// the strict containers any non-reference literal is a secret value; env
+		// and header string values stay lenient (harmless literals).
+		return strictContainer && nonEmptyLiteral(x)
 	}
 	return false
 }
@@ -179,17 +231,90 @@ func declarationSafe(key string, value any) bool {
 	if strings.HasSuffix(key, "_name") || strings.HasSuffix(key, "_names") || strings.HasPrefix(key, "required_") {
 		switch x := value.(type) {
 		case string:
-			return strings.TrimSpace(x) != ""
+			// A declaration names a secret; its value must be a name/identifier,
+			// not the secret itself. A value that looks like a credential
+			// (required_token: "sk-live-…") is a smuggled literal, not a name.
+			return strings.TrimSpace(x) != "" && !looksLikeSecretValue(x)
 		case []any:
 			for _, item := range x {
 				name, ok := item.(string)
-				if !ok || strings.TrimSpace(name) == "" {
+				if !ok || strings.TrimSpace(name) == "" || looksLikeSecretValue(name) {
 					return false
 				}
 			}
 			return true
 		default:
 			return false
+		}
+	}
+	return false
+}
+
+// secretValuePrefixes are well-known credential prefixes; a declaration value
+// carrying one is a smuggled secret, not a name/identifier.
+var secretValuePrefixes = []string{
+	"sk-", "sk_", "pk_live", "rk_live", "ghp_", "gho_", "ghs_", "ghu_", "github_pat_",
+	"xoxb-", "xoxp-", "xapp-", "xoxa-", "akia", "asia", "aiza", "ya29.", "eyj", "bearer ",
+	"glpat-", "npm_", "dop_v1_", "shpat_", "shppa_", "sq0atp-", "sk-live", "sk-proj-",
+}
+
+// looksLikeSecretValue is a conservative heuristic: a value carrying a known
+// credential prefix, or a long opaque high-entropy token, is a secret value
+// rather than a name/reference. Short identifiers like API_TOKEN pass.
+func looksLikeSecretValue(v string) bool {
+	s := strings.TrimSpace(v)
+	if s == "" || isReference(s) {
+		return false
+	}
+	lower := strings.ToLower(s)
+	for _, p := range secretValuePrefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	// A long single token with mixed character classes is opaque credential
+	// material, not a human-readable name (which stays short or spaced).
+	if len(s) >= 24 && !strings.ContainsAny(s, " \t\r\n") && mixedCharClasses(s) {
+		return true
+	}
+	return false
+}
+
+func mixedCharClasses(s string) bool {
+	var hasUpper, hasLower, hasDigit bool
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			hasUpper = true
+		case r >= 'a' && r <= 'z':
+			hasLower = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		}
+	}
+	classes := 0
+	for _, ok := range []bool{hasUpper, hasLower, hasDigit} {
+		if ok {
+			classes++
+		}
+	}
+	return classes >= 2
+}
+
+var envRefPattern = regexp.MustCompile(`^\$\{[A-Za-z0-9_]+\}$`)
+
+func isReference(v string) bool {
+	s := strings.TrimSpace(v)
+	// ${KEY}: the frontend placeholder grammar (first char may be a digit, to
+	// match placeholderFor/splitUserSupplied). An empty ${} or a spaced
+	// "${Bearer eyJ…}" is NOT a reference and stays subject to the scan.
+	if envRefPattern.MatchString(s) {
+		return true
+	}
+	lower := strings.ToLower(s)
+	for _, scheme := range []string{"env://", "secret://", "vault://", "ref://"} {
+		if strings.HasPrefix(lower, scheme) && strings.TrimSpace(s[len(scheme):]) != "" {
+			return true
 		}
 	}
 	return false
@@ -207,6 +332,11 @@ func isDeclarationObject(value map[string]any) bool {
 				return false
 			}
 			if _, array := child.([]any); array {
+				return false
+			}
+			// A declaration names a secret; a name/key/env whose value is itself a
+			// credential (sk-live-…) is smuggling the secret, not declaring it.
+			if s, ok := child.(string); ok && looksLikeSecretValue(s) {
 				return false
 			}
 			if normalizeKey(key) == "name" || normalizeKey(key) == "key" || normalizeKey(key) == "env" {
@@ -237,13 +367,6 @@ func nonEmptyLiteral(value any) bool {
 	default:
 		return true
 	}
-}
-
-func isReference(v string) bool {
-	lower := strings.ToLower(strings.TrimSpace(v))
-	return (strings.HasPrefix(lower, "${") && strings.HasSuffix(lower, "}")) ||
-		strings.HasPrefix(lower, "env://") || strings.HasPrefix(lower, "secret://") ||
-		strings.HasPrefix(lower, "vault://") || strings.HasPrefix(lower, "ref://")
 }
 
 func normalizeKey(key string) string {

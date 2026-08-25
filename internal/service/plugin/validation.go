@@ -80,9 +80,15 @@ func validPluginType(v model.PluginType) bool {
 
 func validVisibility(v model.PluginVisibility, systemAdmin bool) bool {
 	switch v {
-	case model.PluginVisibilityPublic, model.PluginVisibilitySpace, model.PluginVisibilityPrivate:
+	case model.PluginVisibilitySpace, model.PluginVisibilityPrivate:
 		return true
-	case model.PluginVisibilitySystem:
+	case model.PluginVisibilityPublic, model.PluginVisibilitySystem:
+		// public and system are marketplace-wide: readable, listable and
+		// installable from every Space (see visibilitySQL). Only the admin
+		// surface (which sets IsSystemAdmin) may mint them; a tenant caller on
+		// /plugins/upsert cannot self-publish globally. Mirrors the legacy skill
+		// rule (internal/service/skill/service.go rejects public for non-admins)
+		// and the import path, which already forces uploads non-public.
 		return systemAdmin
 	default:
 		return false

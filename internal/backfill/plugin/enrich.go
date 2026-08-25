@@ -239,6 +239,10 @@ func (r *Runner) enrichIcons(ctx context.Context, p *enrichPlan) error {
 				})
 			}
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
 		if err := rows.Close(); err != nil {
 			return err
 		}
@@ -305,6 +309,16 @@ func (r *Runner) enrichMetrics(ctx context.Context, p *enrichPlan) error {
 			return err
 		}
 		if migrated {
+			// A plugin metrics row already exists — most likely a view/install in
+			// the deploy window (API live before enrich) created it with zero
+			// counters. Merging the legacy counts here would double-count on a
+			// re-run (enrich is documented idempotent), so record a skip issue with
+			// the un-copied totals instead of silently dropping them (P2). The
+			// operator merges these manually if the legacy counts matter.
+			if views > 0 || downloads > 0 || installs > 0 {
+				p.issues = append(p.issues, Issue{"skip", "metrics_already_present", "resource_metrics",
+					typ + ":" + id, fmt.Sprintf("plugin metrics row exists; legacy views=%d downloads=%d installs=%d not merged", views, downloads, installs)})
+			}
 			continue
 		}
 		p.actions = append(p.actions, enrichAction{

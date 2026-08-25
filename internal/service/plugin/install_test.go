@@ -260,6 +260,27 @@ func TestSkillRefCapsSupportingFilesBeforeFetching(t *testing.T) {
 	}
 }
 
+// TestSkillRefChargesMarkdownAgainstBudget is the P1-3 regression: SKILL.md (the
+// largest inline payload per skill) is charged against the shared install byte
+// budget, so a skill whose document exhausts the budget contributes no further
+// supporting files.
+func TestSkillRefChargesMarkdownAgainstBudget(t *testing.T) {
+	space := "space-a"
+	budget := int64(10) // exactly the SKILL.md length below
+	pkg := json.RawMessage(`{"attachments":[{"path":"SKILL.md","content_type":"raw","raw_content":"0123456789"},{"path":"f.txt","content_type":"raw","raw_content":"x"}]}`)
+	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
+	ref := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "S", SpaceID: &space, Package: pkg}, &budget)
+	if ref.Markdown != "0123456789" {
+		t.Fatalf("markdown = %q", ref.Markdown)
+	}
+	if budget > 0 {
+		t.Fatalf("SKILL.md not charged against budget; remaining=%d", budget)
+	}
+	if len(ref.SupportingFiles) != 0 {
+		t.Fatalf("supporting files should be dropped once SKILL.md exhausted the budget: %#v", ref.SupportingFiles)
+	}
+}
+
 // freshBudget returns a large per-call install byte budget for direct
 // skillRefFromPlugin tests (the aggregate cap is exercised via the install flow).
 func freshBudget() *int64 { b := int64(100) << 20; return &b }

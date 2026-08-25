@@ -295,6 +295,15 @@ func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID stri
 	if err != nil {
 		return nil, false, err
 	}
+	// Validate the expanded package against the full lib package-shape rules
+	// (unique attachment paths, required SKILL.md) before the one-way migration
+	// commits it: buildSkillAttachmentTree strips the skillDir prefix, which can
+	// collapse two distinct archive entries onto one normalized path — a row the
+	// API would then permanently refuse on the next upsert (P1-4). Fail the row so
+	// expand-skills records a skip instead of writing an unrepairable package.
+	if _, err := libplugin.DecodePackage(libplugin.TypeSkill, canonical); err != nil {
+		return nil, false, fmt.Errorf("expanded skill package rejected by lib: %w", err)
+	}
 	return canonical, true, nil
 }
 

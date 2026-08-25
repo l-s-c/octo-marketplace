@@ -250,6 +250,12 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 		// drop — buildSkillAttachmentTree recorded solely genuinely-new keys
 		// (Q3), so none are shared with the restored state. If the restore itself
 		// fails the live row still references those objects, so they are kept.
+		// NOTE (B5): the restore replays through Service.Update, so a not-yet-
+		// expanded backfilled skill whose stored package still carries a legacy-root
+		// skill/ref.json fails the caller-path canonicalization gate and the restore
+		// is skipped (logged). This only affects the narrow concurrent-publish race
+		// on an un-expanded legacy row; the runbook's expand-skills phase removes
+		// those legacy pointers before the row is served.
 		if oldPlugin != nil {
 			if _, restoreErr := s.Update(ctx, caller, updateID, restoreWriteRequest(oldPlugin, oldRels)); restoreErr == nil {
 				s.deleteObjects(ctx, uploaded...)

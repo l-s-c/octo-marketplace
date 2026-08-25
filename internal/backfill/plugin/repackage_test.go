@@ -303,6 +303,13 @@ func TestRepackageRelationsRenamesAndRekeysDeterministicRows(t *testing.T) {
 		AddRow("api-created-id", "team-2", "member-2", 1)
 	mock.ExpectQuery(`SELECT relation_id, source_plugin_id, target_plugin_id, sort_order FROM plugin_relations WHERE relation_type=`).
 		WillReturnRows(rows)
+	// The deterministic row is re-keyed, so its target contract ID is checked for
+	// a pre-existing collision (none here). The API-created row keeps its ID and
+	// issues no such check.
+	wantNew := deterministicRelationID("team-1", contractTeamRelation, 0, "member-1")
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugin_relations WHERE relation_id=`).
+		WithArgs(wantNew).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	var p repackagePlan
 	if err := r.repackageRelations(context.Background(), &p); err != nil {
 		t.Fatal(err)
@@ -310,7 +317,6 @@ func TestRepackageRelationsRenamesAndRekeysDeterministicRows(t *testing.T) {
 	if len(p.actions) != 2 {
 		t.Fatalf("actions=%d", len(p.actions))
 	}
-	wantNew := deterministicRelationID("team-1", contractTeamRelation, 0, "member-1")
 	if p.actions[0].args[0] != wantNew || p.actions[0].args[1] != contractTeamRelation || p.actions[0].args[2] != oldID {
 		t.Fatalf("deterministic row args=%#v", p.actions[0].args)
 	}

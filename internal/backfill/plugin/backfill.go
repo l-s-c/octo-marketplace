@@ -282,6 +282,10 @@ func (r *Runner) categories(ctx context.Context, p *plan) (map[string]string, er
 			m[s.table+":"+old] = id
 			p.cats = append(p.cats, catRow{id, n, i, string(t), o, active(d), c, u, d})
 		}
+		if e = rs.Err(); e != nil {
+			rs.Close()
+			return nil, e
+		}
 		rs.Close()
 	}
 	return m, nil

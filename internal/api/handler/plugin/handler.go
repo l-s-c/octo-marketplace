@@ -776,7 +776,36 @@ func contentDisposition(name string) string {
 	if name == "" || name == "." {
 		name = "download"
 	}
-	return `attachment; filename="` + name + `"`
+	// filename= carries an ASCII-only fallback (non-ASCII runes are not legal in
+	// the quoted form), and filename*=UTF-8'' carries the percent-encoded original
+	// for RFC 5987/6266-aware clients, so a non-ASCII plugin name is not emitted
+	// raw inside filename="…".
+	ascii := strings.Map(func(r rune) rune {
+		if r > 0x7f {
+			return '_'
+		}
+		return r
+	}, name)
+	return `attachment; filename="` + ascii + `"; filename*=UTF-8''` + rfc5987Escape(name)
+}
+
+// rfc5987Escape percent-encodes a UTF-8 string for an ext-value (RFC 5987),
+// leaving only the attr-char set unescaped.
+func rfc5987Escape(s string) string {
+	const upperhex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+			strings.IndexByte("!#$&+-.^_`|~", c) >= 0 {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(upperhex[c>>4])
+		b.WriteByte(upperhex[c&0x0f])
+	}
+	return b.String()
 }
 
 func versionRelationSlice(raw json.RawMessage) []map[string]any {

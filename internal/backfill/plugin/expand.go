@@ -337,7 +337,13 @@ func (r *Runner) expandAudits(ctx context.Context, exp SkillExpander, apply bool
 		if oldAfter != "" && snapshotHash != "" {
 			newAfter = snapshotHash
 		}
-		lastHash[w.pluginID] = newAfter
+		// A delete audit carries a NULL after_hash (newAfter==""); it must NOT
+		// become the chain link for the following row, or that row's before_hash
+		// repair is skipped (previous=="") and the chain breaks. Keep the last
+		// non-null after so a subsequent audit still links to a real predecessor.
+		if newAfter != "" {
+			lastHash[w.pluginID] = newAfter
+		}
 		if !changed && newBefore == oldBefore && newAfter == oldAfter {
 			continue
 		}

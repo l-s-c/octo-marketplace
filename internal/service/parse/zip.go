@@ -203,7 +203,14 @@ func ExtractSkillTree(ra io.ReaderAt, size, maxZipSize, maxFileSize int64, maxFi
 	var totalSize uint64
 	var actualSize int64
 	skillMDCount := 0
-	entries := make([]SkillEntry, 0, len(zr.File))
+	// Bound the preallocation by maxFiles, not the (attacker-controlled) central
+	// directory entry count, so a zip declaring millions of entries cannot force a
+	// huge up-front slice allocation before the per-entry maxFiles cap fires below.
+	capHint := len(zr.File)
+	if capHint > maxFiles {
+		capHint = maxFiles
+	}
+	entries := make([]SkillEntry, 0, capHint)
 	for _, f := range zr.File {
 		if errCode, errMsg := validateZipEntry(f); errCode != "" {
 			return nil, errCode, errMsg

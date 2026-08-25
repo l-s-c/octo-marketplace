@@ -354,6 +354,27 @@ func TestConnectorRejectsSecretValuesButAllowsNamesAndReferences(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsPublicVisibilityForNonAdmin(t *testing.T) {
+	// A tenant caller (IsSystemAdmin=false) may not self-publish a globally
+	// visible plugin; public/system are admin-only. Mirrors the import rule
+	// (TestImportRejectsPublicVisibility) and the legacy skill service.
+	for _, vis := range []model.PluginVisibility{model.PluginVisibilityPublic, model.PluginVisibilitySystem} {
+		req := validRequest()
+		req.Visibility = vis
+		if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, req); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("visibility=%s non-admin create err = %v, want ErrInvalidRequest", vis, err)
+		}
+	}
+	// An admin caller (IsSystemAdmin=true) may set public.
+	admin := testCaller
+	admin.IsSystemAdmin = true
+	req := validRequest()
+	req.Visibility = model.PluginVisibilityPublic
+	if _, err := fixedService(&fakeStore{}).Create(context.Background(), admin, req); err != nil {
+		t.Fatalf("admin public create err = %v", err)
+	}
+}
+
 func TestCreateStampsTrustedIdentity(t *testing.T) {
 	f := &fakeStore{}
 	caller := testCaller

@@ -9,6 +9,8 @@ package plugin
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"sort"
@@ -79,9 +81,14 @@ func (s *Service) Install(ctx context.Context, caller Caller, pluginID string, p
 		return nil, err
 	}
 	in := expertsvc.InstallInput{WorkspaceID: strings.TrimSpace(p.WorkspaceID), RuntimeID: strings.TrimSpace(p.RuntimeID), SpaceID: caller.SpaceID, Token: p.Token}
+	// One aggregate byte budget for the whole install, threaded through every
+	// skill of every member, so an expert_team fanning out to many members ×
+	// skills cannot multiply the resident-memory bound (A4/P1-3). Mirrors the
+	// download path's maxArchiveBytes ceiling.
+	budget := s.maxArchiveBytes
 	switch detail.Plugin.Type {
 	case model.PluginTypeExpert:
-		spec, err := s.agentSpecFromPlugin(ctx, caller, detail)
+		spec, err := s.agentSpecFromPlugin(ctx, caller, detail, &budget)
 		if err != nil {
 			return nil, err
 		}
@@ -92,7 +99,7 @@ func (s *Service) Install(ctx context.Context, caller Caller, pluginID string, p
 		s.trackInstall(ctx, detail.Plugin.ID)
 		return &InstallOutcome{AgentID: agentID}, nil
 	case model.PluginTypeExpertTeam:
-		squad, err := s.squadFromPlugin(ctx, caller, detail)
+		squad, err := s.squadFromPlugin(ctx, caller, detail, &budget)
 		if err != nil {
 			return nil, err
 		}
@@ -110,11 +117,11 @@ func (s *Service) Install(ctx context.Context, caller Caller, pluginID string, p
 // agentSpecFromPlugin materializes one expert Plugin into a provisioning spec:
 // the AGENTS.md instruction entry and root mcp.json from its package
 // attachments, packaged skills from its expert_skill relation targets.
-func (s *Service) agentSpecFromPlugin(ctx context.Context, caller Caller, detail *Detail) (*expertsvc.ProvisionAgentSpec, error) {
+func (s *Service) agentSpecFromPlugin(ctx context.Context, caller Caller, detail *Detail, budget *int64) (*expertsvc.ProvisionAgentSpec, error) {
 	p := detail.Plugin
 	instruction, _ := rawAttachmentContent(p.Package, "AGENTS.md")
 	mcpConfig, _ := rawAttachmentContent(p.Package, "mcp.json")
-	skills, err := s.skillRefsFromRelations(ctx, caller, detail.Relations)
+	skills, err := s.skillRefsFromRelations(ctx, caller, detail.Relations, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +138,7 @@ func (s *Service) agentSpecFromPlugin(ctx context.Context, caller Caller, detail
 // expert provisioner consumes: leader and strategies from team/config.json,
 // members from expert_team_expert relations (relation_json carries role,
 // is_leader, and member_key), each member's spec from its own Plugin.
-func (s *Service) squadFromPlugin(ctx context.Context, caller Caller, detail *Detail) (*model.Squad, error) {
+func (s *Service) squadFromPlugin(ctx context.Context, caller Caller, detail *Detail, budget *int64) (*model.Squad, error) {
 	p := detail.Plugin
 	// Contract layout: the team package is a single AGENTS.md document that
 	// carries the collaboration/dispatch prose; it becomes the Loop squad's
@@ -145,7 +152,7 @@ func (s *Service) squadFromPlugin(ctx context.Context, caller Caller, detail *De
 		if err != nil {
 			return nil, err
 		}
-		member, err := s.squadMemberFromPlugin(ctx, caller, rel, memberDetail)
+		member, err := s.squadMemberFromPlugin(ctx, caller, rel, memberDetail, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -160,7 +167,7 @@ func (s *Service) squadFromPlugin(ctx context.Context, caller Caller, detail *De
 	}, nil
 }
 
-func (s *Service) squadMemberFromPlugin(ctx context.Context, caller Caller, rel model.PluginRelation, memberDetail *Detail) (*model.SquadMember, error) {
+func (s *Service) squadMemberFromPlugin(ctx context.Context, caller Caller, rel model.PluginRelation, memberDetail *Detail, budget *int64) (*model.SquadMember, error) {
 	mp := memberDetail.Plugin
 	// relation_json is authoritative for squad wiring; expert/context.json is
 	// the snapshot fallback carried inside the member package.
@@ -179,7 +186,7 @@ func (s *Service) squadMemberFromPlugin(ctx context.Context, caller Caller, rel 
 	}
 	instruction, _ := rawAttachmentContent(mp.Package, "AGENTS.md")
 	mcpConfig, _ := rawAttachmentContent(mp.Package, "mcp.json")
-	skills, err := s.skillRefsFromRelations(ctx, caller, memberDetail.Relations)
+	skills, err := s.skillRefsFromRelations(ctx, caller, memberDetail.Relations, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -199,19 +206,15 @@ func (s *Service) squadMemberFromPlugin(ctx context.Context, caller Caller, rel 
 // SKILL.md and supporting text files inline (fetching any storage-backed text
 // through this service's object store); legacy pointer skills keep their
 // object/zip keys for the provisioner to fetch.
-func (s *Service) skillRefsFromRelations(ctx context.Context, caller Caller, relations []model.PluginRelation) ([]model.SkillRef, error) {
+func (s *Service) skillRefsFromRelations(ctx context.Context, caller Caller, relations []model.PluginRelation, remaining *int64) ([]model.SkillRef, error) {
 	skillRelations := relationsOfType(relations, "expert_skill")
 	refs := make([]model.SkillRef, 0, len(skillRelations))
-	// One aggregate byte budget shared across every skill in the install, so an
-	// expert_team fanning out to many skills cannot multiply the resident-memory
-	// bound (A4). Mirrors the download path's maxArchiveBytes ceiling.
-	remaining := s.maxArchiveBytes
 	for _, rel := range skillRelations {
 		target, err := s.Detail(ctx, caller, rel.TargetPluginID, false)
 		if err != nil {
 			return nil, err
 		}
-		refs = append(refs, s.skillRefFromPlugin(ctx, target.Plugin, &remaining))
+		refs = append(refs, s.skillRefFromPlugin(ctx, target.Plugin, remaining))
 	}
 	return refs, nil
 }
@@ -233,30 +236,38 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, remai
 	}
 	hasRef := false
 	if raw, ok := rawAttachmentContent(p.Package, "skill/ref.json"); ok && json.Unmarshal([]byte(raw), &legacy) == nil {
-		hasRef = true
 		// skill/ref.json is caller-writable, so its object keys are honored only
 		// when they sit in the plugin's own managed Space prefix; a forged
 		// cross-Space or arbitrary bucket key is dropped rather than fetched by
 		// the provisioner. Legacy backfilled skills resolve once expand-skills has
-		// rewritten them into own-Space trees.
+		// rewritten them into own-Space trees. hasRef tracks whether a key was
+		// actually TRUSTED (not merely parsed): an untrusted/forged pointer must not
+		// short-circuit tree resolution with an empty, unusable ref (B7).
 		if trustedArtifactKey(legacy.ObjectKey, p.SpaceID) {
 			ref.ObjectKey = legacy.ObjectKey
+			hasRef = true
 		}
 		if trustedArtifactKey(legacy.ZipObjectKey, p.SpaceID) {
 			ref.ZipObjectKey = legacy.ZipObjectKey
+			hasRef = true
 		}
-		ref.FileName = legacy.FileName
-		ref.FileSize = legacy.FileSize
-		ref.Files = legacy.Files
+		if hasRef {
+			// FileName/FileSize/Files describe the trusted object; carry them only
+			// when a key was trusted. FileSize is advisory — the provisioner stats
+			// the actual bytes (expert service is authoritative).
+			ref.FileName = legacy.FileName
+			ref.FileSize = legacy.FileSize
+			ref.Files = legacy.Files
+		}
 	}
 	if key, ok := storageAttachmentKey(p.Package, "skill/package.zip"); ok {
-		hasRef = true
 		// Same own-Space scoping as skill/ref.json above (Q5): the managed zip key
 		// is honored only inside this plugin's own prefix, matching legacyZipKey /
 		// migrationZipKey, so a forged or cross-Space key is never handed to the
 		// provisioner to fetch.
 		if ref.ZipObjectKey == "" && p.SpaceID != nil && validReferencedObjectKey(key, *p.SpaceID) {
 			ref.ZipObjectKey = key
+			hasRef = true
 		}
 	}
 	// Legacy pointer shape: leave object/zip keys for the provisioner to fetch.
@@ -266,6 +277,10 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, remai
 	// Tree shape: resolve SKILL.md and supporting text files from the attachments.
 	if md, ok := rawAttachmentContent(p.Package, "SKILL.md"); ok {
 		ref.Markdown = md
+		// Charge the skill's own document against the shared budget too — it is the
+		// single largest inline payload per skill (P1-3). SKILL.md is required, so
+		// it is always included; the decrement bounds the subsequent fan-out.
+		*remaining -= int64(len(md))
 	}
 	// Cap the supporting files materialized here BEFORE fetching, mirroring the
 	// downstream per-skill fan-out budget (expert.maxSkillFilesPerSkill). Counting
@@ -289,7 +304,11 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, remai
 			}
 			continue
 		}
-		if content, ok := s.readStorageText(ctx, p.SpaceID, a.StorageURI); ok && int64(len(content)) <= *remaining {
+		// Bound the fetch to the remaining budget so an over-budget or binary
+		// object is not pulled in full only to be discarded (P1-3); readStorageText
+		// reads at most limit+1 and reports too-large rather than truncating (B2),
+		// and verifies the recorded content_hash/content_size before use.
+		if content, ok := s.readStorageText(ctx, p.SpaceID, a.StorageURI, *remaining, a.ContentSize, a.ContentHash); ok {
 			ref.SupportingFiles = append(ref.SupportingFiles, model.SkillFile{Path: a.Path, Content: content})
 			*remaining -= int64(len(content))
 		}
@@ -304,20 +323,38 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, remai
 const maxInstallSupportingFiles = 50
 
 // readStorageText fetches a storage attachment from this plugin's managed prefix
-// and returns it only when it is valid UTF-8 text (binary attachments are
-// skipped, matching the text-only downstream skill-file store).
-func (s *Service) readStorageText(ctx context.Context, spaceID *string, key string) (string, bool) {
-	if s.storage == nil || spaceID == nil || !validReferencedObjectKey(key, *spaceID) {
+// and returns it only when it is valid UTF-8 text within the caller's remaining
+// byte budget. It reads at most min(budget, maxAttachmentBytes)+1 bytes and
+// reports too-large (ok=false) rather than silently truncating the object into a
+// partial file (B2); binary attachments are skipped, matching the text-only
+// downstream skill-file store. When the attachment records a content_hash/
+// content_size, the fetched bytes are verified against them (B2) so a corrupted
+// or replaced object is not installed under an immutable version.
+func (s *Service) readStorageText(ctx context.Context, spaceID *string, key string, remaining, wantSize int64, wantHash string) (string, bool) {
+	if s.storage == nil || spaceID == nil || remaining <= 0 || !validReferencedObjectKey(key, *spaceID) {
 		return "", false
+	}
+	limit := remaining
+	if s.maxAttachmentBytes < limit {
+		limit = s.maxAttachmentBytes
 	}
 	body, err := s.storage.GetObject(ctx, key)
 	if err != nil {
 		return "", false
 	}
 	defer body.Close()
-	data, err := io.ReadAll(io.LimitReader(body, s.maxAttachmentBytes))
-	if err != nil || !utf8.Valid(data) {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil || int64(len(data)) > limit || !utf8.Valid(data) {
 		return "", false
+	}
+	if wantSize > 0 && int64(len(data)) != wantSize {
+		return "", false
+	}
+	if wantHash != "" {
+		sum := sha256.Sum256(data)
+		if wantHash != "sha256:"+hex.EncodeToString(sum[:]) {
+			return "", false
+		}
 	}
 	return string(data), true
 }

@@ -1,8 +1,10 @@
 package plugin
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
+	"strconv"
 
 	apiresponse "github.com/Mininglamp-OSS/octo-marketplace/internal/api/response"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/logging"
@@ -139,13 +141,21 @@ func (h *Handler) DownloadSkillPackage(c *gin.Context) {
 		writeServiceError(c, err, "plugin.skill_download")
 		return
 	}
-	// The zip is reconstructed or copied lazily; its total size is unknown, so
-	// stream without a Content-Length rather than buffering to measure it.
+	// Reconstruct/copy the zip into a bounded buffer FIRST: writeSkillZip caps the
+	// aggregate size at maxArchiveBytes and fails closed on an integrity mismatch,
+	// so a mid-stream ErrTooLarge/ErrIntegrity must surface as a proper error code
+	// rather than a truncated archive already committed under a 200 (B3).
+	var buf bytes.Buffer
+	if err := result.Write(&buf); err != nil {
+		writeServiceError(c, err, "plugin.skill_download")
+		return
+	}
 	c.Header("Content-Type", "application/zip")
 	c.Header("Content-Disposition", contentDisposition(result.FileName))
 	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Content-Length", strconv.Itoa(buf.Len()))
 	c.Status(http.StatusOK)
-	if err := result.Write(c.Writer); err != nil {
+	if _, err := c.Writer.Write(buf.Bytes()); err != nil {
 		logging.Error("plugin_skill_package_stream_failed", logging.ErrorField(err))
 	}
 }
