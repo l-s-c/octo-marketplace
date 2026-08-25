@@ -160,8 +160,12 @@ PR #67; this note is the decision record the brief's earlier wording predates.
     connector write access can upsert a connector whose `mcp.json`/env carries
     a literal credential, and it persists.
   - `/plugins/import` is a server-side ingestion path with no frontend toggle;
-    an imported connector carrying a literal secret persists unchanged and is
-    then distributed via download/install to every installing Space.
+    an imported connector carrying a literal secret persists unchanged. Reading
+    it back does not even require an install: `Service.Detail` returns the row
+    verbatim with no field-level redaction, and a `public`/`system` connector is
+    readable by every authenticated caller in every Space via `GET
+    /plugins/detail`, so the literal is distributed on read (install merely
+    propagates it further).
   - The connector *backfill* path is NOT part of this exposure:
     `SanitizeConnectorJSON` (`internal/backfill/plugin/mapping.go`) blanks every
     `env`/`headers` value and rejects secret-shaped keys before a legacy
@@ -176,3 +180,14 @@ PR #67; this note is the decision record the brief's earlier wording predates.
   was decided in favor of removal; if the exposure proves unacceptable, the
   restoration path is the shape-anchored detector from `77b6c11` (verified
   stable) run as an advisory/audit signal rather than a reject gate.
+
+  **Read-side blanking — considered and declined.** The legacy MCP surface
+  defends on read via `detailForCaller` (`internal/service/mcp.go`), blanking
+  `env`/`headers` values for non-owner readers — a positional control, not a
+  heuristic, so it carries none of the removed scanner's false-positive risk and
+  cannot make a plugin unwritable. Porting it to the unified surface would
+  neutralize exposures #1 and #2 for every reader who is not the author. It was
+  **deliberately not adopted in this PR**; the residual read exposure above is
+  accepted as-is. This is recorded as an explicit decision (not an omission) so a
+  future owner re-weighing it starts from a documented baseline; adding read-side
+  blanking remains the cleanest non-heuristic mitigation if that call is revised.
