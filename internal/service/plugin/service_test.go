@@ -313,47 +313,6 @@ func TestCreateRejectsInvalidFieldsAndJSONShapes(t *testing.T) {
 	}
 }
 
-func TestConnectorRejectsCamelCaseSecretFields(t *testing.T) {
-	for _, key := range []string{"clientSecret", "accessToken", "privateKeyValue"} {
-		r := connectorRequest(json.RawMessage(`{"` + key + `":"plain-value"}`))
-		if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, r); !errors.Is(err, ErrSecretValue) {
-			t.Fatalf("field %s accepted: %v", key, err)
-		}
-	}
-}
-
-func TestConnectorRejectsSecretValuesButAllowsNamesAndReferences(t *testing.T) {
-	bad := []json.RawMessage{
-		json.RawMessage(`{"config":{"env":{"API_TOKEN":"plain-token"}}}`),
-		json.RawMessage(`{"client_secret":"plain-token"}`),
-		json.RawMessage(`{"nested":{"client_secret_value":"plain-token"}}`),
-		json.RawMessage(`{"headers":{"Authorization":"Bearer abc"}}`),
-		json.RawMessage(`{"transport":{"bearer":"plain-token"}}`),
-		json.RawMessage(`{"transport":{"auth":"plain-token"}}`),
-		json.RawMessage(`{"config":{"credentials":{"username":"octo","value":"plain-token"}}}`),
-		json.RawMessage(`{"config":{"secrets":{"CUSTOM_NAME":"plain-token"}}}`),
-		json.RawMessage(`{"items":[{"deep":{"auth":{"value":"plain-token"}}}]}`),
-	}
-	for _, pkg := range bad {
-		r := connectorRequest(pkg)
-		if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, r); !errors.Is(err, ErrSecretValue) {
-			t.Fatalf("package %s: err = %v", pkg, err)
-		}
-	}
-	for _, pkg := range []json.RawMessage{
-		json.RawMessage(`{"required_secret_names":["API_TOKEN"],"config":{"env":{"API_TOKEN":"","REGION":"us-east-1"}}}`),
-		json.RawMessage(`{"config":{"env":{"API_TOKEN":"${API_TOKEN}"},"headers":{"Authorization":"secret://auth-header","Accept":"application/json"}}}`),
-		json.RawMessage(`{"client_secret_value":"vault://connectors/client-secret","bearer":"env://BEARER_TOKEN","auth":"${AUTH_VALUE}"}`),
-		json.RawMessage(`{"secrets":[{"name":"API_TOKEN","description":"connector token","required":true},{"ref":"secret://API_TOKEN"}]}`),
-		json.RawMessage(`{"credentials":{"name":"OAUTH_CREDENTIALS","description":"configured externally"}}`),
-	} {
-		r := connectorRequest(pkg)
-		if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, r); err != nil {
-			t.Fatalf("package %s: %v", pkg, err)
-		}
-	}
-}
-
 func TestCreateRejectsPublicVisibilityForNonAdmin(t *testing.T) {
 	// A tenant caller (IsSystemAdmin=false) may not self-publish a globally
 	// visible plugin; public/system are admin-only. Mirrors the import rule
@@ -410,10 +369,6 @@ func TestRelationSourceTargetValidation(t *testing.T) {
 	if _, err := fixedService(f).Create(context.Background(), testCaller, r); err != nil {
 		t.Fatalf("valid relation: %v", err)
 	}
-	r.Relations[0].Data = json.RawMessage(`{"accessToken":"plain-value"}`)
-	if _, err := fixedService(f).Create(context.Background(), testCaller, r); !errors.Is(err, ErrSecretValue) {
-		t.Fatalf("secret relation data accepted: %v", err)
-	}
 	r.Relations[0].Data = nil
 	r.Type = model.PluginTypeConnector
 	if _, err := fixedService(f).Create(context.Background(), testCaller, r); !errors.Is(err, ErrInvalidRequest) {
@@ -462,50 +417,6 @@ func TestRepositoryConflictsAndInvalidPlacementsMapToServiceErrors(t *testing.T)
 	f.err = pluginrepo.ErrInvalidPlacement
 	if _, err := fixedService(f).Publish(context.Background(), testCaller, "plugin-1", PublishRequest{Version: "1.0.0"}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("Publish invalid placement = %v, want ErrInvalidRequest", err)
-	}
-}
-
-func expertRequestWithConfigAttachment(configJSON string) WriteRequest {
-	r := validRequest()
-	r.Package = json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
-		`{"path":"AGENTS.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# Example Plugin"},` +
-		`{"path":"mcp.json","content_type":"raw","mime_type":"application/json","raw_content":` + quoted(configJSON) + `}]}`)
-	return r
-}
-
-func TestSecretScanCoversEmbeddedAttachmentJSONForAllTypes(t *testing.T) {
-	bad := []string{
-		`{"env":{"API_TOKEN":"plain-token"}}`,
-		`{"headers":{"Authorization":"Bearer abc"}}`,
-		`{"credentials":{"CUSTOM_NAME":"plain-token"}}`,
-		`{"wrapper":` + quoted(`{"secrets":{"CUSTOM":"plain-token"}}`) + `}`,
-	}
-	for _, config := range bad {
-		r := expertRequestWithConfigAttachment(config)
-		if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, r); !errors.Is(err, ErrSecretValue) {
-			t.Fatalf("config %s: err = %v, want ErrSecretValue", config, err)
-		}
-	}
-	good := []string{
-		`{"env":{"API_TOKEN":"${API_TOKEN}","REGION":"us-east-1"},"headers":{"Accept":"application/json"}}`,
-		`{"required_secret_names":["API_TOKEN"],"transport":"stdio"}`,
-	}
-	for _, config := range good {
-		r := expertRequestWithConfigAttachment(config)
-		if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, r); err != nil {
-			t.Fatalf("config %s: %v", config, err)
-		}
-	}
-}
-
-func TestSecretScanFailsClosedOnPathologicalNesting(t *testing.T) {
-	payload := `{"note":"harmless"}`
-	for i := 0; i < 7; i++ {
-		payload = `{"nested":` + quoted(payload) + `}`
-	}
-	r := expertRequestWithConfigAttachment(payload)
-	if _, err := fixedService(&fakeStore{}).Create(context.Background(), testCaller, r); !errors.Is(err, ErrSecretValue) {
-		t.Fatalf("err = %v, want ErrSecretValue", err)
 	}
 }
 
@@ -562,20 +473,6 @@ func TestCreateReturnsRelationResultWithGeneratedIDs(t *testing.T) {
 	}
 	if len(v.Relations) != 1 || v.Relations[0].ID != "relation-created" {
 		t.Fatalf("relations = %#v", v.Relations)
-	}
-}
-
-func TestSecretScanAllowsPlaceholderReferencesInMCPConfig(t *testing.T) {
-	// ${KEY} marks a user-supplied value injected at install time; both the
-	// service and repository scanners must treat it as a reference, never a
-	// stored secret. Real literals in the same containers stay rejected.
-	ok := json.RawMessage(`{"mcpServers":{"jira":{"headers":{"Authorization":"${TOKEN}"},"env":{"API_KEY":"${API_KEY}"}}}}`)
-	if err := rejectSecretValues(ok); err != nil {
-		t.Fatalf("placeholder rejected: %v", err)
-	}
-	bad := json.RawMessage(`{"mcpServers":{"jira":{"headers":{"Authorization":"Bearer real-token"}}}}`)
-	if err := rejectSecretValues(bad); !errors.Is(err, ErrSecretValue) {
-		t.Fatalf("literal accepted: %v", err)
 	}
 }
 

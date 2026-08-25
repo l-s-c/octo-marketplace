@@ -20,8 +20,6 @@ var (
 	ErrInvalidCategory = errors.New("invalid plugin category")
 	// ErrInvalidPlacement indicates a category not enabled for the Plugin type and placement.
 	ErrInvalidPlacement = errors.New("invalid plugin placement")
-	// ErrUnsafeConnectorData prevents copying persisted connector secret values.
-	ErrUnsafeConnectorData = errors.New("unsafe connector secret data")
 )
 
 // Scope is authoritative caller context; it must never come from request data.

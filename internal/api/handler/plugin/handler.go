@@ -679,7 +679,7 @@ func splitQuery(values []string) []string {
 }
 func writeServiceError(c *gin.Context, err error, operation string) {
 	switch {
-	case errors.Is(err, pluginsvc.ErrInvalidRequest), errors.Is(err, pluginsvc.ErrSecretValue):
+	case errors.Is(err, pluginsvc.ErrInvalidRequest):
 		validation(c, "body")
 	case errors.Is(err, pluginsvc.ErrNotFound):
 		apiresponse.Fail(c, http.StatusNotFound, errcode.NotFound, "plugin not found", map[string]any{"resource": "plugin"}, "Verify the plugin_id and try again.")

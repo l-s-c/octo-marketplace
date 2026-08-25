@@ -37,7 +37,9 @@ compatibility after cutover.
   two JSON snapshot pairs exist in the row.
 - Point placement is represented by `placement_code`, not separate scene/slot
   columns. Category and Plugin placement records carry visibility and order.
-- Connector package/version/audit data must not persist or log secret values.
+- Connector package/version/audit data must not persist or log secret values;
+  this invariant is enforced client-side (see the secret-handling divergence
+  record), not by a backend value scanner.
 - Existing legacy routes and tables continue to operate during backend rollout;
   no long-term dual-write or compatibility layer is introduced.
 - API success and error envelopes follow the repository OpenAPI standard.
@@ -139,3 +141,16 @@ PR #67; this note is the decision record the brief's earlier wording predates.
 - **IDs are opaque UUIDv7**, not the ULID/prefixed forms some older docs
   describe; see `internal/service/plugin/id_boundary.go` and the banner in
   `docs/api/plugin-id.md`.
+- **Secret handling is client-side, not a backend scanner.** An earlier
+  iteration ran a heuristic secret-value scanner (`internal/secretscan`, wired
+  into the service write path and a repository persistence guard) that rejected
+  connector writes carrying credential-shaped values. It was removed: string
+  heuristics cannot reliably separate a secret from ordinary configuration
+  (regions, timezones, locale codes, version tags), and placing that
+  classification on a hard write gate produced oscillating false
+  positives/negatives. The connector form's "需要用户自行配置" (user-supplied)
+  toggle is now authoritative — toggled keys are written as `${PLACEHOLDER}`
+  references so no real secret reaches persistence, and the backend makes no
+  value judgment. The `must not persist secret values` invariant above still
+  holds; it is enforced at the point of entry (the frontend) rather than by a
+  backend guess.

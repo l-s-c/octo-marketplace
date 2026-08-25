@@ -17,7 +17,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
-	"github.com/Mininglamp-OSS/octo-marketplace/internal/secretscan"
 )
 
 const (
@@ -239,30 +238,6 @@ func normalizeTags(raw json.RawMessage) (json.RawMessage, error) {
 func hashJSON(canonical json.RawMessage) string {
 	sum := sha256.Sum256(canonical)
 	return "sha256:" + hex.EncodeToString(sum[:])
-}
-
-// rejectSecretValues rejects connector documents that carry a persisted secret
-// VALUE (as opposed to a reference or a required-name declaration). The policy
-// and the walk live in internal/secretscan so the service write path and the
-// repository persistence guard can never diverge. It applies to every plugin
-// type — experts and teams carry MCP config too — and to both manifest and
-// package, protecting current state, immutable versions, and audits alike.
-func rejectSecretValues(values ...json.RawMessage) error {
-	for _, raw := range values {
-		if len(bytes.TrimSpace(raw)) == 0 {
-			continue
-		}
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.UseNumber()
-		var value any
-		if err := dec.Decode(&value); err != nil {
-			return ErrInvalidRequest
-		}
-		if secretscan.Present(value) {
-			return ErrSecretValue
-		}
-	}
-	return nil
 }
 
 func hashForTest(raw json.RawMessage) (string, error) {

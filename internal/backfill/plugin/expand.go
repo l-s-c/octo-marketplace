@@ -20,7 +20,6 @@ import (
 	"time"
 
 	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
-	pluginsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/plugin"
 )
 
 // SkillExpander turns a legacy skill package into the canonical attachment-tree
@@ -310,13 +309,6 @@ func (r *Runner) expandAudits(ctx context.Context, exp SkillExpander, apply bool
 				continue
 			}
 			newPkg, changed = expanded, didChange
-			if changed {
-				if err := pluginsvc.RejectSecretValues(newPkg); err != nil {
-					p.issues = append(p.issues, Issue{"skip", "expand_secret_rejected", "plugin_audit_logs", w.id, err.Error()})
-					lastHash[w.pluginID] = oldAfter
-					continue
-				}
-			}
 		}
 		snapshotHash := ""
 		if len(newPkg) > 0 && len(w.manifest) > 0 {
@@ -366,10 +358,6 @@ func (r *Runner) expandRow(ctx context.Context, exp SkillExpander, spaceID, plug
 		return nil, "", false
 	}
 	if !changed {
-		return nil, "", false
-	}
-	if err := pluginsvc.RejectSecretValues(expanded); err != nil {
-		p.issues = append(p.issues, Issue{"skip", "expand_secret_rejected", source, pluginID, err.Error()})
 		return nil, "", false
 	}
 	hash, err := libplugin.ComputePluginHash(manifest, expanded)

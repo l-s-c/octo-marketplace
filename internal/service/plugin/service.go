@@ -22,7 +22,6 @@ var (
 	ErrConflict       = errors.New("plugin conflict")
 	ErrInvalidRequest = errors.New("invalid plugin request")
 	ErrTooLarge       = errors.New("plugin artifact exceeds size limit")
-	ErrSecretValue    = errors.New("connector secret value is not allowed")
 	// ErrIntegrity is returned when a stored artifact's bytes do not match the
 	// content_hash/content_size recorded for it at publish time — a
 	// content-addressed object must never be served under a mismatched digest.
@@ -582,11 +581,6 @@ func (s *Service) buildRelations(ctx context.Context, c Caller, source *model.Pl
 		if err != nil {
 			return nil, err
 		}
-		if len(data) > 0 {
-			if err := rejectSecretValues(data); err != nil {
-				return nil, err
-			}
-		}
 		out = append(out, model.PluginRelation{ID: relationID, SourcePluginID: source.ID, SourcePluginType: source.Type, TargetPluginID: targetID, TargetPluginType: target.Type, Type: typ, SortOrder: r.SortOrder, Data: data, Status: 1, CreatedBy: c.UID, CreatedAt: now, UpdatedAt: now})
 	}
 	return out, nil
@@ -660,8 +654,6 @@ func mapStoreError(err error) error {
 		return ErrConflict
 	case errors.Is(err, pluginrepo.ErrInvalidRelation), errors.Is(err, pluginrepo.ErrInvalidCategory), errors.Is(err, pluginrepo.ErrInvalidPlacement):
 		return ErrInvalidRequest
-	case errors.Is(err, pluginrepo.ErrUnsafeConnectorData):
-		return ErrSecretValue
 	default:
 		return err
 	}

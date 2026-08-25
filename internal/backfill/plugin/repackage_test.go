@@ -266,31 +266,6 @@ func TestRepackageAuditsLeavesConsistentContractRowsAlone(t *testing.T) {
 	}
 }
 
-// TestRepackagePluginsRejectsSecretBearingTransform: a stored config whose
-// conversion would persist a live secret is skipped, never written.
-func TestRepackagePluginsRejectsSecretBearingTransform(t *testing.T) {
-	r, mock, done := repackageRunner(t)
-	defer done()
-	manifest := `{"plugin_name":"Jira","name":"jira","description":"d"}`
-	config := `{"config":{"url":"https://x","headers":{"Authorization":"Bearer real-token"}},"transport":"sse"}`
-	pkg := `{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
-		attachmentJSON("connector/config.json", "application/json", config) + `,` +
-		attachmentJSON("manifest.json", "application/json", "{}") + `]}`
-	mock.ExpectQuery(`SELECT plugin_id, plugin_type, manifest_json, plugin_json, plugin_hash FROM plugins`).
-		WillReturnRows(sqlmock.NewRows([]string{"plugin_id", "plugin_type", "manifest_json", "plugin_json", "plugin_hash"}).
-			AddRow("c1", "connector", manifest, pkg, "sha256:old"))
-	var p repackagePlan
-	if err := r.repackagePlugins(context.Background(), &p); err != nil {
-		t.Fatal(err)
-	}
-	if len(p.actions) != 0 || len(p.issues) != 1 || p.issues[0].Code != "repackage_secret_rejected" {
-		t.Fatalf("actions=%d issues=%#v", len(p.actions), p.issues)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // TestRepackageRelationsRenamesAndRekeysDeterministicRows: backfill-derived
 // relation IDs embed the type string and must be re-derived; API-created rows
 // keep their IDs.

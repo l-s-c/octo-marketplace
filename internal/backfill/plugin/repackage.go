@@ -21,7 +21,6 @@ import (
 	"time"
 
 	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
-	pluginsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/plugin"
 )
 
 const (
@@ -163,10 +162,6 @@ func (r *Runner) repackagePlugins(ctx context.Context, p *repackagePlan) error {
 			continue
 		}
 		if changed {
-			if err := pluginsvc.RejectSecretValues(newPkg); err != nil {
-				p.issues = append(p.issues, Issue{"skip", "repackage_secret_rejected", "plugins", id, err.Error()})
-				continue
-			}
 			if err := decodablePackage(newPkg, typ); err != nil {
 				p.issues = append(p.issues, Issue{"skip", "repackage_invalid_package", "plugins", id, err.Error()})
 				continue
@@ -212,10 +207,6 @@ func (r *Runner) repackageVersions(ctx context.Context, types map[string]string,
 			continue
 		}
 		if changed {
-			if err := pluginsvc.RejectSecretValues(newPkg); err != nil {
-				p.issues = append(p.issues, Issue{"skip", "repackage_secret_rejected", "plugin_versions", id, err.Error()})
-				continue
-			}
 			if err := decodablePackage(newPkg, typ); err != nil {
 				p.issues = append(p.issues, Issue{"skip", "repackage_invalid_package", "plugin_versions", id, err.Error()})
 				continue
@@ -282,11 +273,6 @@ func (r *Runner) repackageAudits(ctx context.Context, types map[string]string, p
 			}
 			newPkg, changed = transformed, didChange
 			if changed {
-				if err := pluginsvc.RejectSecretValues(newPkg); err != nil {
-					p.issues = append(p.issues, Issue{"skip", "repackage_secret_rejected", "plugin_audit_logs", id, err.Error()})
-					lastHash[pluginID] = oldAfter
-					continue
-				}
 				if err := decodablePackage(newPkg, typ); err != nil {
 					p.issues = append(p.issues, Issue{"skip", "repackage_invalid_package", "plugin_audit_logs", id, err.Error()})
 					lastHash[pluginID] = oldAfter

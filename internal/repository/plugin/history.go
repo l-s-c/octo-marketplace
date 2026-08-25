@@ -185,9 +185,6 @@ func (r *Repo) Publish(ctx context.Context, scope Scope, p PublishParams) (*mode
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectPersistedSecretValues(current.Manifest, current.Package); err != nil {
-		return nil, err
-	}
 	relations, err := loadPublishRelations(ctx, tx, scope, p.PluginID)
 	if err != nil {
 		return nil, err

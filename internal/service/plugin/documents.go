@@ -121,9 +121,6 @@ func canonicalizeDocuments(name string, typ model.PluginType, tags, manifest, pk
 	if !trustLegacyRefs && !skillRefKeysScoped(p, spaceID) {
 		return nil, ErrInvalidRequest
 	}
-	if err := rejectSecretValues(m, p); err != nil {
-		return nil, err
-	}
 	hash, err := libplugin.ComputePluginHash(m, p)
 	if err != nil {
 		return nil, ErrInvalidRequest
@@ -204,13 +201,6 @@ func storageAttachmentKey(pkg json.RawMessage, path string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// RejectSecretValues runs the write-path secret scan over raw documents.
-// Exported so out-of-band writers (the repackage migration) apply the same
-// invariant before persisting rewritten packages via direct SQL.
-func RejectSecretValues(values ...json.RawMessage) error {
-	return rejectSecretValues(values...)
 }
 
 // ConnectorToolCount counts the entries of the canonical connector/tools.json

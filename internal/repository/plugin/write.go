@@ -38,14 +38,6 @@ func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	defer tx.Rollback()
 	now := r.now()
 	p := m.Plugin
-	if err = rejectPersistedSecretValues(p.Manifest, p.Package); err != nil {
-		return nil, err
-	}
-	for _, relation := range m.Relations {
-		if err = rejectPersistedSecretValues(relation.Data); err != nil {
-			return nil, err
-		}
-	}
 	// Non-admin writes are pinned to the caller's own identity/Space; the admin
 	// surface supplies owner/Space (and NULL Space for system rows) itself.
 	if !scope.Admin {
@@ -94,14 +86,6 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	}
 	now := r.now()
 	p := m.Plugin
-	if err = rejectPersistedSecretValues(p.Manifest, p.Package); err != nil {
-		return nil, err
-	}
-	for _, relation := range m.Relations {
-		if err = rejectPersistedSecretValues(relation.Data); err != nil {
-			return nil, err
-		}
-	}
 	if p.Type != before.Type {
 		return nil, ErrInvalidRelation
 	}
