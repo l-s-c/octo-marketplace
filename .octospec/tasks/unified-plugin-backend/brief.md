@@ -110,7 +110,9 @@ without adding shortened-field compatibility aliases. In particular:
 - Repository methods implement scoped list/get/upsert/delete, relation graph,
   immutable versions, audit history, categories, and placements.
 - Service validation enforces Plugin types, JSON size/shape, ownership,
-  visibility, immutable version rules, and Connector secret redaction.
+  visibility, and immutable version rules. (Connector secret-VALUE redaction was
+  removed from the backend — see the ratified secret-handling divergence record
+  below; it is no longer a backend acceptance criterion.)
 - New handlers are registered under `/api/v1`, use standard envelopes and fixed
   error codes, and include complete swag annotations.
 - Cross-Space negative tests, ownership tests, relation tests, version
