@@ -1005,6 +1005,11 @@ func (s *Service) readSkillContent(ctx context.Context, refs []model.SkillRef, i
 	if index < 0 || index >= len(refs) {
 		return "", ErrNotFound
 	}
+	// Tree-shaped skills carry their SKILL.md inline (resolved by the plugin
+	// path); only legacy pointer skills need an object fetch.
+	if refs[index].Markdown != "" {
+		return refs[index].Markdown, nil
+	}
 	key := refs[index].ObjectKey
 	if key == "" || s.store == nil {
 		return "", ErrNotFound

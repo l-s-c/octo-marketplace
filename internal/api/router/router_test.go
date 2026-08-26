@@ -198,6 +198,29 @@ func TestMCPMountedUnderV1(t *testing.T) {
 // mount. With the gateway only stripping /market, a bare /mcps would never be
 // hit in production; asserting 404 here keeps the surface aligned with the
 // contract deploy path (blocker ① on LSC-72).
+func TestConnectorProbeAliasMountedAndLegacyProbePreserved(t *testing.T) {
+	svc := &reachedService{}
+	engine := Public(stubPinger{}, testAuthenticator(), testAdminAuthenticator(), testStorageConfig(), handler.NewMCP(svc), testAdminHandler(), testParseConfig(), nil)
+	for _, path := range []string{"/api/v1/connectors/_probe", "/api/v1/mcps/_probe"} {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"transport":"streamable-http","url":"https://example.test/mcp"}`))
+		req.Header.Set("Content-Type", "application/json")
+		engine.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("POST %s status=%d body=%s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestPluginRoutesRequireRealSQLDB(t *testing.T) {
+	engine := Public(stubPinger{}, testAuthenticator(), testAdminAuthenticator(), testStorageConfig(), testHandler(), testAdminHandler(), testParseConfig(), nil)
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/plugins", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("Pinger-only router mounted Plugin dependencies: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestBareMCPPathNotMounted(t *testing.T) {
 	svc := &reachedService{}
 	engine := Public(stubPinger{}, testAuthenticator(), testAdminAuthenticator(), testStorageConfig(), handler.NewMCP(svc), testAdminHandler(), testParseConfig(), nil)

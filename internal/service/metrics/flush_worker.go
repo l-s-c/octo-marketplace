@@ -50,6 +50,7 @@ var flushableResourceTypes = map[string]struct{}{
 	"skill":  {},
 	"expert": {},
 	"squad":  {},
+	"plugin": {},
 }
 
 type flushLedgerCleaner interface {

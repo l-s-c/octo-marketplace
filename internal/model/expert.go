@@ -65,6 +65,21 @@ type SkillRef struct {
 	FileName     string   `json:"file_name,omitempty"`
 	FileSize     int64    `json:"file_size,omitempty"`
 	Files        []string `json:"files,omitempty"`
+
+	// Markdown and SupportingFiles carry a tree-shaped skill's resolved content,
+	// populated at install time by the unified plugin path (which owns the
+	// attachment tree and object storage). When Markdown is set the provisioner
+	// installs these directly instead of fetching ObjectKey/ZipObjectKey. They are
+	// transient install-time data and never persisted (json:"-").
+	Markdown        string      `json:"-"`
+	SupportingFiles []SkillFile `json:"-"`
+}
+
+// SkillFile is one supporting file (path + UTF-8 text content) of a skill,
+// fanned out to the downstream fleet skill-file store at install time.
+type SkillFile struct {
+	Path    string
+	Content string
 }
 
 // Expert is the domain model for a single expert (专家), persisted in the
@@ -123,10 +138,14 @@ type SquadDependencies struct {
 // expert_squads table. It shares the generic marketplace metadata with Expert
 // and swaps the ExpertSpec for the squad dispatch payload.
 type Squad struct {
-	ID               string
-	ShortName        string
-	Name             string
-	Summary          string
+	ID        string
+	ShortName string
+	Name      string
+	Summary   string
+	// Instructions is the squad's dispatch/collaboration document (the team
+	// package's AGENTS.md). When non-empty it becomes the Loop squad's
+	// instructions verbatim, superseding the numbered Strategies rendering.
+	Instructions     string
 	Category         string
 	Tags             []string
 	Publisher        string

@@ -94,3 +94,7 @@ dist-ele/
 icon.icns
 icons.iconset
 octo-web
+.worktrees/
+cowork-v3-arch/
+/plugin-backfill
+vendor/

@@ -2,10 +2,17 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"time"
 )
+
+// ErrObjectNotFound is returned by StatObject when the object is genuinely
+// absent, distinct from a transient/permission error. Callers that decide "safe
+// to overwrite / genuinely new" must key on this rather than any stat error, so
+// a throttle or 5xx is never mistaken for absence.
+var ErrObjectNotFound = errors.New("storage: object not found")
 
 // ObjectInfo describes stored object metadata needed before ingestion.
 type ObjectInfo struct {

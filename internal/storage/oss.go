@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 // OSSStorage implements Storage using an S3-compatible object store (Aliyun OSS, MinIO, AWS S3, etc.).
@@ -140,6 +142,11 @@ func (s *OSSStorage) StatObject(ctx context.Context, key string) (ObjectInfo, er
 		Key:    aws.String(s.key(key)),
 	})
 	if err != nil {
+		var notFound *s3types.NotFound
+		var noKey *s3types.NoSuchKey
+		if errors.As(err, &notFound) || errors.As(err, &noKey) {
+			return ObjectInfo{}, ErrObjectNotFound
+		}
 		return ObjectInfo{}, fmt.Errorf("oss stat object: %w", err)
 	}
 	size := int64(0)

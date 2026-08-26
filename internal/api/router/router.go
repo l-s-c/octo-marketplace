@@ -12,6 +12,7 @@ import (
 	categoryhandler "github.com/Mininglamp-OSS/octo-marketplace/internal/api/handler/category"
 	experthandler "github.com/Mininglamp-OSS/octo-marketplace/internal/api/handler/expert"
 	metricshandler "github.com/Mininglamp-OSS/octo-marketplace/internal/api/handler/metrics"
+	pluginhandler "github.com/Mininglamp-OSS/octo-marketplace/internal/api/handler/plugin"
 	skillhandler "github.com/Mininglamp-OSS/octo-marketplace/internal/api/handler/skill"
 	uploadhandler "github.com/Mininglamp-OSS/octo-marketplace/internal/api/handler/upload"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/auth"
@@ -21,11 +22,13 @@ import (
 	metricsredis "github.com/Mininglamp-OSS/octo-marketplace/internal/redis"
 	categoryrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/category"
 	expertrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/expert"
+	pluginrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/plugin"
 	skillrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/skill"
 	categorysvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/category"
 	expertsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/expert"
 	metricssvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/metrics"
 	parsesvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/parse"
+	pluginsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/plugin"
 	skillsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/skill"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/storage"
 	"github.com/gin-gonic/gin"
@@ -108,6 +111,7 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 	if ok {
 		catRepo := categoryrepo.New(db)
 		skRepo := skillrepo.New(db)
+		pluginRepo := pluginrepo.New(db)
 
 		var store storage.Storage
 		var localStorage *storage.LocalStorage
@@ -138,6 +142,11 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 			panic("unsupported STORAGE_DRIVER: " + storageCfg.Driver)
 		}
 
+		pluginSvc := pluginsvc.New(pluginRepo, store)
+		pluginSvc.SetArtifactLimits(int64(storageCfg.MaxMB) << 20)
+		pluginCats := pluginsvc.NewCategories(pluginRepo)
+		pluginhandler.New(pluginSvc, pluginCats).Register(v1)
+
 		catSvc := categorysvc.New(catRepo, skRepo)
 		skSvc := skillsvc.New(skRepo, catRepo, store, generateID)
 		skSvc.SetMaxArchiveBytes(int64(storageCfg.MaxMB) << 20)
@@ -167,6 +176,10 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 		if fleetClient != nil {
 			expertSvc = expertSvc.WithFleet(fleetClient)
 		}
+		// The unified plugin install reuses the expert provisioning flow, accrues
+		// counters under resource_type "plugin", and imports skill uploads
+		// through the legacy parse pipeline.
+		pluginSvc.WithProvisioner(expertSvc).WithMetrics(mSvc).WithParseTasks(skRepo)
 		expertHandler := experthandler.New(expertSvc)
 		expertHandler.Register(v1)
 		// Admin (superAdmin ∪ marketAdmin) surface: /api/v1/admin/experts|squads
@@ -177,6 +190,7 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 		metricssvc.RegisterResolver("skill", metricssvc.NewSkillResolver(skSvc))
 		metricssvc.RegisterResolver("expert", metricssvc.NewExpertResolver(expertSvc))
 		metricssvc.RegisterResolver("squad", metricssvc.NewSquadResolver(expertSvc))
+		metricssvc.RegisterResolver("plugin", metricssvc.NewPluginResolver(pluginSvc))
 		metricshandler.New(mSvc).Register(v1)
 
 		parseRepo := parsesvc.NewRepo(db)
@@ -224,6 +238,8 @@ func registerMCP(r *gin.Engine, authenticator *marketmiddleware.Authenticator, m
 	rg.GET("/mine", mcp.ListMine)
 	rg.POST("/_probe", mcp.Probe)
 	rg.POST("/probe", deprecatedRoute("/api/v1/mcps/_probe"), mcp.Probe)
+	connectors := r.Group("/api/v1/connectors", authenticator.Handler())
+	connectors.POST("/_probe", mcp.ConnectorProbe)
 	rg.GET("/:mcp_id", mcp.Get)
 	rg.PATCH("/:mcp_id", mcp.Patch)
 	rg.DELETE("/:mcp_id", mcp.Delete)

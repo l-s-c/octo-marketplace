@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -160,6 +161,9 @@ func (s *LocalStorage) StatObject(_ context.Context, key string) (ObjectInfo, er
 		return ObjectInfo{}, err
 	}
 	info, err := os.Stat(full)
+	if errors.Is(err, os.ErrNotExist) {
+		return ObjectInfo{}, ErrObjectNotFound
+	}
 	if err != nil {
 		return ObjectInfo{}, fmt.Errorf("local storage: stat: %w", err)
 	}

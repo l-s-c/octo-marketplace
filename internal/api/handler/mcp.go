@@ -429,6 +429,43 @@ func (h *MCP) Probe(c *gin.Context) {
 	apiresponse.OK(c, resp)
 }
 
+// ConnectorProbe godoc
+// @Summary Probe connector
+// @Description Probe a Connector's remote MCP configuration without persisting it; the legacy MCP probe remains available during rollout.
+// @Tags plugin
+// @ID connector.probe
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param body body service.ProbeRequest true "Connector configuration to probe"
+// @Success 200 {object} apiresponse.Data[service.ProbeResponse]
+// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
+// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
+// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
+// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
+// @Router /connectors/_probe [post]
+func (h *MCP) ConnectorProbe(c *gin.Context) {
+	if _, ok := callerFromContext(c); !ok {
+		writeError(c, apierr.Unauthorized())
+		return
+	}
+	var req service.ProbeRequest
+	if err := decodeJSON(c, &req); err != nil {
+		writeError(c, err)
+		return
+	}
+	resp, apiErr := h.svc.Probe(c.Request.Context(), req)
+	if apiErr != nil {
+		writeError(c, apiErr)
+		return
+	}
+	if resp.Tools == nil {
+		resp.Tools = []model.Tool{}
+	}
+	apiresponse.OK(c, resp)
+}
+
 func callerFromContext(c *gin.Context) (service.Caller, bool) {
 	identity, ok := marketmiddleware.Identity(c)
 	if !ok || identity.UID == "" {

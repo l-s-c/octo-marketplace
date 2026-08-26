@@ -1,0 +1,249 @@
+package plugin
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"time"
+
+	"errors"
+	"fmt"
+	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
+	"io"
+	"net/url"
+	"regexp"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+)
+
+const (
+	maxJSONBytes  = 1 << 20 // current-state and snapshot JSON are metadata, not artifacts
+	maxNameBytes  = 160
+	maxTags       = 100
+	maxTagBytes   = 128
+	maxRelations  = 200
+	maxPlacements = 100
+	maxListLimit  = 100
+	maxListTags   = 20 // bound on AND-combined tag filters per list query
+	maxIconBytes  = 512
+)
+
+var (
+	versionPattern    = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$`)
+	placementPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,127}$`)
+	relationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	// iconKeyPattern identifies storage-object-key shaped icons that the read
+	// path resolves to presigned URLs (legacy skill icons are object keys).
+	iconKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+	// iconSchemePattern matches any URI scheme prefix; only http(s) is allowed.
+	iconSchemePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
+)
+
+// validIcon accepts an empty icon, an absolute http(s) URL, a storage object
+// key, or a short text glyph (legacy MCP icons are emoji). Every other URI
+// scheme — javascript:, data:, file: — plus control characters and traversal
+// segments fail closed because icons are echoed into <img src>.
+func validIcon(v string) bool {
+	if v == "" {
+		return true
+	}
+	if len(v) > maxIconBytes || !utf8.ValidString(v) {
+		return false
+	}
+	for _, r := range v {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	if strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") {
+		u, err := url.Parse(v)
+		return err == nil && u.Host != ""
+	}
+	if iconSchemePattern.MatchString(v) {
+		return false
+	}
+	return !strings.Contains(v, "..") && !strings.Contains(v, "//")
+}
+
+func validPluginType(v model.PluginType) bool {
+	switch v {
+	case model.PluginTypeExpert, model.PluginTypeExpertTeam, model.PluginTypeSkill, model.PluginTypeConnector:
+		return true
+	default:
+		return false
+	}
+}
+
+func validVisibility(v model.PluginVisibility, systemAdmin bool) bool {
+	switch v {
+	case model.PluginVisibilitySpace, model.PluginVisibilityPrivate:
+		return true
+	case model.PluginVisibilityPublic, model.PluginVisibilitySystem:
+		// public and system are marketplace-wide: readable, listable and
+		// installable from every Space (see visibilitySQL). Only the admin
+		// surface (which sets IsSystemAdmin) may mint them; a tenant caller on
+		// /plugins/upsert cannot self-publish globally. Mirrors the legacy skill
+		// rule (internal/service/skill/service.go rejects public for non-admins)
+		// and the import path, which already forces uploads non-public.
+		return systemAdmin
+	default:
+		return false
+	}
+}
+
+func validName(v string) bool {
+	return v != "" && utf8.ValidString(v) && len(v) <= maxNameBytes && !strings.ContainsRune(v, '\x00')
+}
+
+func validVersion(v string) bool       { return versionPattern.MatchString(strings.TrimSpace(v)) }
+func validPlacementCode(v string) bool { return placementPattern.MatchString(v) }
+func validRelationID(v string) bool    { return relationIDPattern.MatchString(v) }
+
+// relationEndpointProbe* are fixed well-formed identities so the octo-plugin-
+// lib endpoint validator (which also checks IDs, self-reference, and
+// timestamps on the full Relation object) can be reused as the single source
+// of the relation-type endpoint matrix.
+var (
+	relationProbeStamp = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+)
+
+const (
+	relationProbeID     = "00000000-0000-8000-8000-000000000001"
+	relationProbeSource = "00000000-0000-8000-8000-000000000002"
+	relationProbeTarget = "00000000-0000-8000-8000-000000000003"
+)
+
+// validRelationType reports whether relation may connect source -> target,
+// delegating the endpoint matrix (expert_team_expert: expert_team -> expert,
+// expert_skill: expert -> skill, expert_connector: expert -> connector) to
+// libplugin.ValidateRelationEndpoints.
+func validRelationType(relation string, source, target model.PluginType) bool {
+	probe := libplugin.Relation{
+		RelationID:     relationProbeID,
+		SourcePluginID: relationProbeSource,
+		TargetPluginID: relationProbeTarget,
+		RelationType:   libplugin.RelationType(relation),
+		CreatedAt:      relationProbeStamp,
+		UpdatedAt:      relationProbeStamp,
+	}
+	return libplugin.ValidateRelationEndpoints(probe, libplugin.Type(source), libplugin.Type(target)) == nil
+}
+
+// validRelationSource is the fast pre-check run before the target row is
+// loaded: the relation type must exist and admit this source type with at
+// least one valid target.
+func validRelationSource(relation string, source model.PluginType) bool {
+	for _, target := range []model.PluginType{model.PluginTypeExpert, model.PluginTypeExpertTeam, model.PluginTypeSkill, model.PluginTypeConnector} {
+		if validRelationType(relation, source, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeObject(raw json.RawMessage) (json.RawMessage, string, error) {
+	canonical, err := canonicalJSONObject(raw)
+	if err != nil {
+		return nil, "", ErrInvalidRequest
+	}
+	return canonical, hashJSON(canonical), nil
+}
+
+func normalizeOptionalObject(raw json.RawMessage) (json.RawMessage, error) {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil
+	}
+	canonical, err := canonicalJSONObject(raw)
+	if err != nil {
+		return nil, ErrInvalidRequest
+	}
+	return canonical, nil
+}
+
+func canonicalJSONObject(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 || len(raw) > maxJSONBytes {
+		return nil, ErrInvalidRequest
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return nil, err
+	}
+	if err := ensureJSONEOF(dec); err != nil {
+		return nil, err
+	}
+	if _, ok := value.(map[string]any); !ok {
+		return nil, ErrInvalidRequest
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil || len(canonical) > maxJSONBytes {
+		return nil, ErrInvalidRequest
+	}
+	return canonical, nil
+}
+
+func canonicalJSONValue(value any) (json.RawMessage, error) {
+	canonical, err := json.Marshal(value)
+	if err != nil || len(canonical) > maxJSONBytes {
+		return nil, ErrInvalidRequest
+	}
+	return canonical, nil
+}
+
+func ensureJSONEOF(dec *json.Decoder) error {
+	var extra any
+	err := dec.Decode(&extra)
+	if err == nil {
+		return ErrInvalidRequest
+	}
+	if !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
+}
+
+func normalizeTags(raw json.RawMessage) (json.RawMessage, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return json.RawMessage("[]"), nil
+	}
+	if len(raw) > maxJSONBytes {
+		return nil, ErrInvalidRequest
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var tags []string
+	if err := dec.Decode(&tags); err != nil || ensureJSONEOF(dec) != nil || len(tags) > maxTags {
+		return nil, ErrInvalidRequest
+	}
+	seen := make(map[string]struct{}, len(tags))
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" || !utf8.ValidString(tag) || len(tag) > maxTagBytes {
+			return nil, ErrInvalidRequest
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	return canonicalJSONValue(out)
+}
+
+func hashJSON(canonical json.RawMessage) string {
+	sum := sha256.Sum256(canonical)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func hashForTest(raw json.RawMessage) (string, error) {
+	canonical, err := canonicalJSONObject(raw)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize: %w", err)
+	}
+	return hashJSON(canonical), nil
+}

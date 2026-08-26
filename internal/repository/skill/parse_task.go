@@ -43,12 +43,16 @@ func (r *Repo) GetParseTask(ctx context.Context, id string) (*ParseTaskRow, erro
 		WHERE id = ?
 	`
 	var pt ParseTaskRow
-	var resultMetadata sql.NullString
+	// result_* columns are NULL until a parse succeeds (and stay NULL on
+	// failed tasks), so every one of them must scan through a null-safe
+	// carrier — import must see an unfinished task, not a 500.
+	var resultName, resultVersion, resultID, resultForkedFrom, resultMetadata sql.NullString
+	var resultTags []byte
 	err := r.db.QueryRowContext(ctx, query, id).Scan(
 		&pt.ID, &pt.UploadID, &pt.FileName, &pt.FileSize, &pt.FileURL, &pt.FileSHA256,
-		&pt.Status, &pt.ResultName, &pt.ResultDescription, &pt.ResultVersion,
-		&pt.ResultTags, &pt.ResultReadme,
-		&pt.ResultID, &pt.ResultForkedFrom, &resultMetadata, &pt.Attempts,
+		&pt.Status, &resultName, &pt.ResultDescription, &resultVersion,
+		&resultTags, &pt.ResultReadme,
+		&resultID, &resultForkedFrom, &resultMetadata, &pt.Attempts,
 		&pt.OwnerID, &pt.SpaceID, &pt.SkillID,
 	)
 	if err == sql.ErrNoRows {
@@ -56,6 +60,11 @@ func (r *Repo) GetParseTask(ctx context.Context, id string) (*ParseTaskRow, erro
 	}
 	if err != nil {
 		return nil, err
+	}
+	pt.ResultName, pt.ResultVersion = resultName.String, resultVersion.String
+	pt.ResultID, pt.ResultForkedFrom = resultID.String, resultForkedFrom.String
+	if len(resultTags) > 0 {
+		pt.ResultTags = json.RawMessage(resultTags)
 	}
 	if resultMetadata.Valid {
 		pt.ResultMetadata = json.RawMessage(resultMetadata.String)
@@ -83,6 +92,16 @@ func (r *Repo) MarkParseTaskConsumed(ctx context.Context, id, ownerID, spaceID, 
 		return ErrParseTaskAlreadyConsumed
 	}
 	return nil
+}
+
+// ReleaseConsumedParseTask returns a consumed task to success so a failed
+// downstream import (which consumes the task before writing its own rows) can
+// be retried. Best-effort compensation: releasing an already-released task is
+// a no-op.
+func (r *Repo) ReleaseConsumedParseTask(ctx context.Context, id string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE parse_tasks SET status = 'success' WHERE id = ? AND status = 'consumed'`, id)
+	return err
 }
 
 // UpdateSkillAndConsumeTask updates a skill, inserts a new version record,

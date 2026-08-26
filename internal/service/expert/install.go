@@ -197,6 +197,34 @@ type agentProvisionSpec struct {
 	Skills      []model.SkillRef
 }
 
+// ProvisionAgentSpec is the externally-buildable form of agentProvisionSpec:
+// the unified plugin install maps plugin_json attachments onto it. Field-for-
+// field identical so the conversion is a struct cast.
+type ProvisionAgentSpec struct {
+	Name        string
+	Summary     string
+	Instruction string
+	MCPConfig   string
+	Skills      []model.SkillRef
+}
+
+// ProvisionAgentFromSpec provisions one Loop agent from an externally built
+// spec with InstallExpert's exact semantics: aggregate install timeout, shared
+// file budget, and atomic rollback of everything created on failure. It bumps
+// no metrics counter — the caller owns attribution.
+func (s *Service) ProvisionAgentFromSpec(ctx context.Context, in InstallInput, spec ProvisionAgentSpec) (string, error) {
+	if s.fleet == nil {
+		return "", ErrFleetNotConfigured
+	}
+	if strings.TrimSpace(in.WorkspaceID) == "" || strings.TrimSpace(in.RuntimeID) == "" {
+		return "", ErrInvalidRequest
+	}
+	ctx, cancel := context.WithTimeout(ctx, installTimeout)
+	defer cancel()
+	agentID, _, err := s.provisionAgent(ctx, in, agentProvisionSpec(spec), &fileBudget{remaining: maxSkillFilesPerInstall}, nil)
+	return agentID, err
+}
+
 // provisionAgent creates one Loop agent (seeded with the instruction +
 // mcp_config), creates one workspace skill per packaged skill, then binds those
 // skills to the agent. It is atomic: on any failure after the agent exists it
@@ -245,7 +273,7 @@ func (s *Service) provisionAgent(ctx context.Context, in InstallInput, spec agen
 func (s *Service) installSkills(ctx context.Context, skills []model.SkillRef, summary string, in InstallInput, budget *fileBudget, seenSkillNames map[string]struct{}) ([]string, error) {
 	created := make([]string, 0, len(skills))
 	for i := range skills {
-		if skills[i].ObjectKey == "" {
+		if skills[i].ObjectKey == "" && skills[i].Markdown == "" {
 			continue
 		}
 		// Fleet's UNIQUE(workspace_id, name) constraint is byte-exact. Deduplicate
@@ -285,12 +313,26 @@ func (s *Service) installSkills(ctx context.Context, skills []model.SkillRef, su
 }
 
 // attachSkillFiles pushes the packaged skill's supporting files (everything but
-// SKILL.md) onto the freshly-created fleet skill via UpsertSkillFile. It reads
-// the stored .zip, extracting UTF-8 text files only (binaries are skipped by
-// ExtractSkillFiles). A missing/unreadable/unparseable package is treated as
-// "no extra files" — the SKILL.md-backed skill is already usable — so it does
-// NOT fail the install; only an actual fleet PUT error does.
+// SKILL.md) onto the freshly-created fleet skill via UpsertSkillFile. Tree-shaped
+// skills carry their supporting text files inline (resolved by the plugin path)
+// and are pushed directly; legacy pointer skills read the stored .zip, extracting
+// UTF-8 text files only (binaries are skipped by ExtractSkillFiles). A missing or
+// unreadable package is treated as "no extra files" — the SKILL.md-backed skill is
+// already usable — so it does NOT fail the install; only an actual fleet PUT error
+// or the aggregate budget does.
 func (s *Service) attachSkillFiles(ctx context.Context, in InstallInput, ref model.SkillRef, skillID string, budget *fileBudget) error {
+	// Tree shape: the plugin path already resolved the supporting text files.
+	if ref.Markdown != "" {
+		for _, f := range ref.SupportingFiles {
+			if !budget.take() {
+				return ErrInstallTooLarge
+			}
+			if err := s.fleet.UpsertSkillFile(ctx, in.Token, in.SpaceID, in.WorkspaceID, skillID, f.Path, f.Content); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	if ref.ZipObjectKey == "" || s.store == nil {
 		return nil
 	}

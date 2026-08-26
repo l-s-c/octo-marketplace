@@ -1,5 +1,9 @@
 FROM docker.m.daocloud.io/golang:1.25-alpine AS builder
 WORKDIR /app
+# All dependencies are public (the plugin contract is inlined under
+# internal/plugincontract), so modules are fetched from the Go proxy — no
+# vendor tree, no git credentials, no private hosts. The mainland mirror keeps
+# self-hosted/local builds reachable; `,direct` falls through when it is not.
 ENV GOPROXY=https://goproxy.cn,direct
 COPY go.mod go.sum ./
 RUN go mod download

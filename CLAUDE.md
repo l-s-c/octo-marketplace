@@ -86,7 +86,11 @@ Never execute Skill code or launch MCP servers inside Marketplace.
 - Prevent path traversal, symlink escape, decompression bombs, oversized
   manifests, and unsafe URL destinations.
 - Store secret references or required environment variable names, never MCP
-  secret values.
+  secret values. NOTE: for the unified plugin surface this is a client-side
+  control, not a backend scanner — the heuristic backend secret scanner was
+  deliberately removed (see `.octospec/tasks/unified-plugin-backend/brief.md`
+  secret-handling divergence record). Do not re-add a backend value scanner
+  without revisiting that decision.
 - Published artifacts are immutable and distributed only after digest/signature
   verification.
 

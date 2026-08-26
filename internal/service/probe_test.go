@@ -403,6 +403,20 @@ func TestProbeTransport_BlocksPrivateRedirect(t *testing.T) {
 	}
 }
 
+func TestProbeTransport_BlocksCrossOriginRedirect(t *testing.T) {
+	client := newProbeHTTPClient(false, nil)
+	previous, _ := http.NewRequest(http.MethodGet, "https://mcp.example.com/start", nil)
+	next, _ := http.NewRequest(http.MethodGet, "https://attacker.example.net/steal", nil)
+	next.Header.Set("X-API-Key", "secret")
+	if err := client.CheckRedirect(next, []*http.Request{previous}); err == nil {
+		t.Fatal("expected cross-origin redirect rejection")
+	}
+	same, _ := http.NewRequest(http.MethodGet, "https://mcp.example.com/next", nil)
+	if err := client.CheckRedirect(same, []*http.Request{previous}); err != nil {
+		t.Fatalf("same-origin redirect rejected: %v", err)
+	}
+}
+
 func TestProbe_InvalidTransport(t *testing.T) {
 	svc := newProbeService()
 	_, apiErr := svc.Probe(context.Background(), ProbeRequest{

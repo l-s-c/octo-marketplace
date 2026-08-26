@@ -135,7 +135,7 @@ Field names match the `octo-web` `dmworkmcp` package where the type overlaps;
 
 Field notes:
 
-- `mcp_id`: server-generated, ULID-style opaque 26-char string. Clients treat
+- `mcp_id`: server-generated opaque UUIDv7 (36-char) string. Clients treat
   it as opaque; never derive it from `name`.
 - `icon`: emoji, short label, or a `data:` / `https://` image URL. No
   length limit at the API layer; the schema caps `MEDIUMTEXT`.

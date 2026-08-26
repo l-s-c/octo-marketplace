@@ -15,6 +15,8 @@ functions:
   - octo-list-check
   - octo-pagination-check
   - octo-description-distinct
+  - octo-response-media-check
+  - octo-success-envelope-check
 
 functionsDir: ./functions
 
@@ -205,9 +207,7 @@ rules:
     resolved: true
     given: "$.paths[*][*].responses[?(@property.match(/^2/))].content[*].schema"
     then:
-      field: properties.data
-      function: truthy
-      message: "2xx response must wrap payload in envelope (top-level `data` property required) (R1)"
+      function: octo-success-envelope-check
 
   octo-response-error-shape:
     description: |
@@ -226,23 +226,12 @@ rules:
   # repo-level spectral override for its 2xx WITHOUT exempting its
   # error responses — errors are JSON envelopes with no exceptions.
   # 302 redirects declare no content, so they are unaffected.
-  octo-response-success-json-only:
-    description: 2xx response content must be application/json; byte-stream endpoints need an explicit repo-level override (R13)
+  octo-response-media-types:
+    description: Responses must use JSON except explicitly approved byte-stream successes (R13)
     severity: error
-    given: "$.paths[*][*].responses[?(@property.match(/^2/))].content[*]~"
+    given: "#Operation"
     then:
-      function: pattern
-      functionOptions:
-        match: "^application/json$"
-
-  octo-response-error-json-only:
-    description: 4xx/5xx response content must be application/json — no exceptions (R13)
-    severity: error
-    given: "$.paths[*][*].responses[?(@property.match(/^[45]/))].content[*]~"
-    then:
-      function: pattern
-      functionOptions:
-        match: "^application/json$"
+      function: octo-response-media-check
 
   # @Success is mandatory (R13: "@Success ✅ 至少 1 个") — every operation
   # must declare at least one 2xx response.
