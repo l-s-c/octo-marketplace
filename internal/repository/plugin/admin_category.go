@@ -11,13 +11,16 @@ import (
 // over the plugin_categories taxonomy table, with no Space scoping.
 
 // ListAdminCategories returns every live category whose plugin_types include
-// typ, with a live-plugin reference count, ordered by sort_order.
+// typ, with a live-plugin reference count for that SAME type, ordered by
+// sort_order. The count is type-scoped (a category shared across plugin types
+// must not tally another type's rows) and excludes embedded rows (bundled
+// skills / squad members), matching the catalog lists' is_embedded=0 filter.
 func (r *Repo) ListAdminCategories(ctx context.Context, typ model.PluginType) ([]model.PluginCategory, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT c.category_id,c.name,c.icon_key,c.plugin_types_json,c.sort_order,c.status,c.created_at,c.updated_at,
- (SELECT COUNT(*) FROM plugins p WHERE p.category_id=c.category_id AND p.status=1 AND p.deleted_at IS NULL) AS plugin_count
+ (SELECT COUNT(*) FROM plugins p WHERE p.category_id=c.category_id AND p.plugin_type=? AND p.is_embedded=0 AND p.status=1 AND p.deleted_at IS NULL) AS plugin_count
 FROM plugin_categories c
 WHERE c.status=1 AND c.deleted_at IS NULL AND JSON_CONTAINS(c.plugin_types_json, JSON_QUOTE(?), '$')
-ORDER BY c.sort_order, c.category_id`, typ)
+ORDER BY c.sort_order, c.category_id`, typ, typ)
 	if err != nil {
 		return nil, wrapped("list admin categories", err)
 	}

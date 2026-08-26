@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -639,5 +640,72 @@ func TestReuploadContainerRejectsNonContainerType(t *testing.T) {
 	}
 	if store.rebuildTop != nil {
 		t.Fatal("a skill row must not reach RebuildGraph")
+	}
+}
+
+// A reupload may tear down only the container's OWN embedded children. When an
+// expert's expert_skill relation points at a STANDALONE catalog skill
+// (is_embedded=0, e.g. one carrying its own market placement), that skill is
+// merely referenced by this expert — buildRelations validates type, not
+// ownership — and must never be soft-deleted out from under every other graph
+// that shares it. Only the genuine embedded child reaches rebuildOldIDs.
+func TestReuploadExpertContainerLeavesStandaloneRelationTargets(t *testing.T) {
+	space := "space-x"
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	expert := &model.Plugin{ID: "expert-9", Name: "Release Captain", Type: model.PluginTypeExpert, Visibility: model.PluginVisibilityPublic, SpaceID: &space, OwnerUID: "owner-1", Tags: []byte(`["ops"]`), Manifest: []byte(`{}`), Package: []byte(`{}`), CreatedAt: created, UpdatedAt: created, Status: 1}
+	embedded := &model.Plugin{ID: "skill-embedded-1", Name: "Deployer", Type: model.PluginTypeSkill, Visibility: model.PluginVisibilitySystem, SpaceID: &space, IsEmbedded: true, Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), Status: 1}
+	// A standalone catalog skill referenced by the same expert. IsEmbedded=false
+	// (it lives in the skill list on its own with a market placement).
+	standalone := &model.Plugin{ID: "skill-standalone-1", Name: "Shared", Type: model.PluginTypeSkill, Visibility: model.PluginVisibilitySystem, SpaceID: &space, IsEmbedded: false, Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), Status: 1}
+	store := &fakeStore{
+		plugins: map[string]*model.Plugin{"expert-9": expert, "skill-embedded-1": embedded, "skill-standalone-1": standalone},
+		relations: map[string][]model.PluginRelation{"expert-9": {
+			{ID: "rel-1", SourcePluginID: "expert-9", TargetPluginID: "skill-embedded-1", TargetPluginType: model.PluginTypeSkill, Type: "expert_skill", Status: 1},
+			{ID: "rel-2", SourcePluginID: "expert-9", TargetPluginID: "skill-standalone-1", TargetPluginType: model.PluginTypeSkill, Type: "expert_skill", Status: 1},
+		}},
+	}
+	svc := containerService(store)
+
+	if _, err := svc.ReuploadContainer(context.Background(), containerCaller, "expert-9", ContainerImportParams{Archive: expertReuploadArchive(t)}); err != nil {
+		t.Fatalf("ReuploadContainer: %v", err)
+	}
+	if len(store.rebuildOldIDs) != 1 || store.rebuildOldIDs[0] != "skill-embedded-1" {
+		t.Fatalf("old child ids = %#v, want only [skill-embedded-1]", store.rebuildOldIDs)
+	}
+	for _, id := range store.rebuildOldIDs {
+		if id == "skill-standalone-1" {
+			t.Fatal("standalone relation target must NOT be soft-deleted by a reupload")
+		}
+	}
+}
+
+// A container mcp_config carrying a credential-shaped value is imported as-is:
+// the live import stores mcp_config verbatim (no backend secret scan/blank), so
+// the value survives into the rendered mcp.json attachment. This pins the
+// deliberate divergence from the offline backfill's SanitizeConnectorJSON — the
+// import must NOT reject or blank the config it is handed (secret handling is a
+// client-side ${PLACEHOLDER} control).
+func TestImportExpertContainerPreservesMCPConfigVerbatim(t *testing.T) {
+	store := &fakeStore{plugins: map[string]*model.Plugin{}}
+	svc := containerService(store)
+	manifest := map[string]any{
+		"name":        "Secret Keeper",
+		"summary":     "Holds a credential-shaped config.",
+		"instruction": "Guard the secrets.",
+		"mcp_config":  `{"mcpServers":{"x":{"env":{"API_KEY":"abc"}}}}`,
+	}
+	archive := containerZip(t, "expert.json", manifest, nil)
+
+	detail, err := svc.ImportContainer(context.Background(), containerCaller, ContainerImportParams{Archive: archive})
+	if err != nil {
+		t.Fatalf("ImportContainer: %v", err)
+	}
+	mcp, ok := decodeAttachmentRaw(t, detail.Plugin.Package, "mcp.json")
+	if !ok {
+		t.Fatal("expert package missing mcp.json")
+	}
+	// The literal credential value is preserved, not rejected and not blanked.
+	if !strings.Contains(mcp, `"API_KEY":"abc"`) {
+		t.Fatalf("mcp_config not preserved verbatim (secret scanned/blanked?): %q", mcp)
 	}
 }

@@ -1,8 +1,8 @@
 // Admin plugin operations for the marketplace-admin surface (/api/v1/admin/plugins).
 // These run behind the admin role gate and operate cross-Space with no ownership
 // check (repo Scope.Admin). System connectors follow the MCP convention
-// (visibility=system, NULL Space); admin skills follow the legacy skill-admin
-// convention (visibility=public, empty global Space). Callers reach these only
+// (visibility=system, NULL Space); admin skills/experts follow the skill-admin
+// convention (visibility=system, empty global Space). Callers reach these only
 // through the admin-gated routes, so the route gate is the authorization; the
 // service does not re-derive a Space from the caller.
 
@@ -16,7 +16,7 @@ import (
 )
 
 // adminGlobalSpace is the Space admin skills live in — empty, matching the
-// legacy skill-admin GlobalTagSpaceID convention (public, space-less).
+// legacy skill-admin GlobalTagSpaceID convention (global, space-less).
 const adminGlobalSpace = ""
 
 func adminScope(caller Caller) pluginrepo.Scope {
@@ -36,7 +36,7 @@ func validAdminListSort(sort string) bool {
 }
 
 // AdminList lists plugins of one type across all Spaces, optionally narrowed to
-// a visibility class (e.g. system connectors, public skills).
+// a visibility class (e.g. system connectors, system skills).
 func (s *Service) AdminList(ctx context.Context, caller Caller, typ model.PluginType, visibility model.PluginVisibility, p ListParams) ([]model.Plugin, int64, error) {
 	if !validPluginType(typ) {
 		return nil, 0, ErrInvalidRequest
@@ -110,7 +110,7 @@ func conventionVisibility(typ model.PluginType) (model.PluginVisibility, bool) {
 
 // adminEffectiveWrite fixes the caller identity and Space and stamps the given
 // visibility so buildWrite mints the admin conventions: system connectors (NULL
-// Space) and public skills (empty global Space) on create; the row's preserved
+// Space) and system skills (empty global Space) on create; the row's preserved
 // visibility on update. effectiveSpace is the Space storage-attachment keys are
 // namespaced under and must be the ROW's real Space — for an AdminUpdate of a
 // tenant-owned row that is old.SpaceID, not the empty global Space, otherwise
@@ -129,7 +129,7 @@ func (s *Service) adminEffectiveWrite(ctx context.Context, caller Caller, plugin
 	if err != nil {
 		return nil, nil, err
 	}
-	// System rows live outside the Space model (space_id=NULL); public admin
+	// System rows live outside the Space model (space_id=NULL); system admin
 	// rows stay in the empty global Space.
 	if req.Type == model.PluginTypeConnector {
 		p.SpaceID = nil
@@ -154,7 +154,7 @@ func defaultMarketPlacement(categoryID *string) model.PluginPlacement {
 	return model.PluginPlacement{PlacementCode: "default", CategoryID: categoryID, Visible: true, SortOrder: 0}
 }
 
-// AdminCreate mints a new admin plugin (system connector or public skill).
+// AdminCreate mints a new admin plugin (system connector or system skill).
 func (s *Service) AdminCreate(ctx context.Context, caller Caller, req WriteRequest) (*Detail, error) {
 	visibility, ok := conventionVisibility(req.Type)
 	if !ok {

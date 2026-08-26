@@ -175,6 +175,16 @@ PR #67; this note is the decision record the brief's earlier wording predates.
     unguarded after the removal is only the skill package expansion/repackage
     *content* path (`expand.go`/`repackage.go`), which no longer runs a value
     scan over the rewritten package.
+  - The live admin **container import/reupload** path
+    (`Service.ImportContainer` / `ReuploadContainer`, via
+    `mcpAttachmentContent` in `internal/service/plugin/container.go`) also does
+    NOT scan or blank the container's `mcp_config`: it stores the value verbatim
+    into the rendered `mcp.json` attachment. This is deliberate and consistent
+    with the removal above — secret handling on this path is the client-side
+    `${PLACEHOLDER}` control (the browser sends references, not values), so the
+    backend must not reject or blank the config it is handed. It diverges from
+    the offline backfill, which still runs `SanitizeConnectorJSON`. (Owner
+    decision; the `mcpAttachmentContent` doc comment records the same rationale.)
 
   The "must not persist secret values" invariant in the load-bearing section is
   therefore **not enforced at the backend**. The tradeoff (accept this exposure
@@ -243,6 +253,12 @@ for skills, so it can stop editing experts/squads through the legacy
 
 - Retiring the legacy `/admin/experts` / `/admin/squads` PATCH routes (a
   frontend-cutover concern).
+
+> **Superseded (owner directive, 2026-08).** The retirement of the legacy
+> per-type admin CRUD — including `/admin/experts` and `/admin/squads` — is no
+> longer out of scope: it was carried out on `feat/admin-plugin-surface` once
+> octo-admin cut over to the unified `/admin/plugins*` surface. This addendum's
+> out-of-scope line above predates that directive.
 - Re-attaching a market placement to a top plugin that never had one (rebuild
   preserves the existing placement; it does not create one, matching AdminUpdate).
 - Any read-side secret blanking (unchanged; see the divergence record above).

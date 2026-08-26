@@ -4,10 +4,41 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 )
+
+func TestListAdminCategoriesCountsOnlyRequestedType(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// The count subquery must be type-scoped (p.plugin_type=?) and exclude
+	// embedded rows (p.is_embedded=0): a category registered for several types
+	// reports only the requested type's live, standalone plugins. Both the count
+	// subquery and the JSON_CONTAINS type filter bind the SAME requested type, so
+	// two identical args flow in the SQL text order (count first, then filter).
+	now := time.Now().UTC()
+	mock.ExpectQuery(`SELECT c\.category_id.*\(SELECT COUNT\(\*\) FROM plugins p WHERE p\.category_id=c\.category_id AND p\.plugin_type=\? AND p\.is_embedded=0 AND p\.status=1 AND p\.deleted_at IS NULL\).*JSON_CONTAINS\(c\.plugin_types_json, JSON_QUOTE\(\?\), '\$'\)`).
+		WithArgs(model.PluginTypeExpert, model.PluginTypeExpert).
+		WillReturnRows(sqlmock.NewRows([]string{"category_id", "name", "icon_key", "plugin_types_json", "sort_order", "status", "created_at", "updated_at", "plugin_count"}).
+			AddRow("cat-1", "Shared", "k", []byte(`["expert","skill"]`), 1, 1, now, now, 2))
+
+	cats, err := New(db).ListAdminCategories(context.Background(), model.PluginTypeExpert)
+	if err != nil {
+		t.Fatalf("ListAdminCategories error = %v", err)
+	}
+	if len(cats) != 1 || cats[0].ID != "cat-1" || cats[0].PluginCount != 2 {
+		t.Fatalf("categories = %#v", cats)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestCreateCategoryInsertsWithActiveStatus(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))

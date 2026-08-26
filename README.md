@@ -160,7 +160,7 @@ Canonical endpoint groups:
 | Skill categories | `/api/v1/skill_categories` |
 | MCP catalog | `/api/v1/mcps`, `/api/v1/mcps/mine`, `/api/v1/mcps/{mcp_id}` |
 | MCP support | `/api/v1/mcp_categories`, `/api/v1/mcps/_probe`, `/api/v1/mcp_icon_uploads` |
-| Administration | `/api/v1/admin/mcps`, `/api/v1/admin/skill_categories` |
+| Administration | `/api/v1/admin/plugins`, `/api/v1/admin/plugin_categories` |
 
 The authoritative machine-readable contract is
 [`docs/openapi/swagger.yaml`](docs/openapi/swagger.yaml). MCP-specific behavior

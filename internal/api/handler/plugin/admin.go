@@ -101,7 +101,7 @@ func adminCaller(c *gin.Context) (pluginsvc.Caller, bool) {
 // @Produce json
 // @Security Bearer
 // @Param plugin_type query string true "Plugin type" Enums(expert,expert_team,skill,connector)
-// @Param visibility query string false "Filter by visibility" Enums(public,space,private,system)
+// @Param visibility query string false "Filter by visibility" Enums(space,private,system)
 // @Param q query string false "Search keyword"
 // @Param category_id query string false "Category id"
 // @Param sort query string false "Sort mode"
@@ -156,6 +156,7 @@ func (h *AdminHandler) List(c *gin.Context) {
 // @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /admin/plugins/{plugin_id} [get]
 func (h *AdminHandler) Get(c *gin.Context) {
 	caller, ok := adminCaller(c)
@@ -182,7 +183,7 @@ func (h *AdminHandler) Get(c *gin.Context) {
 
 // Create godoc
 // @Summary Create plugin (admin)
-// @Description Mint a system connector or public skill/expert. Visibility and Space are set by convention (connector=system/NULL Space; others=public/global). Admin only.
+// @Description Mint a system connector or system-visible skill/expert. Visibility and Space are set by convention (connector=system/NULL Space; others=system/global). Admin only.
 // @Tags admin_plugin
 // @ID admin_plugin.create
 // @Accept json
@@ -194,6 +195,7 @@ func (h *AdminHandler) Get(c *gin.Context) {
 // @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 409 {object} apiresponse.Error "CONFLICT"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /admin/plugins [post]
 func (h *AdminHandler) Create(c *gin.Context) {
 	caller, ok := adminCaller(c)
@@ -365,7 +367,7 @@ func (r adminSkillImportRequest) params(pluginID string) pluginsvc.ImportParams 
 
 // SkillImport godoc
 // @Summary Import skill plugin (admin)
-// @Description Create a public skill plugin from a completed admin upload-parse task, under the admin conventions (public visibility, global Space, a default visible market placement). The category_id is a unified plugin_categories id. Admin only.
+// @Description Create a system-visible skill plugin from a completed admin upload-parse task, under the admin conventions (system visibility, global Space, a default visible market placement). The category_id is a unified plugin_categories id. Admin only.
 // @Tags admin_plugin
 // @ID admin_plugin.skill_import
 // @Accept json
@@ -378,6 +380,7 @@ func (r adminSkillImportRequest) params(pluginID string) pluginsvc.ImportParams 
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 409 {object} apiresponse.Error "CONFLICT"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /admin/plugins/skill_import [post]
 func (h *AdminHandler) SkillImport(c *gin.Context) {
 	caller, ok := adminCaller(c)
@@ -413,6 +416,7 @@ func (h *AdminHandler) SkillImport(c *gin.Context) {
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 409 {object} apiresponse.Error "CONFLICT"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /admin/plugins/skill_reupload/{plugin_id} [post]
 func (h *AdminHandler) SkillReupload(c *gin.Context) {
 	caller, ok := adminCaller(c)
@@ -447,6 +451,7 @@ func (h *AdminHandler) SkillReupload(c *gin.Context) {
 // @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /admin/plugins/{plugin_id} [patch]
 func (h *AdminHandler) Update(c *gin.Context) {
 	caller, ok := adminCaller(c)
@@ -478,6 +483,7 @@ func (h *AdminHandler) Update(c *gin.Context) {
 // @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /admin/plugins/{plugin_id} [delete]
 func (h *AdminHandler) Delete(c *gin.Context) {
 	caller, ok := adminCaller(c)

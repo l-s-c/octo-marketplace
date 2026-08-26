@@ -245,11 +245,28 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 // admin scope so embedded children (hidden from tenant listings) stay visible.
 func (s *Service) collectContainerChildren(ctx context.Context, caller Caller, top *model.Plugin, topRels []model.PluginRelation) ([]string, error) {
 	var ids []string
+	// A rebuild may only tear down the container's OWN embedded children — the
+	// per-parent skill/member copies (is_embedded=1). A relation target that is a
+	// standalone catalog row (is_embedded=0) is something a tenant graph merely
+	// references (buildRelations validates only type, not ownership), and must
+	// never be soft-deleted out from under every other graph that shares it.
+	addIfEmbedded := func(id string) error {
+		child, _, err := s.repo.GetWithRelations(ctx, adminScope(caller), id)
+		if err != nil {
+			return mapStoreError(err)
+		}
+		if child.IsEmbedded {
+			ids = append(ids, id)
+		}
+		return nil
+	}
 	switch top.Type {
 	case model.PluginTypeExpert:
 		for _, r := range topRels {
 			if r.Type == "expert_skill" {
-				ids = append(ids, r.TargetPluginID)
+				if err := addIfEmbedded(r.TargetPluginID); err != nil {
+					return nil, err
+				}
 			}
 		}
 	case model.PluginTypeExpertTeam:
@@ -257,15 +274,21 @@ func (s *Service) collectContainerChildren(ctx context.Context, caller Caller, t
 			if r.Type != "expert_team_expert" {
 				continue
 			}
-			memberID := r.TargetPluginID
-			ids = append(ids, memberID)
-			_, memberRels, err := s.repo.GetWithRelations(ctx, adminScope(caller), memberID)
+			member, memberRels, err := s.repo.GetWithRelations(ctx, adminScope(caller), r.TargetPluginID)
 			if err != nil {
 				return nil, mapStoreError(err)
 			}
+			// A team member that is a standalone expert (referenced, not embedded)
+			// is left intact along with its own skills.
+			if !member.IsEmbedded {
+				continue
+			}
+			ids = append(ids, r.TargetPluginID)
 			for _, mr := range memberRels {
 				if mr.Type == "expert_skill" {
-					ids = append(ids, mr.TargetPluginID)
+					if err := addIfEmbedded(mr.TargetPluginID); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
@@ -658,15 +681,17 @@ func rawAttachmentMap(path, mime, content string) map[string]any {
 	}
 }
 
-// mcpAttachmentContent sanitizes a container mcp_config string and renders it
-// exactly as the backfill does: sanitize -> decode -> re-marshal.
+// mcpAttachmentContent canonicalizes a container mcp_config string into the
+// rendered mcp.json attachment. It deliberately does NOT run a backend secret
+// scanner: secret handling is a client-side control (the frontend sends
+// `${PLACEHOLDER}` references, not values), and CLAUDE.md records that the
+// heuristic backend value scanner was removed on purpose — the live import must
+// not reject or blank config it is handed. The config was already validated as
+// valid, size-bounded JSON by normalizeMCPConfig, so we only re-marshal it
+// deterministically. (The offline backfill still uses SanitizeConnectorJSON.)
 func mcpAttachmentContent(mcpConfig string) (string, error) {
-	safe, err := plugindoc.SanitizeConnectorJSON([]byte(mcpConfig))
-	if err != nil {
-		return "", ErrInvalidContainer
-	}
 	var cfg any
-	if err := json.Unmarshal(safe, &cfg); err != nil {
+	if err := json.Unmarshal([]byte(mcpConfig), &cfg); err != nil {
 		return "", ErrInvalidContainer
 	}
 	return jsonAttachmentContent(cfg)

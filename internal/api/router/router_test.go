@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/api/handler"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/apierr"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/auth"
@@ -559,5 +560,94 @@ func TestAdminMcpsAdmitsMarketAdminInProd(t *testing.T) {
 	if !svc.probed {
 		t.Fatalf("marketAdmin request did not reach the admin MCP handler (status=%d body=%s)",
 			recorder.Code, recorder.Body.String())
+	}
+}
+
+// ─── Unified plugin admin surface (admin_plugin) ────────────────────────────
+//
+// The /api/v1/admin/plugins* + /api/v1/admin/plugin_categories groups are only
+// mounted when the router is given a real *sql.DB (they live in the db block of
+// publicWithOptions), so the stubPinger harness above cannot reach them. These
+// drive the real router via PublicWithDBAndAdminAuth (prod-mode admin auth + a
+// caller-supplied resolver) against a sqlmock DB and pin, for every new route,
+// both directions of the role gate: a marketAdmin caller is neither refused
+// (401/403) nor missing (404/405), and a non-admin caller is refused 403.
+//
+// The gate is what is under test, not the handler, so the admit assertion is
+// "neither refused nor missing" — a 2xx would need sqlmock expectations primed
+// per route, which is beside the point. 404/405 are excluded explicitly so a
+// route that was never registered cannot satisfy "not 403" and pass vacuously.
+
+func adminPluginEngine(t *testing.T, resolver auth.Resolver) *gin.Engine {
+	t.Helper()
+	db, _, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	pubAuth := marketmiddleware.NewAuthenticator(false, nil, model.Identity{UID: "dev-user", Name: "Developer"}, "dev-space")
+	return PublicWithDBAndAdminAuth(db, pubAuth, testStorageConfig(), true, resolver)
+}
+
+// adminPluginRoutes is the representative set of new admin routes: every verb on
+// /admin/plugins and /admin/plugin_categories plus the import/reupload actions.
+var adminPluginRoutes = []struct {
+	method string
+	path   string
+}{
+	{http.MethodGet, "/api/v1/admin/plugins"},
+	{http.MethodPost, "/api/v1/admin/plugins"},
+	{http.MethodGet, "/api/v1/admin/plugins/p-1"},
+	{http.MethodPatch, "/api/v1/admin/plugins/p-1"},
+	{http.MethodDelete, "/api/v1/admin/plugins/p-1"},
+	{http.MethodPost, "/api/v1/admin/plugins/import"},
+	{http.MethodPost, "/api/v1/admin/plugins/skill_import"},
+	{http.MethodPost, "/api/v1/admin/plugins/skill_reupload/p-1"},
+	{http.MethodPost, "/api/v1/admin/plugins/container_reupload/p-1"},
+	{http.MethodGet, "/api/v1/admin/plugin_categories"},
+	{http.MethodPost, "/api/v1/admin/plugin_categories"},
+	{http.MethodPatch, "/api/v1/admin/plugin_categories/c-1"},
+	{http.MethodDelete, "/api/v1/admin/plugin_categories/c-1"},
+}
+
+// TestAdminPluginSurfaceAdmitsMarketAdmin proves each new admin route is mounted
+// and admits a marketAdmin caller: dropping RoleMarketAdmin from any one
+// registration — or forgetting to mount it — fails here rather than silently
+// 403ing the curators who are supposed to reach it.
+func TestAdminPluginSurfaceAdmitsMarketAdmin(t *testing.T) {
+	for _, tc := range adminPluginRoutes {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			engine := adminPluginEngine(t, marketAdminResolver())
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Header.Set("Token", "market-admin-session")
+			w := httptest.NewRecorder()
+			engine.ServeHTTP(w, req)
+			switch w.Code {
+			case http.StatusForbidden, http.StatusUnauthorized:
+				t.Fatalf("%s %s: marketAdmin must pass the admin gate, got %d body=%s",
+					tc.method, tc.path, w.Code, w.Body.String())
+			case http.StatusNotFound, http.StatusMethodNotAllowed:
+				t.Fatalf("%s %s: route is not registered for this method+path, so this case proves nothing (got %d)",
+					tc.method, tc.path, w.Code)
+			}
+		})
+	}
+}
+
+// TestAdminPluginSurfaceRejectsNonAdmin guards the other direction: the gate must
+// refuse a caller whose resolved role is not admitted, on every new route.
+func TestAdminPluginSurfaceRejectsNonAdmin(t *testing.T) {
+	for _, tc := range adminPluginRoutes {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			engine := adminPluginEngine(t, nonAdminResolver())
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Header.Set("Token", "member-session")
+			w := httptest.NewRecorder()
+			engine.ServeHTTP(w, req)
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("%s %s: non-admin caller must be refused 403, got %d body=%s",
+					tc.method, tc.path, w.Code, w.Body.String())
+			}
+		})
 	}
 }

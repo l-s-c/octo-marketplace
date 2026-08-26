@@ -21,11 +21,15 @@ onto `main` once #67 merges.
   (`RoleMarketAdmin`), operating cross-Space with no ownership check via repo
   `Scope.Admin` (already present and dormant on the baseline). The service never
   re-derives a Space from the caller on this path.
-- Type conventions: admin CREATE stamps `visibility=system` + NULL Space for
-  connectors, `visibility=public` + empty global Space for skill/expert/
-  expert_team. Admin UPDATE **preserves** the row's existing visibility, Space,
-  owner, and creator provenance — a metadata edit must never force-publish a
-  tenant-private plugin, and owner/creator are immutable.
+- Type conventions: admin CREATE stamps `visibility=system` for every plugin
+  type — connectors also get a NULL Space; skill/expert/expert_team stay in the
+  empty global Space. (Correction, owner directive 2026-08: an earlier draft said
+  skill/expert/expert_team CREATE stamped `visibility=public`; the code stamps
+  `system` via `conventionVisibility` — the unified "全平台可见" value. The
+  `model.PluginVisibilityPublic` constant is kept only for back-compat.) Admin
+  UPDATE **preserves** the row's existing visibility, Space, owner, and creator
+  provenance — a metadata edit must never force-publish a tenant-private plugin,
+  and owner/creator are immutable.
 - Storage-attachment keys are namespaced under the row's real Space, so admin
   UPDATE canonicalizes against `old.SpaceID` (not the empty global Space),
   otherwise every storage-backed attachment is rejected.
@@ -48,6 +52,17 @@ onto `main` once #67 merges.
   (not deleted). octo-admin stops calling their CRUD; they read the old tables
   and therefore show stale data, which is acceptable transitional state because
   no client calls them. Their removal is a separate follow-up.
+
+> **Decision B superseded (owner directive, 2026-08): legacy per-type admin CRUD
+> retired this round.** The per-type admin CRUD (`/admin/experts`,
+> `/admin/squads`, `/admin/expert_categories`, `/admin/expert_tags`,
+> `/admin/expert_skill_uploads`, `/admin/skill_categories`, and the MCP
+> `/admin/mcps` CRUD) has been deleted in this PR, not deferred — an explicit
+> owner directive supersedes Decision B above. Only the unified
+> `/admin/plugins*` + `/admin/plugin_categories` surface remains, plus the
+> retained MCP `_probe`/icon routes and the skill `skill_md` / upload-parse /
+> download helpers. Contract docs (mcp-v1 §9, expert-v1 §9, README,
+> CONFIGURATION) were updated to match.
 
 ## In scope
 

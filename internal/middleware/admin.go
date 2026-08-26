@@ -19,15 +19,18 @@ import (
 const RoleSuperAdmin = "superAdmin"
 
 // RoleMarketAdmin is the octo-server fixed role for staff who run the platform
-// market — the MCP catalog, the Skill catalog and the Expert Market — and hold
-// no other administrative power. Coupled by convention — not by import — to
-// octo-server's pkg/auth.ManagerRoleMarketAdmin, exactly like RoleSuperAdmin
-// above. Grep both repos before changing either string.
+// market — the unified plugin catalog (MCP / Skill / Expert / Expert-Team) —
+// and hold no other administrative power. Coupled by convention — not by
+// import — to octo-server's pkg/auth.ManagerRoleMarketAdmin, exactly like
+// RoleSuperAdmin above. Grep both repos before changing either string.
 //
-// It is currently admitted on every /api/v1/admin/* group, and on the legacy
-// /api/v1/skill/admin/categories alias, which sits outside that prefix but
-// mounts the same handlers — nine gates in total. See Handler's alsoAllow
-// parameter for how that is expressed per group.
+// It is admitted on every live /api/v1/admin/* group: the unified plugin
+// admin surface (/admin/plugins* + /admin/plugin_categories), the retained MCP
+// probe/icon routes (/admin/mcps/_probe, /admin/mcp_icon_uploads), and the
+// retained skill helper routes (skill_md, skill_uploads). The legacy per-type
+// admin CRUD (/admin/experts, /admin/squads, /admin/skill_categories, and the
+// /api/v1/skill/admin/categories alias) has been retired. See Handler's
+// alsoAllow parameter for how admission is expressed per group.
 const RoleMarketAdmin = "marketAdmin"
 
 // AdminAuthenticator guards the /api/v1/admin/* namespace consumed by

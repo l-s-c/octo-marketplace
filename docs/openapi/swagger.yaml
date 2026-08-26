@@ -2317,7 +2317,6 @@ paths:
         name: visibility
         schema:
           enum:
-          - public
           - space
           - private
           - system
@@ -2384,8 +2383,8 @@ paths:
       tags:
       - admin_plugin
     post:
-      description: Mint a system connector or public skill/expert. Visibility and
-        Space are set by convention (connector=system/NULL Space; others=public/global).
+      description: Mint a system connector or system-visible skill/expert. Visibility
+        and Space are set by convention (connector=system/NULL Space; others=system/global).
         Admin only.
       operationId: admin_plugin.create
       requestBody:
@@ -2430,6 +2429,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
       security:
       - Bearer: []
       summary: Create plugin (admin)
@@ -2471,6 +2476,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
       security:
       - Bearer: []
       summary: Delete plugin (admin)
@@ -2517,6 +2528,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
       security:
       - Bearer: []
       summary: Get plugin (admin)
@@ -2574,6 +2591,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
       security:
       - Bearer: []
       summary: Update plugin (admin)
@@ -2741,8 +2764,8 @@ paths:
       - admin_plugin
   /admin/plugins/skill_import:
     post:
-      description: Create a public skill plugin from a completed admin upload-parse
-        task, under the admin conventions (public visibility, global Space, a default
+      description: Create a system-visible skill plugin from a completed admin upload-parse
+        task, under the admin conventions (system visibility, global Space, a default
         visible market placement). The category_id is a unified plugin_categories
         id. Admin only.
       operationId: admin_plugin.skill_import
@@ -2794,6 +2817,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
       security:
       - Bearer: []
       summary: Import skill plugin (admin)
@@ -2860,6 +2889,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: CONFLICT
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
       security:
       - Bearer: []
       summary: Reupload skill plugin (admin)
