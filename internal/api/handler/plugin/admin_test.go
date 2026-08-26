@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -18,15 +19,18 @@ import (
 )
 
 type fakeAdminService struct {
-	caller     pluginsvc.Caller
-	listType   model.PluginType
-	listVis    model.PluginVisibility
-	listParams pluginsvc.ListParams
-	list       []model.Plugin
-	detail     *pluginsvc.Detail
-	write      pluginsvc.WriteRequest
-	deletedID  string
-	err        error
+	caller       pluginsvc.Caller
+	listType     model.PluginType
+	listVis      model.PluginVisibility
+	listParams   pluginsvc.ListParams
+	list         []model.Plugin
+	detail       *pluginsvc.Detail
+	write        pluginsvc.WriteRequest
+	importParams pluginsvc.ContainerImportParams
+	reuploadID   string
+	skillParams  pluginsvc.ImportParams
+	deletedID    string
+	err          error
 }
 
 func (f *fakeAdminService) AdminList(_ context.Context, c pluginsvc.Caller, typ model.PluginType, vis model.PluginVisibility, p pluginsvc.ListParams) ([]model.Plugin, int64, error) {
@@ -41,6 +45,18 @@ func (f *fakeAdminService) AdminCreate(_ context.Context, c pluginsvc.Caller, r 
 	f.caller, f.write = c, r
 	return f.detail, f.err
 }
+func (f *fakeAdminService) AdminImportContainer(_ context.Context, c pluginsvc.Caller, p pluginsvc.ContainerImportParams) (*pluginsvc.Detail, error) {
+	f.caller, f.importParams = c, p
+	return f.detail, f.err
+}
+func (f *fakeAdminService) AdminReuploadContainer(_ context.Context, c pluginsvc.Caller, id string, p pluginsvc.ContainerImportParams) (*pluginsvc.Detail, error) {
+	f.caller, f.reuploadID, f.importParams = c, id, p
+	return f.detail, f.err
+}
+func (f *fakeAdminService) AdminImport(_ context.Context, c pluginsvc.Caller, p pluginsvc.ImportParams) (*pluginsvc.Detail, error) {
+	f.caller, f.skillParams = c, p
+	return f.detail, f.err
+}
 func (f *fakeAdminService) AdminUpdate(_ context.Context, c pluginsvc.Caller, _ string, r pluginsvc.WriteRequest) (*pluginsvc.Detail, error) {
 	f.caller, f.write = c, r
 	return f.detail, f.err
@@ -51,14 +67,37 @@ func (f *fakeAdminService) AdminDelete(_ context.Context, c pluginsvc.Caller, id
 }
 
 type fakeAdminCategories struct {
-	listType model.PluginType
-	list     []model.PluginCategory
-	err      error
+	listType   model.PluginType
+	list       []model.PluginCategory
+	created    *model.PluginCategory
+	updated    *model.PluginCategory
+	updateID   string
+	writeName  string
+	writeIcon  string
+	writeTypes []model.PluginType
+	writeSort  int
+	deletedID  string
+	err        error
 }
 
 func (f *fakeAdminCategories) AdminListCategories(_ context.Context, typ model.PluginType) ([]model.PluginCategory, error) {
 	f.listType = typ
 	return f.list, f.err
+}
+
+func (f *fakeAdminCategories) AdminCreateCategory(_ context.Context, name, iconKey string, pluginTypes []model.PluginType, sortOrder int) (*model.PluginCategory, error) {
+	f.writeName, f.writeIcon, f.writeTypes, f.writeSort = name, iconKey, pluginTypes, sortOrder
+	return f.created, f.err
+}
+
+func (f *fakeAdminCategories) AdminUpdateCategory(_ context.Context, id, name, iconKey string, pluginTypes []model.PluginType, sortOrder int) (*model.PluginCategory, error) {
+	f.updateID, f.writeName, f.writeIcon, f.writeTypes, f.writeSort = id, name, iconKey, pluginTypes, sortOrder
+	return f.updated, f.err
+}
+
+func (f *fakeAdminCategories) AdminDeleteCategory(_ context.Context, id string) error {
+	f.deletedID = id
+	return f.err
 }
 
 // adminTestEngine mounts the admin surface behind the dev admin authenticator,
@@ -71,6 +110,214 @@ func adminTestEngine(svc AdminService, cats AdminCategoryService) *gin.Engine {
 	adminAuth := marketmiddleware.NewAdminAuthenticator(false, nil, model.Identity{UID: "admin-1", Name: "Root"})
 	NewAdmin(svc, cats).RegisterAdmin(r, adminAuth)
 	return r
+}
+
+func TestAdminImportContainerForwardsArchiveAndAdminCaller(t *testing.T) {
+	space := adminSpaceForTest()
+	f := &fakeAdminService{detail: &pluginsvc.Detail{
+		Plugin:    &model.Plugin{ID: "expert-1", Name: "E", Type: model.PluginTypeExpert, SpaceID: &space, Visibility: model.PluginVisibilityPublic, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`), CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		Relations: []model.PluginRelation{},
+	}}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, _ := mw.CreateFormFile("file", "container.zip")
+	part.Write([]byte("PK-fake-container-bytes"))
+	_ = mw.WriteField("category_id", "cat-9")
+	mw.Close()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/plugins/import", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	adminTestEngine(f, &fakeAdminCategories{}).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !f.caller.IsSystemAdmin || f.caller.UID != "admin-1" {
+		t.Fatalf("import did not stamp a system-admin caller: %#v", f.caller)
+	}
+	if string(f.importParams.Archive) != "PK-fake-container-bytes" {
+		t.Fatalf("archive not forwarded: %q", f.importParams.Archive)
+	}
+	if f.importParams.CategoryID == nil || *f.importParams.CategoryID != "cat-9" {
+		t.Fatalf("category_id not forwarded: %#v", f.importParams.CategoryID)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"plugin_id":"expert-1"`)) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestAdminReuploadContainerForwardsPluginIDArchiveAndAdminCaller(t *testing.T) {
+	space := adminSpaceForTest()
+	f := &fakeAdminService{detail: &pluginsvc.Detail{
+		Plugin:    &model.Plugin{ID: "expert-9", Name: "E", Type: model.PluginTypeExpert, SpaceID: &space, Visibility: model.PluginVisibilityPublic, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`), CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		Relations: []model.PluginRelation{},
+	}}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, _ := mw.CreateFormFile("file", "container.zip")
+	part.Write([]byte("PK-new-container-bytes"))
+	_ = mw.WriteField("category_id", "cat-3")
+	mw.Close()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/plugins/container_reupload/expert-9", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	adminTestEngine(f, &fakeAdminCategories{}).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !f.caller.IsSystemAdmin || f.caller.UID != "admin-1" {
+		t.Fatalf("reupload did not stamp a system-admin caller: %#v", f.caller)
+	}
+	if f.reuploadID != "expert-9" {
+		t.Fatalf("plugin_id from path not forwarded: %q", f.reuploadID)
+	}
+	if string(f.importParams.Archive) != "PK-new-container-bytes" {
+		t.Fatalf("archive not forwarded: %q", f.importParams.Archive)
+	}
+	if f.importParams.CategoryID == nil || *f.importParams.CategoryID != "cat-3" {
+		t.Fatalf("category_id not forwarded: %#v", f.importParams.CategoryID)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"plugin_id":"expert-9"`)) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+// stubRoleResolver resolves any non-empty token to a fixed-role identity, so a
+// role-gate test can drive the real AdminAuthenticator.
+type stubRoleResolver struct{ role string }
+
+func (r stubRoleResolver) Resolve(_ context.Context, _ string) (model.Identity, error) {
+	return model.Identity{UID: "u-1", Name: "U", Role: r.role, ContextIncluded: true}, nil
+}
+
+// reachAdminService records whether any admin operation was invoked; the
+// role-gate test asserts it stays false when the gate rejects the caller.
+type reachAdminService struct {
+	fakeAdminService
+	reached bool
+}
+
+func (f *reachAdminService) AdminReuploadContainer(ctx context.Context, c pluginsvc.Caller, id string, p pluginsvc.ContainerImportParams) (*pluginsvc.Detail, error) {
+	f.reached = true
+	return f.fakeAdminService.AdminReuploadContainer(ctx, c, id, p)
+}
+
+// TestAdminReuploadContainerRejectsNonAdminRole pins the container_reupload route
+// behind the same RoleMarketAdmin gate as the rest of the admin plugin surface:
+// a resolved identity without the role is refused with 403 FORBIDDEN and never
+// reaches the service.
+func TestAdminReuploadContainerRejectsNonAdminRole(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(logging.RequestID())
+	adminAuth := marketmiddleware.NewAdminAuthenticator(true, stubRoleResolver{role: "user"}, model.Identity{})
+	f := &reachAdminService{}
+	NewAdmin(f, &fakeAdminCategories{}).RegisterAdmin(r, adminAuth)
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, _ := mw.CreateFormFile("file", "container.zip")
+	part.Write([]byte("PK"))
+	mw.Close()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/plugins/container_reupload/expert-9", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Token", "some-user-session")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden || !bytes.Contains(rec.Body.Bytes(), []byte("FORBIDDEN")) {
+		t.Fatalf("non-admin status=%d body=%s, want 403 FORBIDDEN", rec.Code, rec.Body.String())
+	}
+	if f.reached {
+		t.Fatal("a non-admin role must not reach the reupload service")
+	}
+}
+
+func TestAdminImportContainerRequiresFile(t *testing.T) {
+	f := &fakeAdminService{}
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	_ = mw.WriteField("category_id", "cat-9")
+	mw.Close()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/plugins/import", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	adminTestEngine(f, &fakeAdminCategories{}).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"VALIDATION_ERROR"`)) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func adminSpaceForTest() string { return "" }
+
+func TestAdminSkillImportForwardsParamsAndAdminCaller(t *testing.T) {
+	space := adminSpaceForTest()
+	f := &fakeAdminService{detail: &pluginsvc.Detail{
+		Plugin:    &model.Plugin{ID: "skill-1", Name: "Ops", Type: model.PluginTypeSkill, SpaceID: &space, Visibility: model.PluginVisibilityPublic, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`), CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		Relations: []model.PluginRelation{},
+	}}
+	body := []byte(`{"parse_task_id":"task-1","name":"Ops","category_id":"cat-ops","tags":["deploy"],"version":"1.2.0","description":"An ops skill."}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/plugins/skill_import", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	adminTestEngine(f, &fakeAdminCategories{}).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !f.caller.IsSystemAdmin || f.caller.UID != "admin-1" {
+		t.Fatalf("import did not stamp a system-admin caller: %#v", f.caller)
+	}
+	if f.skillParams.ParseTaskID != "task-1" || f.skillParams.PluginID != "" || f.skillParams.Name != "Ops" || f.skillParams.Version != "1.2.0" {
+		t.Fatalf("params not forwarded: %#v", f.skillParams)
+	}
+	if f.skillParams.CategoryID == nil || *f.skillParams.CategoryID != "cat-ops" {
+		t.Fatalf("category not forwarded: %#v", f.skillParams.CategoryID)
+	}
+	if len(f.skillParams.Tags) != 1 || f.skillParams.Tags[0] != "deploy" {
+		t.Fatalf("tags not forwarded: %#v", f.skillParams.Tags)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"plugin_id":"skill-1"`)) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestAdminSkillReuploadForwardsPluginIDFromPath(t *testing.T) {
+	space := adminSpaceForTest()
+	f := &fakeAdminService{detail: &pluginsvc.Detail{
+		Plugin:    &model.Plugin{ID: "skill-9", Name: "Ops", Type: model.PluginTypeSkill, SpaceID: &space, Visibility: model.PluginVisibilityPublic, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`), CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		Relations: []model.PluginRelation{},
+	}}
+	body := []byte(`{"parse_task_id":"task-2","version":"2.0.0","changelog":"bump"}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/plugins/skill_reupload/skill-9", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	adminTestEngine(f, &fakeAdminCategories{}).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if f.skillParams.PluginID != "skill-9" || f.skillParams.ParseTaskID != "task-2" || f.skillParams.Version != "2.0.0" {
+		t.Fatalf("reupload params not forwarded: %#v", f.skillParams)
+	}
+	if f.skillParams.Changelog == nil || *f.skillParams.Changelog != "bump" {
+		t.Fatalf("changelog not forwarded: %#v", f.skillParams.Changelog)
+	}
+}
+
+func TestAdminSkillImportConflictIs409(t *testing.T) {
+	f := &fakeAdminService{err: pluginsvc.ErrConflict}
+	body := []byte(`{"parse_task_id":"task-1","name":"Ops","version":"1.0.0"}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/plugins/skill_import", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	adminTestEngine(f, &fakeAdminCategories{}).ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict || !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"CONFLICT"`)) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestAdminListPassesVisibilityAndSystemAdminCaller(t *testing.T) {
@@ -142,13 +389,72 @@ func TestAdminDeleteReturnsPluginID(t *testing.T) {
 	}
 }
 
-func TestAdminDeleteCategoryInUseIsConflictWithCount(t *testing.T) {
-	// The unified admin category-write endpoints were withdrawn until the
-	// placement model supports runtime creation; only the read remains.
+func TestAdminCreateCategoryForwardsFieldsAndRendersDTO(t *testing.T) {
+	cats := &fakeAdminCategories{created: &model.PluginCategory{ID: "cat-new", Name: "Ops", IconKey: "k", PluginTypes: json.RawMessage(`["expert","expert_team"]`), SortOrder: 5}}
+	body := []byte(`{"name":"Ops","icon_key":"k","plugin_types":["expert","expert_team"],"sort_order":5}`)
 	rec := httptest.NewRecorder()
-	adminTestEngine(&fakeAdminService{}, &fakeAdminCategories{}).ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/admin/plugin_categories/cat-1", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("category delete should be unmounted, status=%d", rec.Code)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/plugin_categories", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	adminTestEngine(&fakeAdminService{}, cats).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if cats.writeName != "Ops" || cats.writeIcon != "k" || cats.writeSort != 5 || len(cats.writeTypes) != 2 {
+		t.Fatalf("fields not forwarded: %#v", cats)
+	}
+	if cats.writeTypes[0] != model.PluginTypeExpert || cats.writeTypes[1] != model.PluginTypeExpertTeam {
+		t.Fatalf("plugin_types not forwarded: %#v", cats.writeTypes)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"category_id":"cat-new"`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"plugin_types":["expert","expert_team"]`)) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestAdminCreateCategoryValidationErrorIs400(t *testing.T) {
+	cats := &fakeAdminCategories{err: pluginsvc.ErrInvalidRequest}
+	body := []byte(`{"name":"","plugin_types":[],"sort_order":0}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/plugin_categories", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	adminTestEngine(&fakeAdminService{}, cats).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"VALIDATION_ERROR"`)) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminUpdateCategoryForwardsIDAndNotFoundIs404(t *testing.T) {
+	cats := &fakeAdminCategories{err: pluginsvc.ErrNotFound}
+	body := []byte(`{"name":"Ops","icon_key":"k","plugin_types":["expert"],"sort_order":1}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/plugin_categories/cat-1", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	adminTestEngine(&fakeAdminService{}, cats).ServeHTTP(rec, req)
+	if cats.updateID != "cat-1" {
+		t.Fatalf("id not forwarded: %q", cats.updateID)
+	}
+	if rec.Code != http.StatusNotFound || !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"NOT_FOUND"`)) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminDeleteCategoryReturnsEmptyData(t *testing.T) {
+	cats := &fakeAdminCategories{}
+	rec := httptest.NewRecorder()
+	adminTestEngine(&fakeAdminService{}, cats).ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/admin/plugin_categories/cat-1", nil))
+	if rec.Code != http.StatusOK || cats.deletedID != "cat-1" {
+		t.Fatalf("status=%d deletedID=%q body=%s", rec.Code, cats.deletedID, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"data"`)) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestAdminDeleteCategoryInUseIsConflict(t *testing.T) {
+	cats := &fakeAdminCategories{err: pluginsvc.ErrConflict}
+	rec := httptest.NewRecorder()
+	adminTestEngine(&fakeAdminService{}, cats).ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/admin/plugin_categories/cat-1", nil))
+	if rec.Code != http.StatusConflict || !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"CONFLICT"`)) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -167,10 +473,16 @@ func TestAdminRoutesAreRoleGated(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/v1/admin/plugins?plugin_type=skill"},
 		{http.MethodPost, "/api/v1/admin/plugins"},
+		{http.MethodPost, "/api/v1/admin/plugins/import"},
+		{http.MethodPost, "/api/v1/admin/plugins/skill_import"},
+		{http.MethodPost, "/api/v1/admin/plugins/skill_reupload/p1"},
 		{http.MethodGet, "/api/v1/admin/plugins/p1"},
 		{http.MethodPatch, "/api/v1/admin/plugins/p1"},
 		{http.MethodDelete, "/api/v1/admin/plugins/p1"},
 		{http.MethodGet, "/api/v1/admin/plugin_categories?plugin_type=skill"},
+		{http.MethodPost, "/api/v1/admin/plugin_categories"},
+		{http.MethodPatch, "/api/v1/admin/plugin_categories/cat-1"},
+		{http.MethodDelete, "/api/v1/admin/plugin_categories/cat-1"},
 	} {
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))

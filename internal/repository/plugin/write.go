@@ -12,6 +12,7 @@ import (
 type Mutation struct {
 	Plugin       model.Plugin
 	Relations    []model.PluginRelation
+	Placements   []model.PluginPlacement
 	OperatorID   string
 	OperatorName string
 	RequestID    string
@@ -53,14 +54,14 @@ func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	if err = lockRelationTargets(ctx, tx, scope, p.Type, m.Relations); err != nil {
 		return nil, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO plugins (plugin_id,plugin_name,plugin_type,category_id,tags_json,publisher,owner_uid,space_id,visibility,
-creator_name,created_by_type,created_by_bot_uid,created_by_bot_name,icon,tool_count,manifest_json,plugin_json,manifest_hash,plugin_hash,current_version_id,current_version,status,created_at,updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.OwnerUID, p.SpaceID, p.Visibility, p.CreatorName, p.CreatedByType, p.CreatedByBotUID, p.CreatedByBotName, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.CurrentVersionID, p.CurrentVersion, p.Status, now, now)
-	if err != nil {
-		return nil, wrapped("create", err)
+	if err = insertPlugin(ctx, tx, now, p); err != nil {
+		return nil, err
 	}
 	created, err := insertRelations(ctx, tx, r.id, now, p.ID, m.OperatorID, m.Relations)
 	if err != nil {
+		return nil, err
+	}
+	if err = insertPlacements(ctx, tx, r.id, now, p.ID, m.Placements); err != nil {
 		return nil, err
 	}
 	if err = insertAudit(ctx, tx, r.id(), now, p, "create", m, "", p.PluginHash); err != nil {
@@ -70,6 +71,243 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Type,
 		return nil, err
 	}
 	return &RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}, nil
+}
+
+// insertPlugin writes one current-state plugin row. Callers hold the
+// transaction and have already locked the category and relation targets.
+func insertPlugin(ctx context.Context, tx *sql.Tx, now interface{}, p model.Plugin) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO plugins (plugin_id,plugin_name,plugin_type,is_embedded,category_id,tags_json,publisher,owner_uid,space_id,visibility,
+creator_name,created_by_type,created_by_bot_uid,created_by_bot_name,icon,tool_count,manifest_json,plugin_json,manifest_hash,plugin_hash,current_version_id,current_version,status,created_at,updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Type, p.IsEmbedded, p.CategoryID, string(p.Tags), p.Publisher, p.OwnerUID, p.SpaceID, p.Visibility, p.CreatorName, p.CreatedByType, p.CreatedByBotUID, p.CreatedByBotName, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.CurrentVersionID, p.CurrentVersion, p.Status, now, now)
+	if err != nil {
+		return wrapped("create", err)
+	}
+	return nil
+}
+
+// CreateGraph atomically inserts several current-state plugins, their one-level
+// relations, and one audit event per plugin in a single transaction. It backs
+// the admin container import (an expert/team plus its skills/members and the
+// relations wiring them): every plugin ID must be pre-assigned by the caller so
+// relations can reference in-graph targets, and every plugin/target is inserted
+// before any relation is validated so an intra-graph edge resolves. A failure at
+// any node rolls the whole graph back — a partial expert/squad never commits.
+func (r *Repo) CreateGraph(ctx context.Context, scope Scope, nodes []Mutation) ([]*RelationSync, error) {
+	if len(nodes) == 0 {
+		return nil, ErrInvalidRelation
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	now := r.now()
+	seen := make(map[string]struct{}, len(nodes))
+	// Phase 1: insert every plugin row so later relation-target locks resolve
+	// intra-graph edges. Non-admin graph writes are pinned to the caller identity
+	// and Space; the admin surface supplies owner/Space itself.
+	for i := range nodes {
+		p := nodes[i].Plugin
+		if !scope.Admin {
+			p.OwnerUID = scope.CallerUID
+			p.SpaceID = &scope.SpaceID
+		}
+		if p.ID == "" {
+			return nil, ErrInvalidRelation
+		}
+		if _, dup := seen[p.ID]; dup {
+			return nil, ErrConflict
+		}
+		seen[p.ID] = struct{}{}
+		if err = lockPluginCategory(ctx, tx, p.CategoryID, p.Type); err != nil {
+			return nil, err
+		}
+		if err = insertPlugin(ctx, tx, now, p); err != nil {
+			return nil, err
+		}
+		nodes[i].Plugin = p
+	}
+	// Phase 2: validate + insert every relation now that all targets exist.
+	syncs := make([]*RelationSync, len(nodes))
+	for i := range nodes {
+		p := nodes[i].Plugin
+		if err = lockRelationTargets(ctx, tx, scope, p.Type, nodes[i].Relations); err != nil {
+			return nil, err
+		}
+		created, err := insertRelations(ctx, tx, r.id, now, p.ID, nodes[i].OperatorID, nodes[i].Relations)
+		if err != nil {
+			return nil, err
+		}
+		if err = insertPlacements(ctx, tx, r.id, now, p.ID, nodes[i].Placements); err != nil {
+			return nil, err
+		}
+		syncs[i] = &RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: nodes[i].Relations}
+	}
+	// Phase 3: append one create audit per plugin.
+	for i := range nodes {
+		if err = insertAudit(ctx, tx, r.id(), now, nodes[i].Plugin, "create", nodes[i], "", nodes[i].Plugin.PluginHash); err != nil {
+			return nil, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return syncs, nil
+}
+
+// RebuildGraph atomically re-uploads an existing top-level container plugin
+// (expert or expert_team) in place from a freshly parsed archive, preserving its
+// ID and identity while swapping every embedded child. In one transaction it:
+// locks and proves the top plugin exists (phase 0); inserts the new embedded
+// children so later relation-target locks resolve (phase 1) and wires their own
+// relations (phase 2, a squad member's expert_skill edges); updates the top
+// plugin row in place — new package/manifest/hash/tags/category, but the row's
+// existing owner, Space, creator, and created_at are never touched (phase 3);
+// resyncs the top plugin's relations to the new children, soft-deleting the old
+// top→child edges (phase 4); soft-deletes the previous children and their now
+// orphaned outgoing relations, one delete audit each (phase 5); and appends one
+// update audit for the top plus one create audit per new child (phase 6). A
+// failure at any step rolls the whole rebuild back, so a partial expert/squad
+// never commits and the old graph survives intact. It returns the top plugin's
+// relation sync (the new child edges) for the caller's Detail.
+func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newChildren []Mutation, oldChildIDs []string) (*RelationSync, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	now := r.now()
+	topPlugin := top.Plugin
+	// Phase 0: lock the top plugin and prove it exists under scope. The type is
+	// re-checked here (the service already matched the container kind) so a rebuild
+	// can never change a row's plugin_type.
+	before, err := getOwnedForUpdate(ctx, tx, scope, topPlugin.ID)
+	if err != nil {
+		return nil, err
+	}
+	if topPlugin.Type != before.Type {
+		return nil, ErrInvalidRelation
+	}
+	// Phase 1: insert every new child row so later relation-target locks resolve.
+	seen := make(map[string]struct{}, len(newChildren)+1)
+	seen[topPlugin.ID] = struct{}{}
+	for i := range newChildren {
+		p := newChildren[i].Plugin
+		if !scope.Admin {
+			p.OwnerUID = scope.CallerUID
+			p.SpaceID = &scope.SpaceID
+		}
+		if p.ID == "" {
+			return nil, ErrInvalidRelation
+		}
+		if _, dup := seen[p.ID]; dup {
+			return nil, ErrConflict
+		}
+		seen[p.ID] = struct{}{}
+		if err = lockPluginCategory(ctx, tx, p.CategoryID, p.Type); err != nil {
+			return nil, err
+		}
+		if err = insertPlugin(ctx, tx, now, p); err != nil {
+			return nil, err
+		}
+		newChildren[i].Plugin = p
+	}
+	// Phase 2: wire each new child's own relations now that all targets exist.
+	for i := range newChildren {
+		p := newChildren[i].Plugin
+		if err = lockRelationTargets(ctx, tx, scope, p.Type, newChildren[i].Relations); err != nil {
+			return nil, err
+		}
+		if _, err = insertRelations(ctx, tx, r.id, now, p.ID, newChildren[i].OperatorID, newChildren[i].Relations); err != nil {
+			return nil, err
+		}
+	}
+	// Phase 3: update the top plugin row in place. owner_uid, space_id,
+	// creator_name, created_by_*, and created_at are intentionally absent from the
+	// SET list, so the row's identity survives the rebuild; only its content
+	// (package/manifest/hash/tags/category) and preserved visibility are written.
+	if err = lockPluginCategory(ctx, tx, topPlugin.CategoryID, topPlugin.Type); err != nil {
+		return nil, err
+	}
+	updWhere, updTail := `WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, []any{topPlugin.ID, scope.CallerUID, scope.SpaceID}
+	if scope.Admin {
+		updWhere, updTail = `WHERE plugin_id=? AND deleted_at IS NULL`, []any{topPlugin.ID}
+	}
+	updArgs := append([]any{topPlugin.Name, topPlugin.Type, topPlugin.CategoryID, string(topPlugin.Tags), topPlugin.Publisher, topPlugin.Visibility, topPlugin.Icon, topPlugin.ToolCount, string(topPlugin.Manifest), string(topPlugin.Package), topPlugin.ManifestHash, topPlugin.PluginHash, topPlugin.Status, now}, updTail...)
+	if _, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,icon=?,tool_count=?,manifest_json=?,plugin_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
+`+updWhere, updArgs...); err != nil {
+		return nil, wrapped("rebuild", err)
+	}
+	if topPlugin.CategoryID != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE plugin_placements SET category_id=?,updated_at=? WHERE plugin_id=?`, topPlugin.CategoryID, now, topPlugin.ID); err != nil {
+			return nil, wrapped("rebuild placements", err)
+		}
+	}
+	// Phase 4: resync the top plugin's relations to the new children. Every new
+	// edge carries an empty ID so syncRelations inserts it and soft-deletes the
+	// leftover old top→child edges.
+	if err = lockRelationTargets(ctx, tx, scope, topPlugin.Type, top.Relations); err != nil {
+		return nil, err
+	}
+	sync, err := syncRelations(ctx, tx, r.id, now, topPlugin.ID, top.OperatorID, top.Relations)
+	if err != nil {
+		return nil, err
+	}
+	// Phase 5: soft-delete the previous children and their outgoing relations so
+	// they stop surfacing anywhere, with one delete audit each.
+	for _, id := range oldChildIDs {
+		if err = softDeleteRebuiltChild(ctx, tx, r.id, scope, now, id, top); err != nil {
+			return nil, err
+		}
+	}
+	// Phase 6: append one update audit for the top plus one create audit per child.
+	if err = insertAudit(ctx, tx, r.id(), now, topPlugin, "update", top, before.PluginHash, topPlugin.PluginHash); err != nil {
+		return nil, err
+	}
+	for i := range newChildren {
+		if err = insertAudit(ctx, tx, r.id(), now, newChildren[i].Plugin, "create", newChildren[i], "", newChildren[i].Plugin.PluginHash); err != nil {
+			return nil, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return sync, nil
+}
+
+// softDeleteRebuiltChild soft-deletes one previous embedded child and its
+// outgoing relations under lock, then appends a delete audit carrying the top
+// rebuild's operator identity. A child already gone (concurrent delete) is a
+// no-op so the rebuild stays idempotent. It deliberately does NOT run the
+// live-incoming-relation guard Delete uses: the whole subtree is being torn down
+// together (a squad member and the skills only it references), and the top's
+// edges to these children were just soft-deleted in phase 4, so the only
+// remaining incoming edges are intra-subtree and expected.
+func softDeleteRebuiltChild(ctx context.Context, tx *sql.Tx, newID func() string, scope Scope, now interface{}, id string, top Mutation) error {
+	before, err := getOwnedForUpdate(ctx, tx, scope, id)
+	if err != nil {
+		if err == ErrNotFound {
+			return nil
+		}
+		return err
+	}
+	delWhere, delTail := `WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, []any{now, now, id, scope.CallerUID, scope.SpaceID}
+	if scope.Admin {
+		delWhere, delTail = `WHERE plugin_id=? AND deleted_at IS NULL`, []any{now, now, id}
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE plugins SET deleted_at=?,updated_at=? `+delWhere, delTail...)
+	if err != nil {
+		return wrapped("rebuild delete child", err)
+	}
+	if err = mustAffect(res); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE plugin_relations SET deleted_at=?,updated_at=?
+WHERE source_plugin_id=? AND deleted_at IS NULL`, now, now, id); err != nil {
+		return wrapped("rebuild delete child relations", err)
+	}
+	m := Mutation{OperatorID: top.OperatorID, OperatorName: top.OperatorName, RequestID: top.RequestID, Remark: top.Remark}
+	return insertAudit(ctx, tx, newID(), now, *before, "delete", m, before.PluginHash, "")
 }
 
 // Update atomically updates an owned Plugin, synchronizes its one-level
@@ -295,6 +533,25 @@ func insertRelationRow(ctx context.Context, tx *sql.Tx, now interface{}, source,
 	_, err := tx.ExecContext(ctx, `INSERT INTO plugin_relations (relation_id,source_plugin_id,target_plugin_id,relation_type,sort_order,relation_json,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, x.ID, source, x.TargetPluginID, x.Type, x.SortOrder, data, x.Status, creator, now, now)
 	if err != nil {
 		return wrapped("replace relations", err)
+	}
+	return nil
+}
+
+// insertPlacements writes the current-state placements a create attaches. Unlike
+// Publish (which registers categories against plugin_category_placements before
+// inserting), the admin auto-placement is intentional and must not fail on an
+// unregistered category — a plain visible placement is enough to surface the
+// plugin in the market list. Tenant callers pass no placements (nil → no-op).
+func insertPlacements(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, pluginID string, placements []model.PluginPlacement) error {
+	for _, x := range placements {
+		id := x.ID
+		if id == "" {
+			id = newID()
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO plugin_placements (placement_id,placement_code,plugin_id,category_id,visible,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`, id, x.PlacementCode, pluginID, x.CategoryID, x.Visible, x.SortOrder, now, now)
+		if err != nil {
+			return wrapped("create placements", err)
+		}
 	}
 	return nil
 }

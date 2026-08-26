@@ -236,6 +236,18 @@ func expertVisibility(v string) string {
 	}
 	return v
 }
+
+// skillVisibility maps a legacy skill's own visibility into the unified enum.
+// Legacy skills used `public` for "全平台可见" (unlike experts/mcp, whose
+// `public` meant space-scoped), so a skill `public` becomes the unified global
+// value `system`; `space`/`private` pass through. Embedded skills inherit their
+// parent expert/squad's already-mapped visibility instead and never reach here.
+func skillVisibility(v string) string {
+	if v == "public" {
+		return "system"
+	}
+	return v
+}
 func nstr(s string) any {
 	if s == "" {
 		return nil
@@ -367,7 +379,7 @@ func (r *Runner) skills(ctx context.Context, cats map[string]string, dict map[in
 		}
 		p.plugins = append(p.plugins, plugRow{
 			id: pid, name: pluginName, typ: "skill", cat: cats["categories:"+cat], tags: string(docs.Tags),
-			publisher: ownerName, owner: owner, space: space, visibility: visibility,
+			publisher: ownerName, owner: owner, space: space, visibility: skillVisibility(visibility),
 			creator: creator, by: "human", manifest: selected.manifest, pkg: selected.pkg,
 			mhash: selected.mhash, phash: selected.phash, versionID: selected.id,
 			status: active(d), created: c, updated: u, deleted: d,

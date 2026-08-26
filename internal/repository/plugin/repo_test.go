@@ -70,11 +70,44 @@ func TestCreateCommitsCurrentRelationsAndAuditTogether(t *testing.T) {
 	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT p.plugin_type FROM plugins p .* FOR UPDATE`).WithArgs("target-id", "space", "caller").WillReturnRows(sqlmock.NewRows([]string{"plugin_type"}).AddRow(model.PluginTypeSkill))
-	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("plugin-id", "Name", model.PluginTypeExpert, nil, "[]", "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "", 0, "{}", "{}", "sha256:m", "sha256:p", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("plugin-id", "Name", model.PluginTypeExpert, false, nil, "[]", "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "", 0, "{}", "{}", "sha256:m", "sha256:p", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO plugin_relations`).WithArgs("relation-id", "plugin-id", "target-id", "expert_skill", 0, "{}", 1, "caller", now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-id", "plugin-id", "create", "caller", "Caller", "request-id", nil, "sha256:p", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 	_, err := r.Create(context.Background(), Scope{CallerUID: "caller", SpaceID: "space"}, Mutation{Plugin: model.Plugin{ID: "plugin-id", Name: "Name", Type: model.PluginTypeExpert, Tags: []byte(`[]`), Publisher: "pub", Visibility: model.PluginVisibilityPrivate, CreatorName: "Creator", CreatedByType: "human", Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p", Status: 1}, Relations: []model.PluginRelation{{TargetPluginID: "target-id", Type: "expert_skill", Data: []byte(`{}`), Status: 1}}, OperatorID: "caller", OperatorName: "Caller", RequestID: "request-id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCreateAttachesVisiblePlacementInSameTx locks the market-visibility fix: a
+// create carrying a Placement inserts the placement row (default, visible) in
+// the same transaction as the plugin, so an admin-created plugin surfaces in the
+// tenant market without a publish. No category-registration lock runs — a plain
+// visible placement is enough.
+func TestCreateAttachesVisiblePlacementInSameTx(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 26, 8, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"placement-id", "audit-id"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO plugins`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugin_placements \(placement_id,placement_code,plugin_id,category_id,visible,sort_order,created_at,updated_at\)`).
+		WithArgs("placement-id", "default", "plugin-id", nil, true, 0, now, now).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	_, err := r.Create(context.Background(), Scope{CallerUID: "caller", SpaceID: "space"}, Mutation{
+		Plugin:     model.Plugin{ID: "plugin-id", Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`)},
+		Placements: []model.PluginPlacement{{PlacementCode: "default", Visible: true, SortOrder: 0}},
+		OperatorID: "caller",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,6 +394,200 @@ func TestUpdateSyncsPlacementCategoryOnlyWhenSet(t *testing.T) {
 	_, err := r.Update(context.Background(), scope, Mutation{Plugin: model.Plugin{ID: "plugin-id", Name: "Plugin", Type: model.PluginTypeExpert, CategoryID: &category, Tags: []byte(`[]`), Visibility: model.PluginVisibilityPrivate, Manifest: []byte(`{}`), Package: []byte(`{}`), Status: 1}})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCreateGraphInsertsAllPluginsBeforeRelationsAndCommitsAtomically locks the
+// container-import contract: every plugin row is inserted (phase 1) before any
+// relation target is locked (phase 2), so an intra-graph edge (the expert's
+// expert_skill edge to a skill created in the same transaction) resolves, and
+// one create audit is appended per plugin (phase 3) — all in one transaction.
+func TestCreateGraphInsertsAllPluginsBeforeRelationsAndCommitsAtomically(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 26, 8, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"rel-1", "audit-1", "audit-2"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	space := ""
+	skill := model.Plugin{ID: "skill-id", Name: "S", Type: model.PluginTypeSkill, Tags: []byte(`[]`), OwnerUID: "admin", SpaceID: &space, Visibility: model.PluginVisibilityPublic, CreatorName: "Root", CreatedByType: "human", Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:sm", PluginHash: "sha256:sp", Status: 1}
+	expert := model.Plugin{ID: "expert-id", Name: "E", Type: model.PluginTypeExpert, Tags: []byte(`[]`), OwnerUID: "admin", SpaceID: &space, Visibility: model.PluginVisibilityPublic, CreatorName: "Root", CreatedByType: "human", Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:em", PluginHash: "sha256:ep", Status: 1}
+
+	mock.ExpectBegin()
+	// Phase 1: both plugin rows inserted first.
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-id", "S", model.PluginTypeSkill, false, nil, "[]", "", "admin", "", model.PluginVisibilityPublic, "Root", "human", nil, nil, "", 0, "{}", "{}", "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("expert-id", "E", model.PluginTypeExpert, false, nil, "[]", "", "admin", "", model.PluginVisibilityPublic, "Root", "human", nil, nil, "", 0, "{}", "{}", "sha256:em", "sha256:ep", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	// Phase 2: the expert's relation target (the just-inserted skill) is locked
+	// cross-Space (admin) and the edge inserted.
+	mock.ExpectQuery(`SELECT p.plugin_type FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL AND 1=1 FOR UPDATE`).WithArgs("skill-id").WillReturnRows(sqlmock.NewRows([]string{"plugin_type"}).AddRow(model.PluginTypeSkill))
+	mock.ExpectExec(`INSERT INTO plugin_relations`).WithArgs("rel-1", "expert-id", "skill-id", "expert_skill", 0, "{}", 1, "admin", now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	// Phase 3: one create audit per plugin.
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-1", "skill-id", "create", "admin", "Root", "req", nil, "sha256:sp", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-2", "expert-id", "create", "admin", "Root", "req", nil, "sha256:ep", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	nodes := []Mutation{
+		{Plugin: skill, OperatorID: "admin", OperatorName: "Root", RequestID: "req"},
+		{Plugin: expert, Relations: []model.PluginRelation{{TargetPluginID: "skill-id", Type: "expert_skill", Data: []byte(`{}`), Status: 1}}, OperatorID: "admin", OperatorName: "Root", RequestID: "req"},
+	}
+	syncs, err := r.CreateGraph(context.Background(), Scope{CallerUID: "admin", Admin: true}, nodes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(syncs) != 2 || len(syncs[1].Created) != 1 || syncs[1].Created[0] != "rel-1" {
+		t.Fatalf("syncs = %#v", syncs)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCreateGraphInsertsPlacementForMarkedNode locks the container-import market
+// fix: only the node the service marks with a Placement (the top expert/team)
+// gets a placement row, inserted in the same transaction after its relations and
+// before the audit — the bundled skill node carries none.
+func TestCreateGraphInsertsPlacementForMarkedNode(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 26, 8, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"rel-1", "placement-1", "audit-1", "audit-2"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	space := ""
+	skill := model.Plugin{ID: "skill-id", Name: "S", Type: model.PluginTypeSkill, Tags: []byte(`[]`), OwnerUID: "admin", SpaceID: &space, Visibility: model.PluginVisibilityPublic, CreatorName: "Root", CreatedByType: "human", Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:sm", PluginHash: "sha256:sp", Status: 1}
+	expert := model.Plugin{ID: "expert-id", Name: "E", Type: model.PluginTypeExpert, Tags: []byte(`[]`), OwnerUID: "admin", SpaceID: &space, Visibility: model.PluginVisibilityPublic, CreatorName: "Root", CreatedByType: "human", Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:em", PluginHash: "sha256:ep", Status: 1}
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO plugins`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugins`).WillReturnResult(sqlmock.NewResult(1, 1))
+	// expert node: relation target lock, relation insert, then its placement.
+	mock.ExpectQuery(`SELECT p.plugin_type FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL AND 1=1 FOR UPDATE`).WithArgs("skill-id").WillReturnRows(sqlmock.NewRows([]string{"plugin_type"}).AddRow(model.PluginTypeSkill))
+	mock.ExpectExec(`INSERT INTO plugin_relations`).WithArgs("rel-1", "expert-id", "skill-id", "expert_skill", 0, "{}", 1, "admin", now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugin_placements \(placement_id,placement_code,plugin_id,category_id,visible,sort_order,created_at,updated_at\)`).
+		WithArgs("placement-1", "default", "expert-id", nil, true, 0, now, now).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-1", "skill-id", "create", "admin", "Root", "req", nil, "sha256:sp", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-2", "expert-id", "create", "admin", "Root", "req", nil, "sha256:ep", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	nodes := []Mutation{
+		{Plugin: skill, OperatorID: "admin", OperatorName: "Root", RequestID: "req"},
+		{Plugin: expert, Relations: []model.PluginRelation{{TargetPluginID: "skill-id", Type: "expert_skill", Data: []byte(`{}`), Status: 1}}, Placements: []model.PluginPlacement{{PlacementCode: "default", Visible: true, SortOrder: 0}}, OperatorID: "admin", OperatorName: "Root", RequestID: "req"},
+	}
+	if _, err := r.CreateGraph(context.Background(), Scope{CallerUID: "admin", Admin: true}, nodes); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCreateGraphRejectsDuplicatePluginIDs guards the pre-assigned-ID contract:
+// a graph that reuses a plugin ID is rejected before any relation is written.
+func TestCreateGraphRejectsDuplicatePluginIDs(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 26, 8, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	space := ""
+	p := model.Plugin{ID: "dup", Name: "S", Type: model.PluginTypeSkill, Tags: []byte(`[]`), OwnerUID: "admin", SpaceID: &space, Visibility: model.PluginVisibilityPublic, CreatorName: "Root", CreatedByType: "human", Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p", Status: 1}
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("dup", "S", model.PluginTypeSkill, false, nil, "[]", "", "admin", "", model.PluginVisibilityPublic, "Root", "human", nil, nil, "", 0, "{}", "{}", "sha256:m", "sha256:p", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectRollback()
+	if _, err := r.CreateGraph(context.Background(), Scope{CallerUID: "admin", Admin: true}, []Mutation{{Plugin: p}, {Plugin: p}}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRebuildGraphSwapsChildrenPreservesTopAndSoftDeletesOld locks the
+// container-reupload contract at the persistence boundary: the top plugin row is
+// updated in place (its id survives, never re-inserted), the new embedded child
+// is inserted, the top's relations resync to the new child (old edge deleted, new
+// edge created), and the previous child plus its outgoing relations are
+// soft-deleted — all in one transaction with an update audit for the top, a
+// delete audit for the old child, and a create audit for the new child.
+func TestRebuildGraphSwapsChildrenPreservesTopAndSoftDeletesOld(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 26, 8, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"rel-new", "audit-del", "audit-top", "audit-child"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	scope := Scope{CallerUID: "admin", Admin: true}
+	space := ""
+	newSkill := model.Plugin{ID: "skill-new", Name: "S2", Type: model.PluginTypeSkill, IsEmbedded: true, Tags: []byte(`[]`), OwnerUID: "admin", SpaceID: &space, Visibility: model.PluginVisibilitySystem, CreatorName: "Root", CreatedByType: "human", Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:sm", PluginHash: "sha256:sp", Status: 1}
+	top := model.Plugin{ID: "expert-9", Name: "E2", Type: model.PluginTypeExpert, Tags: []byte(`["ops"]`), Visibility: model.PluginVisibilityPublic, Icon: "icons/e.png", Manifest: []byte(`{"m":2}`), Package: []byte(`{"p":2}`), ManifestHash: "sha256:m2", PluginHash: "sha256:p2", Status: 1}
+
+	mock.ExpectBegin()
+	// Phase 0: lock + prove the top exists (admin: no owner/space predicate).
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("expert-9").
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-9", "E", model.PluginTypeExpert, 0, nil, []byte(`["ops"]`), "", "owner-1", "", model.PluginVisibilityPublic, "Orig", "human", nil, nil, "icons/e.png", 0, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:pold", nil, nil, 1, now, now, nil))
+	// Phase 1: insert the new embedded child row.
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-new", "S2", model.PluginTypeSkill, true, nil, "[]", "", "admin", "", model.PluginVisibilitySystem, "Root", "human", nil, nil, "", 0, "{}", "{}", "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	// Phase 3: update the top row in place (id/owner/space/created_at untouched).
+	mock.ExpectExec(`UPDATE plugins SET plugin_name=.*WHERE plugin_id=\? AND deleted_at IS NULL`).WillReturnResult(sqlmock.NewResult(0, 1))
+	// Phase 4: resync the top's relations to the new child.
+	mock.ExpectQuery(`SELECT p.plugin_type FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL AND 1=1 FOR UPDATE`).WithArgs("skill-new").WillReturnRows(sqlmock.NewRows([]string{"plugin_type"}).AddRow(model.PluginTypeSkill))
+	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations\s+WHERE source_plugin_id=\? AND deleted_at IS NULL ORDER BY relation_id FOR UPDATE`).
+		WithArgs("expert-9").
+		WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}).
+			AddRow("rel-old", "skill-old", "expert_skill", 0, nil, 1))
+	mock.ExpectExec(`INSERT INTO plugin_relations`).WithArgs("rel-new", "expert-9", "skill-new", "expert_skill", 0, nil, 1, "admin", now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=`).WithArgs(now, now, "rel-old", "expert-9").WillReturnResult(sqlmock.NewResult(0, 1))
+	// Phase 5: soft-delete the previous child + its outgoing relations, delete audit.
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("skill-old").
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("skill-old", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "admin", "", model.PluginVisibilitySystem, "Root", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:som", "sha256:sop", nil, nil, 1, now, now, nil))
+	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-old").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-old").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-del", "skill-old", "delete", "admin", "Root", "req", "sha256:sop", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	// Phase 6: update audit for the top, create audit for the new child.
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-top", "expert-9", "update", "admin", "Root", "req", "sha256:pold", "sha256:p2", `{"m":2}`, `{"p":2}`, nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-child", "skill-new", "create", "admin", "Root", "req", nil, "sha256:sp", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	sync, err := r.RebuildGraph(context.Background(), scope,
+		Mutation{Plugin: top, Relations: []model.PluginRelation{{TargetPluginID: "skill-new", Type: "expert_skill", Status: 1}}, OperatorID: "admin", OperatorName: "Root", RequestID: "req"},
+		[]Mutation{{Plugin: newSkill, OperatorID: "admin", OperatorName: "Root", RequestID: "req"}},
+		[]string{"skill-old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sync.Created) != 1 || sync.Created[0] != "rel-new" || len(sync.Deleted) != 1 || sync.Deleted[0] != "rel-old" {
+		t.Fatalf("sync = %#v", sync)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRebuildGraphMissingTopIsNotFound proves a rebuild of an absent (or
+// out-of-scope) top plugin rolls back with ErrNotFound before any write.
+func TestRebuildGraphMissingTopIsNotFound(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 26, 8, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("ghost").WillReturnRows(sqlmock.NewRows(pluginTestColumns()))
+	mock.ExpectRollback()
+	top := model.Plugin{ID: "ghost", Name: "E", Type: model.PluginTypeExpert, Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), Status: 1}
+	_, err := r.RebuildGraph(context.Background(), Scope{CallerUID: "admin", Admin: true}, Mutation{Plugin: top}, nil, nil)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

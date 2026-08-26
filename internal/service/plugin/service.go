@@ -49,6 +49,8 @@ type Store interface {
 	List(context.Context, pluginrepo.Scope, pluginrepo.ListFilter) ([]model.Plugin, int64, error)
 	GetWithRelations(context.Context, pluginrepo.Scope, string) (*model.Plugin, []model.PluginRelation, error)
 	Create(context.Context, pluginrepo.Scope, pluginrepo.Mutation) (*pluginrepo.RelationSync, error)
+	CreateGraph(context.Context, pluginrepo.Scope, []pluginrepo.Mutation) ([]*pluginrepo.RelationSync, error)
+	RebuildGraph(context.Context, pluginrepo.Scope, pluginrepo.Mutation, []pluginrepo.Mutation, []string) (*pluginrepo.RelationSync, error)
 	Update(context.Context, pluginrepo.Scope, pluginrepo.Mutation) (*pluginrepo.RelationSync, error)
 	Delete(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
 	ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, int64, error)

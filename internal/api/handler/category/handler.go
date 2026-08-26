@@ -13,8 +13,7 @@ import (
 
 // Handler handles HTTP requests for categories.
 type Handler struct {
-	svc   *categorysvc.Service
-	idGen func() string
+	svc *categorysvc.Service
 }
 
 // New creates a new category handler.

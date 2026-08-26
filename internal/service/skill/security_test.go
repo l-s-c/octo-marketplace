@@ -410,65 +410,6 @@ func TestDeleteRejectsExistingPublicSkillForUser(t *testing.T) {
 	}
 }
 
-func TestAdminReuploadDuplicateVersionDoesNotDeletePublishedObjects(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	zipData := makeTestZip("Admin Duplicate", "desc", "2.0.0")
-	store := &fakeStorage{getData: zipData}
-	svc := New(skillrepo.New(db), categoryrepo.New(db), store, func() string { return "admin-new-version-id" })
-	now := time.Now()
-	oldZipKey := "skills/admin-dup/v2.0.0/skill.zip"
-	oldMDKey := "skills/admin-dup/v2.0.0/SKILL.md"
-
-	mock.ExpectQuery("SELECT .+ FROM skills").
-		WithArgs("admin-dup").
-		WillReturnRows(skillRowsForSecurityTest().
-			AddRow("admin-dup", "Admin Duplicate", "Admin Duplicate", "", "", "old-version-id",
-				"desc", "cat-1", []byte(`[]`), "admin", "Admin",
-				"", "public", "2.0.0", "old readme", "skill.zip",
-				oldZipKey, int64(len(zipData)), "oldsha", now, now,
-				"2.0.0", `{"type":"s3","zip_object_key":"`+oldZipKey+`","skill_md_object_key":"`+oldMDKey+`","zip_file_name":"skill.zip","zip_size":100,"zip_sha256":"oldsha"}`, int64(0), int64(0)))
-	mock.ExpectQuery("SELECT .+ FROM parse_tasks WHERE id").
-		WithArgs("admin-task-dup").
-		WillReturnRows(parseTaskRowsForSecurityTest().
-			AddRow("admin-task-dup", "upload-dup", "skill.zip", int64(len(zipData)),
-				"skill-uploads/upload-dup/skill.zip", testSHA256Hex(zipData),
-				"success", "Admin Duplicate", "desc", "2.0.0",
-				[]byte(`[]`), "", "", "", nil, 0,
-				"admin", "", "admin-dup"))
-	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE parse_tasks SET status").
-		WithArgs("admin-task-dup", "admin", "", "admin-dup").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("UPDATE skills SET").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO skill_versions").
-		WillReturnError(errors.New("duplicate version"))
-	mock.ExpectRollback()
-
-	_, err = svc.AdminReupload(context.Background(), "admin-dup", AdminReuploadParams{
-		ParseTaskID: "admin-task-dup",
-		AdminUID:    "admin",
-	})
-	if err == nil {
-		t.Fatal("AdminReupload should fail on duplicate version insert")
-	}
-	assertDoesNotContain(t, store.putKeys, oldZipKey)
-	assertDoesNotContain(t, store.putKeys, oldMDKey)
-	assertDoesNotContain(t, store.deleteKeys, oldZipKey)
-	assertDoesNotContain(t, store.deleteKeys, oldMDKey)
-	if len(store.deleteKeys) != 2 {
-		t.Fatalf("deleteKeys=%v, want cleanup of only new zip and SKILL.md", store.deleteKeys)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 type zeroReader struct{}
 
 func (zeroReader) Read(p []byte) (int, error) {

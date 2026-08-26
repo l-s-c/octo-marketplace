@@ -22,7 +22,16 @@ type fakeStore struct {
 	create         *model.Plugin
 	createScope    pluginrepo.Scope
 	createRels     []model.PluginRelation
+	createPlace    []model.PluginPlacement
 	createAudit    model.PluginAuditLog
+	graphNodes     []pluginrepo.Mutation
+	graphScope     pluginrepo.Scope
+	graphErr       error
+	rebuildTop     *pluginrepo.Mutation
+	rebuildChild   []pluginrepo.Mutation
+	rebuildOldIDs  []string
+	rebuildScope   pluginrepo.Scope
+	rebuildErr     error
 	update         *model.Plugin
 	updateRels     []model.PluginRelation
 	deleteScope    pluginrepo.Scope
@@ -80,6 +89,7 @@ func (f *fakeStore) GetWithRelations(_ context.Context, sc pluginrepo.Scope, id 
 func (f *fakeStore) Create(_ context.Context, s pluginrepo.Scope, m pluginrepo.Mutation) (*pluginrepo.RelationSync, error) {
 	p := m.Plugin
 	f.create, f.createRels, f.createScope = &p, m.Relations, s
+	f.createPlace = m.Placements
 	f.createAudit = model.PluginAuditLog{OperatorID: m.OperatorID, OperatorName: m.OperatorName, RequestID: m.RequestID, Remark: m.Remark}
 	if f.err != nil {
 		return nil, f.err
@@ -102,9 +112,82 @@ func (f *fakeStore) Update(_ context.Context, _ pluginrepo.Scope, m pluginrepo.M
 	}
 	return &pluginrepo.RelationSync{Created: []string{}, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}, nil
 }
+func (f *fakeStore) CreateGraph(_ context.Context, s pluginrepo.Scope, nodes []pluginrepo.Mutation) ([]*pluginrepo.RelationSync, error) {
+	f.graphNodes, f.graphScope = nodes, s
+	if f.graphErr != nil {
+		return nil, f.graphErr
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.plugins == nil {
+		f.plugins = map[string]*model.Plugin{}
+	}
+	if f.relations == nil {
+		f.relations = map[string][]model.PluginRelation{}
+	}
+	syncs := make([]*pluginrepo.RelationSync, len(nodes))
+	rc := 0
+	for i := range nodes {
+		p := nodes[i].Plugin
+		stored := p
+		f.plugins[p.ID] = &stored
+		rels := nodes[i].Relations
+		created := make([]string, 0, len(rels))
+		for j := range rels {
+			if rels[j].ID == "" {
+				rc++
+				rels[j].ID = "relation-" + strconv.Itoa(rc)
+			}
+			created = append(created, rels[j].ID)
+		}
+		f.relations[p.ID] = append([]model.PluginRelation(nil), rels...)
+		syncs[i] = &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: rels}
+	}
+	return syncs, nil
+}
 func (f *fakeStore) Delete(_ context.Context, s pluginrepo.Scope, id, _, _, _ string, _ *string) error {
 	f.deleteScope, f.deleteID = s, id
 	return f.err
+}
+func (f *fakeStore) RebuildGraph(_ context.Context, s pluginrepo.Scope, top pluginrepo.Mutation, children []pluginrepo.Mutation, oldChildIDs []string) (*pluginrepo.RelationSync, error) {
+	f.rebuildTop, f.rebuildChild, f.rebuildOldIDs, f.rebuildScope = &top, children, oldChildIDs, s
+	if f.rebuildErr != nil {
+		return nil, f.rebuildErr
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.plugins == nil {
+		f.plugins = map[string]*model.Plugin{}
+	}
+	if f.relations == nil {
+		f.relations = map[string][]model.PluginRelation{}
+	}
+	// Persist the new children and the rebuilt top so a follow-up read reflects
+	// the swap; soft-delete the old children by dropping them from the store.
+	for i := range children {
+		p := children[i].Plugin
+		stored := p
+		f.plugins[p.ID] = &stored
+		f.relations[p.ID] = append([]model.PluginRelation(nil), children[i].Relations...)
+	}
+	tp := top.Plugin
+	f.plugins[tp.ID] = &tp
+	for _, id := range oldChildIDs {
+		delete(f.plugins, id)
+		delete(f.relations, id)
+	}
+	rels := top.Relations
+	created := make([]string, 0, len(rels))
+	for j := range rels {
+		if rels[j].ID == "" {
+			rels[j].ID = "relation-rebuilt-" + strconv.Itoa(j+1)
+		}
+		created = append(created, rels[j].ID)
+	}
+	f.relations[tp.ID] = append([]model.PluginRelation(nil), rels...)
+	return &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: rels}, nil
 }
 func (f *fakeStore) ListVersions(_ context.Context, _ pluginrepo.Scope, id string, _, _ int) ([]model.PluginVersion, int64, error) {
 	f.versionID = id

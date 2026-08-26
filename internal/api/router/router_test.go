@@ -373,35 +373,14 @@ func TestCORSRejectsUnconfiguredOrigin(t *testing.T) {
 // reachedAdminService lets a router test assert the admin handler was
 // actually reached (route matched, middleware passed) instead of 404ing.
 type reachedAdminService struct {
-	listed  bool
-	created bool
+	probed bool
 }
 
-func (s *reachedAdminService) CreateSystem(context.Context, service.Caller, model.CreateRequest) (model.Detail, *apierr.Error) {
-	s.created = true
-	return model.Detail{}, nil
-}
-func (s *reachedAdminService) ListSystem(context.Context, service.ListParams) (model.ListResponse, *apierr.Error) {
-	s.listed = true
-	return model.ListResponse{}, nil
-}
-func (s *reachedAdminService) GetSystem(context.Context, string) (model.Detail, *apierr.Error) {
-	return model.Detail{}, nil
-}
-func (s *reachedAdminService) UpdateSystem(context.Context, string, model.PatchRequest) (model.Detail, *apierr.Error) {
-	return model.Detail{}, nil
-}
-func (s *reachedAdminService) DeleteSystem(context.Context, string) *apierr.Error {
-	return nil
-}
 func (s *reachedAdminService) Probe(context.Context, service.ProbeRequest) (service.ProbeResponse, *apierr.Error) {
+	s.probed = true
 	return service.ProbeResponse{OK: true, Tools: []model.Tool{}}, nil
 }
 
-// TestAdminMountedUnderV1 pins the admin deploy path: the octo-admin console
-// hits /market/api/v1/admin/mcps; the gateway strips /market so it arrives
-// here as /api/v1/admin/mcps and must reach the List handler. See
-// docs/api/mcp-v1.md §9.
 // TestAdminProbeRoute confirms the admin probe endpoint mirrors the public
 // probe path: POST /api/v1/admin/mcps/probe reaches the service.Probe call
 // and returns the wrapped envelope. Regression guard for the wizard's
@@ -428,19 +407,26 @@ func TestAdminProbeRoute(t *testing.T) {
 	}
 }
 
+// TestAdminMountedUnderV1 pins the admin deploy path: the octo-admin console
+// hits /market/api/v1/admin/mcps; the gateway strips /market so it arrives
+// here as /api/v1/admin/mcps and must reach the admin handler. See
+// docs/api/mcp-v1.md §9.
 func TestAdminMountedUnderV1(t *testing.T) {
 	svc := &reachedAdminService{}
 	engine := Public(stubPinger{}, testAuthenticator(), testAdminAuthenticator(), testStorageConfig(),
 		testHandler(), handler.NewAdminMCP(svc), testParseConfig(), nil)
 
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/mcps/_probe",
+		strings.NewReader(`{"transport":"streamable-http","url":"https://example.test/mcp"}`))
+	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
-	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/admin/mcps", nil))
+	engine.ServeHTTP(recorder, req)
 
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("GET /api/v1/admin/mcps status=%d want=%d body=%q", recorder.Code, http.StatusOK, recorder.Body.String())
+		t.Fatalf("POST /api/v1/admin/mcps/_probe status=%d want=%d body=%q", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
-	if !svc.listed {
-		t.Fatal("GET /api/v1/admin/mcps did not reach the ListSystem handler")
+	if !svc.probed {
+		t.Fatal("POST /api/v1/admin/mcps/_probe did not reach the Probe handler")
 	}
 }
 
@@ -471,7 +457,7 @@ func TestAdminRejectsMissingTokenInProd(t *testing.T) {
 		testHandler(), handler.NewAdminMCP(svc), testParseConfig(), nil)
 
 	recorder := httptest.NewRecorder()
-	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/admin/mcps", nil))
+	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/admin/mcps/_probe", nil))
 
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("prod-mode missing token status=%d want=401 body=%s", recorder.Code, recorder.Body.String())
@@ -479,7 +465,7 @@ func TestAdminRejectsMissingTokenInProd(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), "AUTH_REQUIRED") {
 		t.Fatalf("expected AUTH_REQUIRED in body, got %s", recorder.Body.String())
 	}
-	if svc.listed {
+	if svc.probed {
 		t.Fatal("prod-mode with missing token must NOT reach the handler")
 	}
 }
@@ -494,7 +480,7 @@ func TestAdminRejectsNonSuperAdminInProd(t *testing.T) {
 	engine := Public(stubPinger{}, testAuthenticator(), prodAdminAuth, testStorageConfig(),
 		testHandler(), handler.NewAdminMCP(svc), testParseConfig(), nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/mcps", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/mcps/_probe", nil)
 	req.Header.Set("Token", "some-user-session")
 	recorder := httptest.NewRecorder()
 	engine.ServeHTTP(recorder, req)
@@ -505,7 +491,7 @@ func TestAdminRejectsNonSuperAdminInProd(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), "FORBIDDEN") {
 		t.Fatalf("expected FORBIDDEN in body, got %s", recorder.Body.String())
 	}
-	if svc.listed {
+	if svc.probed {
 		t.Fatal("non-admin must NOT reach the handler")
 	}
 }
@@ -520,7 +506,9 @@ func TestAdminAcceptsSuperAdminInProd(t *testing.T) {
 	engine := Public(stubPinger{}, testAuthenticator(), prodAdminAuth, testStorageConfig(),
 		testHandler(), handler.NewAdminMCP(svc), testParseConfig(), nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/mcps", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/mcps/_probe",
+		strings.NewReader(`{"transport":"streamable-http","url":"https://example.test/mcp"}`))
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Token", "super-admin-session")
 	recorder := httptest.NewRecorder()
 	engine.ServeHTTP(recorder, req)
@@ -528,7 +516,7 @@ func TestAdminAcceptsSuperAdminInProd(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("prod-mode superAdmin status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if !svc.listed {
+	if !svc.probed {
 		t.Fatal("superAdmin token must reach the handler")
 	}
 }
@@ -559,14 +547,16 @@ func TestAdminMcpsAdmitsMarketAdminInProd(t *testing.T) {
 		testHandler(), handler.NewAdminMCP(svc), testParseConfig(), nil)
 
 	recorder := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/mcps", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/mcps/_probe",
+		strings.NewReader(`{"transport":"streamable-http","url":"https://example.test/mcp"}`))
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Token", "market-admin-session")
 	engine.ServeHTTP(recorder, req)
 
 	if recorder.Code == http.StatusForbidden {
 		t.Fatalf("marketAdmin must pass the MCP admin gate, got 403 body=%s", recorder.Body.String())
 	}
-	if !svc.listed {
+	if !svc.probed {
 		t.Fatalf("marketAdmin request did not reach the admin MCP handler (status=%d body=%s)",
 			recorder.Code, recorder.Body.String())
 	}

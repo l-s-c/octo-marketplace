@@ -65,18 +65,59 @@ func TestAdminCreateConnectorMintsSystemNullSpace(t *testing.T) {
 	}
 }
 
-// TestAdminCreateSkillMintsPublicGlobalSpace verifies the skill/expert
-// convention: visibility=public in the empty global Space.
-func TestAdminCreateSkillMintsPublicGlobalSpace(t *testing.T) {
+// TestAdminCreateSkillMintsSystemGlobalSpace verifies the admin create
+// convention: visibility=system (全平台可见) in the empty global Space.
+func TestAdminCreateSkillMintsSystemGlobalSpace(t *testing.T) {
 	f := &fakeStore{plugins: map[string]*model.Plugin{}}
 	if _, err := fixedService(f).AdminCreate(context.Background(), adminCaller, adminSkillRequest()); err != nil {
 		t.Fatalf("AdminCreate: %v", err)
 	}
-	if f.create.Visibility != model.PluginVisibilityPublic {
-		t.Fatalf("visibility=%q want public", f.create.Visibility)
+	if f.create.Visibility != model.PluginVisibilitySystem {
+		t.Fatalf("visibility=%q want system", f.create.Visibility)
 	}
 	if f.create.SpaceID == nil || *f.create.SpaceID != adminGlobalSpace {
 		t.Fatalf("skill Space=%v want empty global", f.create.SpaceID)
+	}
+}
+
+// TestAdminCreateAttachesDefaultVisiblePlacement is the market-visibility
+// regression: an admin create must auto-attach a "default", visible placement
+// (carrying the plugin's own category) so the plugin surfaces in the tenant
+// market without a publish. Without the placement the tenant List's placement
+// JOIN filters the plugin out entirely.
+func TestAdminCreateAttachesDefaultVisiblePlacement(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{}}
+	category := "cat-ops"
+	req := adminSkillRequest()
+	req.CategoryID = &category
+	if _, err := fixedService(f).AdminCreate(context.Background(), adminCaller, req); err != nil {
+		t.Fatalf("AdminCreate: %v", err)
+	}
+	if len(f.createPlace) != 1 {
+		t.Fatalf("placements = %#v, want exactly one default placement", f.createPlace)
+	}
+	pl := f.createPlace[0]
+	if pl.PlacementCode != "default" || !pl.Visible {
+		t.Fatalf("placement = %#v, want default+visible", pl)
+	}
+	if pl.CategoryID == nil || *pl.CategoryID != category {
+		t.Fatalf("placement category = %v, want the plugin's category %q", pl.CategoryID, category)
+	}
+}
+
+// TestAdminCreateNullCategoryStillPlaces confirms a category-less admin create
+// still auto-attaches a visible default placement (a null-category placement
+// lists in the market) rather than skipping placement entirely.
+func TestAdminCreateNullCategoryStillPlaces(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{}}
+	if _, err := fixedService(f).AdminCreate(context.Background(), adminCaller, adminSkillRequest()); err != nil {
+		t.Fatalf("AdminCreate: %v", err)
+	}
+	if len(f.createPlace) != 1 || f.createPlace[0].PlacementCode != "default" || !f.createPlace[0].Visible {
+		t.Fatalf("placements = %#v, want one visible default placement", f.createPlace)
+	}
+	if f.createPlace[0].CategoryID != nil {
+		t.Fatalf("placement category = %v, want nil", f.createPlace[0].CategoryID)
 	}
 }
 

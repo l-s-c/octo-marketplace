@@ -94,16 +94,15 @@ func (s *Service) AdminDetail(ctx context.Context, caller Caller, pluginID strin
 	return &Detail{Plugin: p, Relations: rels}, nil
 }
 
-// conventionVisibility is the visibility an admin CREATE stamps by type: system
-// connectors, public skills/experts. Update never forces a visibility — it
+// conventionVisibility is the visibility an admin CREATE stamps: every plugin
+// type an admin publishes is platform-global, so all of them get `system`
+// (the unified "全平台可见" value). Update never forces a visibility — it
 // preserves the row's existing one (see AdminUpdate) so a metadata edit cannot
 // publish a tenant-private plugin.
 func conventionVisibility(typ model.PluginType) (model.PluginVisibility, bool) {
 	switch typ {
-	case model.PluginTypeConnector:
+	case model.PluginTypeConnector, model.PluginTypeSkill, model.PluginTypeExpert, model.PluginTypeExpertTeam:
 		return model.PluginVisibilitySystem, true
-	case model.PluginTypeSkill, model.PluginTypeExpert, model.PluginTypeExpertTeam:
-		return model.PluginVisibilityPublic, true
 	default:
 		return "", false
 	}
@@ -147,6 +146,14 @@ func conventionType(typ model.PluginType) bool {
 	}
 }
 
+// defaultMarketPlacement is the visible "default"-placement row an admin create
+// auto-attaches so the plugin appears in the tenant market without a publish. It
+// carries no registered-category requirement — a plain visible placement (with
+// the plugin's own category, which may be nil) is enough for the market list.
+func defaultMarketPlacement(categoryID *string) model.PluginPlacement {
+	return model.PluginPlacement{PlacementCode: "default", CategoryID: categoryID, Visible: true, SortOrder: 0}
+}
+
 // AdminCreate mints a new admin plugin (system connector or public skill).
 func (s *Service) AdminCreate(ctx context.Context, caller Caller, req WriteRequest) (*Detail, error) {
 	visibility, ok := conventionVisibility(req.Type)
@@ -162,7 +169,13 @@ func (s *Service) AdminCreate(ctx context.Context, caller Caller, req WriteReque
 		rels[i].SourcePluginID = p.ID
 	}
 	audit := s.audit(caller, p.ID, "create", nil, p, s.now())
-	sync, err := s.repo.Create(ctx, adminScope(caller), mutation(*p, rels, audit))
+	m := mutation(*p, rels, audit)
+	// Admin creates auto-attach a default visible placement so the plugin surfaces
+	// in the tenant market immediately (the market always lists the "default"
+	// placement); publish is not required. The placement copies the plugin's
+	// category (may be nil — a null-category visible placement still lists).
+	m.Placements = []model.PluginPlacement{defaultMarketPlacement(p.CategoryID)}
+	sync, err := s.repo.Create(ctx, adminScope(caller), m)
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
@@ -173,6 +186,10 @@ func (s *Service) AdminCreate(ctx context.Context, caller Caller, req WriteReque
 // PRESERVES the row's existing visibility, Space, and owner: an admin metadata
 // edit must never force-publish a plugin (A1) — a tenant-private row stays
 // private — and the owner/creator provenance is immutable.
+//
+// TODO: AdminUpdate does not (re)attach a default placement — a plugin that was
+// never auto-placed (e.g. created before this change) stays out of the market
+// until publish. Out of scope here; revisit if metadata-only edits must surface.
 func (s *Service) AdminUpdate(ctx context.Context, caller Caller, pluginID string, req WriteRequest) (*Detail, error) {
 	storageID, err := parseStorageID(pluginID)
 	if err != nil {
@@ -210,6 +227,23 @@ func (s *Service) AdminUpdate(ctx context.Context, caller Caller, pluginID strin
 		return nil, mapStoreError(err)
 	}
 	return &Detail{Plugin: p, Relations: rels, RelationResult: relationResult(sync)}, nil
+}
+
+// AdminImportContainer ingests an uploaded expert/expert_team container archive
+// and stores it as the unified plugin graph (the expert/team plus its skills,
+// members, and relations) under the admin conventions. It is the admin-surface
+// name for ImportContainer, which already stamps the admin identity itself.
+func (s *Service) AdminImportContainer(ctx context.Context, caller Caller, p ContainerImportParams) (*Detail, error) {
+	return s.ImportContainer(ctx, caller, p)
+}
+
+// AdminReuploadContainer re-uploads an expert/expert_team container archive to
+// rebuild an EXISTING plugin in place (preserving its plugin_id, visibility,
+// Space, owner, and market placement) under the admin conventions. It is the
+// admin-surface name for ReuploadContainer, which already stamps the admin
+// identity itself.
+func (s *Service) AdminReuploadContainer(ctx context.Context, caller Caller, pluginID string, p ContainerImportParams) (*Detail, error) {
+	return s.ReuploadContainer(ctx, caller, pluginID, p)
 }
 
 // AdminDelete soft-deletes any plugin by id, regardless of owner/Space.
