@@ -250,6 +250,26 @@ GROUP BY r.source_plugin_id`, args...)
 	return out, rows.Err()
 }
 
+// CountDeclaredRelations counts a plugin's live one-level relations to live
+// targets WITHOUT the caller-visibility predicate — the full declared topology
+// its publisher committed. The install path compares this against the
+// visibility-filtered set (GetWithRelations) to detect that a dependency was
+// hidden from the caller and refuse rather than silently provision a partial
+// expert/squad (P1-1). It returns only a count, so it reveals nothing beyond the
+// number of edges the plugin already declares; the target-liveness predicate
+// matches GetWithRelations so the comparison isolates visibility drops from
+// liveness drops.
+func (r *Repo) CountDeclaredRelations(ctx context.Context, pluginID string) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_relations r
+JOIN plugins p ON p.plugin_id=r.target_plugin_id AND p.status=1 AND p.deleted_at IS NULL
+WHERE r.source_plugin_id=? AND r.status=1 AND r.deleted_at IS NULL`, pluginID).Scan(&n)
+	if err != nil {
+		return 0, wrapped("count declared relations", err)
+	}
+	return n, nil
+}
+
 func scanPlugin(s interface{ Scan(...any) error }) (*model.Plugin, error) {
 	return scanPluginRow(s, true, false)
 }

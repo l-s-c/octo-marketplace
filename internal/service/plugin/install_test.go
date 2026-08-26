@@ -168,6 +168,30 @@ func TestInstallDropsForgedCrossSpaceSkillRef(t *testing.T) {
 	}
 }
 
+// TestInstallRefusesWhenDeclaredDependencyHidden is the P1-1 regression: when the
+// installing caller cannot see a declared relation target (a shared parent that
+// depends on a private child), the visibility-filtered read yields a short
+// relation list. Install must refuse loudly with ErrDependencyHidden rather than
+// provisioning an expert with missing skills (or a squad missing members) and
+// returning success. The declared count exceeds the visible relations here, which
+// is exactly the drop CountDeclaredRelations detects.
+func TestInstallRefusesWhenDeclaredDependencyHidden(t *testing.T) {
+	space := "space-a"
+	f := &fakeStore{
+		plugins: map[string]*model.Plugin{
+			"expert-1": {ID: "expert-1", Name: "Alice", Type: model.PluginTypeExpert, OwnerUID: "user-1", SpaceID: &space, Manifest: json.RawMessage(`{"description":"x"}`), Package: packageWith(rawAtt("AGENTS.md", "w"))},
+		},
+		// The caller sees zero relations (the private skill target was filtered),
+		// but the plugin declares one — the hidden-dependency condition.
+		relations:      map[string][]model.PluginRelation{"expert-1": {}},
+		declaredCounts: map[string]int{"expert-1": 1},
+	}
+	svc := fixedService(f).WithProvisioner(&fakeProvisioner{}).WithMetrics(&fakeTracker{})
+	if _, err := svc.Install(context.Background(), testCaller, "expert-1", InstallParams{WorkspaceID: "ws", RuntimeID: "rt", Token: "t"}); !errors.Is(err, ErrDependencyHidden) {
+		t.Fatalf("install with a hidden declared dependency err = %v, want ErrDependencyHidden", err)
+	}
+}
+
 func TestInstallRejectsNonInstallableTypesAndMissingProvisioner(t *testing.T) {
 	f := installFixture()
 	svc := fixedService(f).WithProvisioner(&fakeProvisioner{})

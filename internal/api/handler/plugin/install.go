@@ -107,6 +107,17 @@ func writeInstallError(c *gin.Context, err error) {
 			"Reduce the number of skills or team members in this plugin and try again.")
 		return
 	}
+	// ErrDependencyHidden: the plugin declares a relation target the caller
+	// cannot see, so the full published topology cannot be reproduced. Refuse
+	// loudly (P1-1) with an actionable, non-leaking message rather than
+	// provisioning a partial expert/squad.
+	if errors.Is(err, pluginsvc.ErrDependencyHidden) {
+		apiresponse.Fail(c, http.StatusForbidden, errcode.PermissionDenied,
+			"this plugin depends on resources you cannot access",
+			map[string]any{"resource": "plugin"},
+			"Ask the plugin owner to widen the visibility of its dependencies, then install again.")
+		return
+	}
 	writeServiceError(c, err, "plugin.install")
 }
 

@@ -76,7 +76,7 @@ func (s *Service) Install(ctx context.Context, caller Caller, pluginID string, p
 	if strings.TrimSpace(p.WorkspaceID) == "" || strings.TrimSpace(p.RuntimeID) == "" {
 		return nil, ErrInvalidRequest
 	}
-	detail, err := s.Detail(ctx, caller, pluginID, true)
+	detail, err := s.resolveInstallDetail(ctx, caller, pluginID)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +112,34 @@ func (s *Service) Install(ctx context.Context, caller Caller, pluginID string, p
 	default:
 		return nil, ErrInvalidRequest
 	}
+}
+
+// resolveInstallDetail loads a plugin's detail (with relations) for install and
+// refuses LOUDLY when the caller cannot see every declared relation target. The
+// tenant read filters relation targets by caller visibility (GetWithRelations),
+// so a shared parent that legitimately depends on a private child would resolve
+// to a short relation list — and the install fan-out would then provision an
+// expert with missing skills or a squad missing members/leader while returning
+// 200 (P1-1). Comparing the declared count (CountDeclaredRelations, unfiltered)
+// against the visible list detects the drop; only the count is used, so nothing
+// beyond the number of edges the publisher already declared is revealed. This is
+// the visibility-driven sibling of the size-driven loud truncation elsewhere in
+// this file. Resolving under the owner's visibility instead is deliberately NOT
+// done: that would copy a private dependency's content into any caller's agent,
+// a confidentiality decision the owner must take explicitly.
+func (s *Service) resolveInstallDetail(ctx context.Context, caller Caller, pluginID string) (*Detail, error) {
+	detail, err := s.Detail(ctx, caller, pluginID, true)
+	if err != nil {
+		return nil, err
+	}
+	declared, err := s.repo.CountDeclaredRelations(ctx, detail.Plugin.ID)
+	if err != nil {
+		return nil, mapStoreError(err)
+	}
+	if declared > len(detail.Relations) {
+		return nil, ErrDependencyHidden
+	}
+	return detail, nil
 }
 
 // agentSpecFromPlugin materializes one expert Plugin into a provisioning spec:
@@ -164,7 +192,7 @@ func (s *Service) squadFromPlugin(ctx context.Context, caller Caller, detail *De
 			return nil, ErrTooLarge
 		}
 		budget.targets--
-		memberDetail, err := s.Detail(ctx, caller, rel.TargetPluginID, true)
+		memberDetail, err := s.resolveInstallDetail(ctx, caller, rel.TargetPluginID)
 		if err != nil {
 			return nil, err
 		}

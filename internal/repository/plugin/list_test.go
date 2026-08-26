@@ -77,6 +77,28 @@ func TestGetScansMetricCounters(t *testing.T) {
 	}
 }
 
+// TestCountDeclaredRelationsIgnoresVisibility pins the P1-1 guard query: it
+// counts a plugin's live one-level relations to live targets WITHOUT any
+// caller-visibility predicate, so the install path can detect a dependency the
+// caller could not see (the visibility-filtered read would have dropped it).
+func TestCountDeclaredRelationsIgnoresVisibility(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugin_relations r\s+JOIN plugins p ON p.plugin_id=r.target_plugin_id AND p.status=1 AND p.deleted_at IS NULL\s+WHERE r.source_plugin_id=\? AND r.status=1 AND r.deleted_at IS NULL`).
+		WithArgs("expert-1").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
+	n, err := New(db).CountDeclaredRelations(context.Background(), "expert-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Fatalf("declared count = %d, want 3", n)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCountMemberRelationsBatchesLiveTargets(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()

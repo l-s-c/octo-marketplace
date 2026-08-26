@@ -36,6 +36,10 @@ type fakeStore struct {
 	list           []model.Plugin
 	memberCounts   map[string]int
 	memberCountIDs []string
+	// declaredCounts overrides the unfiltered declared-relation count per plugin;
+	// unset entries default to len(relations[id]) so declared==visible and the
+	// install dependency-visibility guard stays inert for existing tests.
+	declaredCounts map[string]int
 	tags           []model.TagFilter
 	tagFilter      pluginrepo.TagListFilter
 	publishErr     error
@@ -130,6 +134,15 @@ func (f *fakeStore) CountMemberRelations(_ context.Context, teamIDs []string) (m
 		return map[string]int{}, f.err
 	}
 	return f.memberCounts, f.err
+}
+func (f *fakeStore) CountDeclaredRelations(_ context.Context, id string) (int, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	if n, ok := f.declaredCounts[id]; ok {
+		return n, nil
+	}
+	return len(f.relations[id]), nil
 }
 
 func fixedService(f *fakeStore) *Service {

@@ -22,6 +22,10 @@ var (
 	ErrConflict       = errors.New("plugin conflict")
 	ErrInvalidRequest = errors.New("invalid plugin request")
 	ErrTooLarge       = errors.New("plugin artifact exceeds size limit")
+	// ErrDependencyHidden is returned when an install cannot see every declared
+	// relation target, so the full published topology cannot be reproduced —
+	// refused loudly rather than provisioning a partial expert/squad (P1-1).
+	ErrDependencyHidden = errors.New("plugin install dependency not accessible to caller")
 	// ErrIntegrity is returned when a stored artifact's bytes do not match the
 	// content_hash/content_size recorded for it at publish time — a
 	// content-addressed object must never be served under a mismatched digest.
@@ -51,6 +55,7 @@ type Store interface {
 	VersionExists(context.Context, pluginrepo.Scope, string, string) (bool, error)
 	Publish(context.Context, pluginrepo.Scope, pluginrepo.PublishParams) (*model.PluginVersion, error)
 	CountMemberRelations(context.Context, []string) (map[string]int, error)
+	CountDeclaredRelations(context.Context, string) (int, error)
 	ListTags(context.Context, pluginrepo.Scope, pluginrepo.TagListFilter) ([]model.TagFilter, error)
 }
 
