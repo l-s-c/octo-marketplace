@@ -19,13 +19,13 @@ import (
 	"sort"
 	"time"
 
-	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
+	libplugin "github.com/Mininglamp-OSS/octo-plugin-lib/plugin"
 )
 
 // SkillExpander turns a legacy skill package into the canonical attachment-tree
 // package, reporting whether it changed. *pluginsvc.Service satisfies it.
 type SkillExpander interface {
-	ExpandSkillPackage(ctx context.Context, spaceID, pluginID string, pkg json.RawMessage) (json.RawMessage, bool, error)
+	ExpandSkillPackage(ctx context.Context, spaceID, pluginID string, pkg json.RawMessage) (json.RawMessage, json.RawMessage, bool, error)
 }
 
 type ExpandCounts struct {
@@ -211,14 +211,14 @@ func (r *Runner) expandPlugins(ctx context.Context, exp SkillExpander, apply boo
 			p.actions = append(p.actions, expandAction{count: func(c *ExpandCounts) *int { return &c.Plugins }})
 			continue
 		}
-		newPkg, newHash, ok := r.expandRow(ctx, exp, spaces[w.id], w.id, "plugins", w.manifest, w.pkg, p)
+		newPkg, newKeys, newHash, ok := r.expandRow(ctx, exp, spaces[w.id], w.id, "plugins", w.manifest, w.pkg, p)
 		if !ok {
 			continue
 		}
 		p.actions = append(p.actions, expandAction{
 			count: func(c *ExpandCounts) *int { return &c.Plugins },
-			query: `UPDATE plugins SET plugin_json=?, plugin_hash=? WHERE plugin_id=? AND plugin_hash=?`,
-			args:  []any{string(newPkg), newHash, w.id, w.oldHash},
+			query: `UPDATE plugins SET plugin_json=?, attachment_keys_json=?, plugin_hash=? WHERE plugin_id=? AND plugin_hash=?`,
+			args:  []any{string(newPkg), nullableJSON(newKeys), newHash, w.id, w.oldHash},
 			guard: true,
 		})
 	}
@@ -254,14 +254,14 @@ func (r *Runner) expandVersions(ctx context.Context, exp SkillExpander, apply bo
 			p.actions = append(p.actions, expandAction{count: func(c *ExpandCounts) *int { return &c.Versions }})
 			continue
 		}
-		newPkg, newHash, ok := r.expandRow(ctx, exp, spaces[w.pluginID], w.pluginID, "plugin_versions", w.manifest, w.pkg, p)
+		newPkg, newKeys, newHash, ok := r.expandRow(ctx, exp, spaces[w.pluginID], w.pluginID, "plugin_versions", w.manifest, w.pkg, p)
 		if !ok {
 			continue
 		}
 		p.actions = append(p.actions, expandAction{
 			count: func(c *ExpandCounts) *int { return &c.Versions },
-			query: `UPDATE plugin_versions SET plugin_json=?, plugin_hash=? WHERE version_id=? AND plugin_hash=?`,
-			args:  []any{string(newPkg), newHash, w.id, w.oldHash},
+			query: `UPDATE plugin_versions SET plugin_json=?, attachment_keys_json=?, plugin_hash=? WHERE version_id=? AND plugin_hash=?`,
+			args:  []any{string(newPkg), nullableJSON(newKeys), newHash, w.id, w.oldHash},
 			guard: true,
 		})
 	}
@@ -330,7 +330,7 @@ func (r *Runner) expandAudits(ctx context.Context, exp SkillExpander, apply bool
 		}
 		newPkg, changed := w.pkg, false
 		if expandable {
-			expanded, didChange, err := exp.ExpandSkillPackage(ctx, spaces[w.pluginID], w.pluginID, w.pkg)
+			expanded, _, didChange, err := exp.ExpandSkillPackage(ctx, spaces[w.pluginID], w.pluginID, w.pkg)
 			if err != nil {
 				p.issues = append(p.issues, Issue{"skip", "expand_failed", "plugin_audit_logs", w.id, err.Error()})
 				lastHash[w.pluginID] = oldAfter
@@ -379,21 +379,21 @@ func (r *Runner) expandAudits(ctx context.Context, exp SkillExpander, apply bool
 // expandRow runs the expander for one plugins/plugin_versions row and recomputes
 // the lib hash. It returns ok=false (recording an issue) when the package fails
 // to expand.
-func (r *Runner) expandRow(ctx context.Context, exp SkillExpander, spaceID, pluginID, source string, manifest, pkg []byte, p *expandPlan) (newPkg []byte, newHash string, ok bool) {
-	expanded, changed, err := exp.ExpandSkillPackage(ctx, spaceID, pluginID, pkg)
+func (r *Runner) expandRow(ctx context.Context, exp SkillExpander, spaceID, pluginID, source string, manifest, pkg []byte, p *expandPlan) (newPkg []byte, newKeys []byte, newHash string, ok bool) {
+	expanded, keys, changed, err := exp.ExpandSkillPackage(ctx, spaceID, pluginID, pkg)
 	if err != nil {
 		p.issues = append(p.issues, Issue{"skip", "expand_failed", source, pluginID, err.Error()})
-		return nil, "", false
+		return nil, nil, "", false
 	}
 	if !changed {
-		return nil, "", false
+		return nil, nil, "", false
 	}
 	hash, err := libplugin.ComputePluginHash(manifest, expanded)
 	if err != nil {
 		p.issues = append(p.issues, Issue{"skip", "expand_failed", source, pluginID, err.Error()})
-		return nil, "", false
+		return nil, nil, "", false
 	}
-	return expanded, hash, true
+	return expanded, keys, hash, true
 }
 
 // hasLegacyPointer reports whether a package still carries a skill/ref.json or

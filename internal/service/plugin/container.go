@@ -16,8 +16,6 @@ package plugin
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -692,16 +690,14 @@ func manifestDraft(typ model.PluginType, name, description string, tags []string
 	return raw, nil
 }
 
-// rawAttachmentMap builds one inline raw attachment map with the same field set
-// and hash formula the skill import and the backfill use.
+// rawAttachmentMap builds one inline raw attachment map. The 2.0 contract
+// forbids a derived content_size/content_hash on raw content (it carries its
+// bytes inline), so only the path/mime/raw_content triple is set.
 func rawAttachmentMap(path, mime, content string) map[string]any {
-	sum := sha256.Sum256([]byte(content))
 	return map[string]any{
 		"path":         path,
 		"content_type": "raw",
 		"mime_type":    mime,
-		"content_size": int64(len(content)),
-		"content_hash": "sha256:" + hex.EncodeToString(sum[:]),
 		"raw_content":  content,
 	}
 }

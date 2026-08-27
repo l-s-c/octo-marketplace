@@ -74,12 +74,22 @@ func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	return &RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}, nil
 }
 
+// jsonColumn maps an optional JSON document to a nullable SQL column value: NULL
+// when empty (so attachment_keys_json stays NULL for rows without spilled
+// storage attachments), the raw bytes as a string otherwise.
+func jsonColumn(raw []byte) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	return string(raw)
+}
+
 // insertPlugin writes one current-state plugin row. Callers hold the
 // transaction and have already locked the category and relation targets.
 func insertPlugin(ctx context.Context, tx *sql.Tx, now interface{}, p model.Plugin) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO plugins (plugin_id,plugin_name,plugin_type,is_embedded,category_id,tags_json,publisher,owner_uid,space_id,visibility,
-creator_name,created_by_type,created_by_bot_uid,created_by_bot_name,icon,tool_count,manifest_json,plugin_json,manifest_hash,plugin_hash,current_version_id,current_version,status,created_at,updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Type, p.IsEmbedded, p.CategoryID, string(p.Tags), p.Publisher, p.OwnerUID, p.SpaceID, p.Visibility, p.CreatorName, p.CreatedByType, p.CreatedByBotUID, p.CreatedByBotName, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.CurrentVersionID, p.CurrentVersion, p.Status, now, now)
+creator_name,created_by_type,created_by_bot_uid,created_by_bot_name,icon,tool_count,manifest_json,plugin_json,attachment_keys_json,manifest_hash,plugin_hash,current_version_id,current_version,status,created_at,updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Type, p.IsEmbedded, p.CategoryID, string(p.Tags), p.Publisher, p.OwnerUID, p.SpaceID, p.Visibility, p.CreatorName, p.CreatedByType, p.CreatedByBotUID, p.CreatedByBotName, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), jsonColumn(p.AttachmentKeys), p.ManifestHash, p.PluginHash, p.CurrentVersionID, p.CurrentVersion, p.Status, now, now)
 	if err != nil {
 		return wrapped("create", err)
 	}
@@ -286,8 +296,8 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 	if scope.Admin {
 		updWhere, updTail = `WHERE plugin_id=? AND deleted_at IS NULL`, []any{topPlugin.ID}
 	}
-	updArgs := append([]any{topPlugin.Name, topPlugin.Type, topPlugin.CategoryID, string(topPlugin.Tags), topPlugin.Publisher, topPlugin.Visibility, topPlugin.Icon, topPlugin.ToolCount, string(topPlugin.Manifest), string(topPlugin.Package), topPlugin.ManifestHash, topPlugin.PluginHash, topPlugin.Status, now}, updTail...)
-	if _, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,icon=?,tool_count=?,manifest_json=?,plugin_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
+	updArgs := append([]any{topPlugin.Name, topPlugin.Type, topPlugin.CategoryID, string(topPlugin.Tags), topPlugin.Publisher, topPlugin.Visibility, topPlugin.Icon, topPlugin.ToolCount, string(topPlugin.Manifest), string(topPlugin.Package), jsonColumn(topPlugin.AttachmentKeys), topPlugin.ManifestHash, topPlugin.PluginHash, topPlugin.Status, now}, updTail...)
+	if _, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,icon=?,tool_count=?,manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
 `+updWhere, updArgs...); err != nil {
 		return nil, wrapped("rebuild", err)
 	}
@@ -403,8 +413,8 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	if scope.Admin {
 		updWhere, updTail = `WHERE plugin_id=? AND deleted_at IS NULL`, []any{p.ID}
 	}
-	updArgs := append([]any{p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.Visibility, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.Status, now}, updTail...)
-	_, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,icon=?,tool_count=?,manifest_json=?,plugin_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
+	updArgs := append([]any{p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.Visibility, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), jsonColumn(p.AttachmentKeys), p.ManifestHash, p.PluginHash, p.Status, now}, updTail...)
+	_, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,icon=?,tool_count=?,manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
 `+updWhere, updArgs...)
 	if err != nil {
 		return nil, wrapped("update", err)

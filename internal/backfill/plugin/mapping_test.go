@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
+	libplugin "github.com/Mininglamp-OSS/octo-plugin-lib/plugin"
 )
 
 var canonicalUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
@@ -84,7 +84,7 @@ func TestPackageJSONSortsAttachmentsWithMetadataAndNoManifestEmbed(t *testing.T)
 	if err := json.Unmarshal(pkgJSON, &pkg); err != nil {
 		t.Fatal(err)
 	}
-	if pkg.Schema != "cowork-plugin-package-1.0.json" || len(pkg.Attachments) != 2 {
+	if pkg.Schema != "cowork-plugin-package-2.0.json" || len(pkg.Attachments) != 2 {
 		t.Fatalf("package = %#v", pkg)
 	}
 	paths := []string{pkg.Attachments[0].Path, pkg.Attachments[1].Path}
@@ -94,7 +94,8 @@ func TestPackageJSONSortsAttachmentsWithMetadataAndNoManifestEmbed(t *testing.T)
 		t.Fatalf("attachment paths = %#v", paths)
 	}
 	for _, attachment := range pkg.Attachments {
-		if attachment.ContentSize != len([]byte(attachment.RawContent)) || attachment.ContentHash != hashJSON([]byte(attachment.RawContent)) {
+		// 2.0 raw attachments carry no derived content_size/content_hash.
+		if attachment.ContentSize != nil || attachment.ContentHash != "" {
 			t.Fatalf("bad attachment metadata: %#v", attachment)
 		}
 	}

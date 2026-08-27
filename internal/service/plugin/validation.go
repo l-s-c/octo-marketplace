@@ -5,11 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"time"
 
 	"errors"
 	"fmt"
-	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
+	libplugin "github.com/Mininglamp-OSS/octo-plugin-lib/plugin"
 	"io"
 	"net/url"
 	"regexp"
@@ -108,15 +107,12 @@ func validPlacementCode(v string) bool { return placementPattern.MatchString(v) 
 func validRelationID(v string) bool    { return relationIDPattern.MatchString(v) }
 
 // relationEndpointProbe* are fixed well-formed identities so the octo-plugin-
-// lib endpoint validator (which also checks IDs, self-reference, and
-// timestamps on the full Relation object) can be reused as the single source
-// of the relation-type endpoint matrix.
-var (
-	relationProbeStamp = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-)
-
+// lib endpoint validator (which also checks the source/target IDs and
+// self-reference on the Relation object) can be reused as the single source of
+// the relation-type endpoint matrix. The 2.0 contract Relation carries no
+// relation_id or timestamps, so the probe supplies only the endpoint IDs and
+// type that ValidateRelation still inspects.
 const (
-	relationProbeID     = "00000000-0000-8000-8000-000000000001"
 	relationProbeSource = "00000000-0000-8000-8000-000000000002"
 	relationProbeTarget = "00000000-0000-8000-8000-000000000003"
 )
@@ -127,12 +123,9 @@ const (
 // libplugin.ValidateRelationEndpoints.
 func validRelationType(relation string, source, target model.PluginType) bool {
 	probe := libplugin.Relation{
-		RelationID:     relationProbeID,
 		SourcePluginID: relationProbeSource,
 		TargetPluginID: relationProbeTarget,
 		RelationType:   libplugin.RelationType(relation),
-		CreatedAt:      relationProbeStamp,
-		UpdatedAt:      relationProbeStamp,
 	}
 	return libplugin.ValidateRelationEndpoints(probe, libplugin.Type(source), libplugin.Type(target)) == nil
 }

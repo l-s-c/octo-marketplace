@@ -170,12 +170,18 @@ func TestSkillPackageRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pkg, err := json.Marshal(map[string]any{"$schema": packageSchema, "attachments": atts})
+	pkgRaw, err := json.Marshal(map[string]any{"$schema": packageSchema, "attachments": atts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mirror the write chokepoint: storage object keys live in the row's sidecar,
+	// not inline in the 2.0 package.
+	pkg, keys, err := splitStorageKeys(pkgRaw, space)
 	if err != nil {
 		t.Fatal(err)
 	}
 	store := &fakeStore{plugins: map[string]*model.Plugin{
-		"plug-1": {ID: "plug-1", Name: "Round Trip", Type: model.PluginTypeSkill, SpaceID: &space, Package: pkg},
+		"plug-1": {ID: "plug-1", Name: "Round Trip", Type: model.PluginTypeSkill, SpaceID: &space, Package: pkg, AttachmentKeys: keys},
 	}}
 	svc.repo = store
 
@@ -225,7 +231,7 @@ func TestExpandSkillPackageFromLegacyZip(t *testing.T) {
 	blobs := &importStorage{objects: map[string][]byte{"experts/x/skill.zip": zipData}}
 	svc := New(&fakeStore{}, blobs)
 
-	out, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-1", pkg)
+	out, _, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-1", pkg)
 	if err != nil || !changed {
 		t.Fatalf("expand err=%v changed=%v", err, changed)
 	}
@@ -240,8 +246,46 @@ func TestExpandSkillPackageFromLegacyZip(t *testing.T) {
 		t.Fatalf("supporting file missing: %#v", tree)
 	}
 	// Idempotent: expanding the result again is a no-op.
-	if _, changed2, err := svc.ExpandSkillPackage(context.Background(), space, "plug-1", out); err != nil || changed2 {
+	if _, _, changed2, err := svc.ExpandSkillPackage(context.Background(), space, "plug-1", out); err != nil || changed2 {
 		t.Fatalf("second expand changed=%v err=%v", changed2, err)
+	}
+}
+
+// TestExpandSkillPackageSplitsStorageKeys locks the 2.0 storage contract: a
+// legacy zip carrying a binary expands to a package with NO storage_uri inline
+// (the strict decoder would reject it) and returns the path->object-key sidecar
+// so the caller can persist attachment_keys_json.
+func TestExpandSkillPackageSplitsStorageKeys(t *testing.T) {
+	space := "space-a"
+	binary := []byte{0x00, 0x01, 0x02, 0xff, 0xfe}
+	zipData := zipWith(t, map[string][]byte{
+		"SKILL.md":        []byte("# Doc\nbody"),
+		"assets/logo.png": binary,
+	})
+	pkg := json.RawMessage(`{"$schema":"` + packageSchema + `","attachments":[` +
+		`{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# stub"},` +
+		`{"path":"skill/ref.json","content_type":"raw","mime_type":"application/json","raw_content":"{\"zip_object_key\":\"experts/x/skill.zip\"}"}` +
+		`]}`)
+	blobs := &importStorage{objects: map[string][]byte{"experts/x/skill.zip": zipData}}
+	svc := New(&fakeStore{}, blobs)
+
+	out, keys, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-1", pkg)
+	if err != nil || !changed {
+		t.Fatalf("expand err=%v changed=%v", err, changed)
+	}
+	// ExpandSkillPackage already validated `out` through the 2.0 decoder; assert it
+	// carries no host storage_uri (the strict decoder would have rejected it).
+	if bytes.Contains(out, []byte("storage_uri")) {
+		t.Fatalf("expanded package leaked storage_uri: %s", out)
+	}
+	// The binary's object key is carried in the sidecar, scoped to this Space.
+	var m map[string]string
+	if err := json.Unmarshal(keys, &m); err != nil {
+		t.Fatalf("sidecar keys not JSON: %v (%s)", err, keys)
+	}
+	wantKey := deterministicSkillObjectKey(space, "plug-1", "assets/logo.png", binary)
+	if m["assets/logo.png"] != wantKey {
+		t.Fatalf("sidecar key = %q want %q", m["assets/logo.png"], wantKey)
 	}
 }
 
@@ -253,7 +297,7 @@ func TestExpandSkillPackageEmptyRefKeepsInlineDoc(t *testing.T) {
 		`{"path":"skill/ref.json","content_type":"raw","mime_type":"application/json","raw_content":"{}"}` +
 		`]}`)
 	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
-	out, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-2", pkg)
+	out, _, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-2", pkg)
 	if err != nil || !changed {
 		t.Fatalf("expand err=%v changed=%v", err, changed)
 	}
@@ -275,7 +319,7 @@ func TestExpandSkillPackagePrefersRefObjectOverStub(t *testing.T) {
 	blobs := &importStorage{objects: map[string][]byte{"skills/x/SKILL.md": []byte("# Real Doc\nfull body")}}
 	svc := New(&fakeStore{}, blobs)
 
-	out, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-q1", pkg)
+	out, _, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-q1", pkg)
 	if err != nil || !changed {
 		t.Fatalf("expand err=%v changed=%v", err, changed)
 	}
@@ -292,7 +336,7 @@ func TestExpandSkillPackageTreeUnchanged(t *testing.T) {
 		`{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# doc"}` +
 		`]}`)
 	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
-	out, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-3", pkg)
+	out, _, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-3", pkg)
 	if err != nil || changed {
 		t.Fatalf("tree should be unchanged: changed=%v err=%v", changed, err)
 	}

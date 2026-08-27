@@ -42,7 +42,7 @@ func (f *fakeTracker) TrackDownload(_ context.Context, resourceType, resourceID 
 }
 
 func packageWith(attachments ...string) json.RawMessage {
-	return json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` + joinComma(attachments) + `]}`)
+	return json.RawMessage(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[` + joinComma(attachments) + `]}`)
 }
 func joinComma(items []string) string {
 	out := ""
@@ -216,9 +216,10 @@ func TestInstallSanitizesUnknownPlugin(t *testing.T) {
 
 func TestSkillRefPrefersStoragePackageWhenLegacyPointerAbsent(t *testing.T) {
 	space := "space-a"
-	pkg := json.RawMessage(`{"attachments":[{"path":"skill/package.zip","content_type":"storage","storage_uri":"plugins/space-a/attachments/x.zip"}]}`)
+	pkg := json.RawMessage(`{"attachments":[{"path":"skill/package.zip","content_type":"storage"}]}`)
+	keys := json.RawMessage(`{"skill/package.zip":"plugins/space-a/attachments/x.zip"}`)
 	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
-	ref, err := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", SpaceID: &space, Package: pkg}, freshBudget())
+	ref, err := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", SpaceID: &space, Package: pkg, AttachmentKeys: keys}, freshBudget())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,8 +229,8 @@ func TestSkillRefPrefersStoragePackageWhenLegacyPointerAbsent(t *testing.T) {
 
 	// Q5: a package.zip key outside this plugin's own Space prefix is dropped
 	// rather than handed to the provisioner, matching skill/ref.json scoping.
-	forged := json.RawMessage(`{"attachments":[{"path":"skill/package.zip","content_type":"storage","storage_uri":"plugins/space-b/attachments/x.zip"}]}`)
-	ref, err = svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", SpaceID: &space, Package: forged}, freshBudget())
+	forgedKeys := json.RawMessage(`{"skill/package.zip":"plugins/space-b/attachments/x.zip"}`)
+	ref, err = svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "New Skill", SpaceID: &space, Package: pkg, AttachmentKeys: forgedKeys}, freshBudget())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,15 +246,16 @@ func TestSkillRefResolvesTreeContentInline(t *testing.T) {
 	pkg := json.RawMessage(`{"attachments":[` +
 		`{"path":"SKILL.md","content_type":"raw","raw_content":"# doc"},` +
 		`{"path":"scripts/run.sh","content_type":"raw","raw_content":"echo hi"},` +
-		`{"path":"references/big.txt","content_type":"storage","storage_uri":"` + txtKey + `"},` +
-		`{"path":"assets/asset.bin","content_type":"storage","storage_uri":"` + binKey + `"}` +
+		`{"path":"references/big.txt","content_type":"storage"},` +
+		`{"path":"assets/asset.bin","content_type":"storage"}` +
 		`]}`)
+	keys := json.RawMessage(`{"references/big.txt":"` + txtKey + `","assets/asset.bin":"` + binKey + `"}`)
 	blobs := &importStorage{objects: map[string][]byte{
 		txtKey: []byte("spilled text"),
 		binKey: {0x00, 0xff, 0xfe},
 	}}
 	svc := New(&fakeStore{}, blobs)
-	ref, err := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "Tree Skill", SpaceID: &space, Package: pkg}, freshBudget())
+	ref, err := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "Tree Skill", SpaceID: &space, Package: pkg, AttachmentKeys: keys}, freshBudget())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,6 +273,33 @@ func TestSkillRefResolvesTreeContentInline(t *testing.T) {
 	}
 	if _, ok := got["assets/asset.bin"]; ok {
 		t.Fatalf("binary should be skipped: %#v", ref.SupportingFiles)
+	}
+}
+
+// TestSkillRefFallsBackToInlineStorageURI locks the migration-window safety net:
+// a row not yet migrated to the sidecar (AttachmentKeys nil) still resolves its
+// storage attachment from the inline storage_uri the pre-2.0 package carries, so
+// download/install do not silently drop files before the backfill runs.
+func TestSkillRefFallsBackToInlineStorageURI(t *testing.T) {
+	space := "space-a"
+	txtKey := "plugins/space-a/attachments/big.txt"
+	pkg := json.RawMessage(`{"attachments":[` +
+		`{"path":"SKILL.md","content_type":"raw","raw_content":"# doc"},` +
+		`{"path":"references/big.txt","content_type":"storage","storage_uri":"` + txtKey + `"}` +
+		`]}`)
+	blobs := &importStorage{objects: map[string][]byte{txtKey: []byte("spilled text")}}
+	svc := New(&fakeStore{}, blobs)
+	// AttachmentKeys deliberately nil — the un-migrated state.
+	ref, err := svc.skillRefFromPlugin(context.Background(), &model.Plugin{Name: "Legacy Skill", SpaceID: &space, Package: pkg}, freshBudget())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, f := range ref.SupportingFiles {
+		got[f.Path] = f.Content
+	}
+	if got["references/big.txt"] != "spilled text" {
+		t.Fatalf("inline storage_uri fallback dropped the file: %#v", ref.SupportingFiles)
 	}
 }
 

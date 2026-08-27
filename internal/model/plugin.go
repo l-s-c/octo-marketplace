@@ -69,11 +69,17 @@ type Plugin struct {
 	MemberCount int
 	// View/Install/DownloadCount are read-only counters resolved from
 	// resource_metrics (resource_type "plugin"); they are never written here.
-	ViewCount        int
-	InstallCount     int
-	DownloadCount    int
-	Manifest         json.RawMessage
-	Package          json.RawMessage
+	ViewCount     int
+	InstallCount  int
+	DownloadCount int
+	Manifest      json.RawMessage
+	Package       json.RawMessage
+	// AttachmentKeys is the host-private sidecar for storage attachments: a JSON
+	// object mapping a package attachment path to its managed object key. The
+	// octo-plugin-lib 2.0 package forbids host fields inside attachments, so the
+	// object key lives here instead of a `storage_uri` in Package, and is never
+	// part of plugin_hash. NULL/empty for rows without spilled storage files.
+	AttachmentKeys   json.RawMessage
 	ManifestHash     string
 	PluginHash       string
 	CurrentVersionID *string
@@ -120,18 +126,21 @@ type PluginAuditLog struct {
 
 // PluginVersion is an immutable published snapshot.
 type PluginVersion struct {
-	ID           string
-	PluginID     string
-	PluginType   PluginType
-	Version      string
-	Manifest     json.RawMessage
-	Package      json.RawMessage
-	ManifestHash string
-	PluginHash   string
-	Relations    json.RawMessage
-	Changelog    *string
-	CreatedBy    string
-	CreatedAt    time.Time
+	ID         string
+	PluginID   string
+	PluginType PluginType
+	Version    string
+	Manifest   json.RawMessage
+	Package    json.RawMessage
+	// AttachmentKeys is the version snapshot's copy of the storage-attachment
+	// path->object-key sidecar; see Plugin.AttachmentKeys.
+	AttachmentKeys json.RawMessage
+	ManifestHash   string
+	PluginHash     string
+	Relations      json.RawMessage
+	Changelog      *string
+	CreatedBy      string
+	CreatedAt      time.Time
 }
 
 // PluginPlacement configures one Plugin at a marketplace placement point.

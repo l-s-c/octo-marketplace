@@ -6,22 +6,22 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
+	libplugin "github.com/Mininglamp-OSS/octo-plugin-lib/plugin"
 )
 
-type stubExpander struct{ out string }
+type stubExpander struct{ out, keys string }
 
-func (s stubExpander) ExpandSkillPackage(_ context.Context, _, _ string, pkg json.RawMessage) (json.RawMessage, bool, error) {
+func (s stubExpander) ExpandSkillPackage(_ context.Context, _, _ string, pkg json.RawMessage) (json.RawMessage, json.RawMessage, bool, error) {
 	// A tree package (no legacy pointer) passes straight through unchanged; a
 	// legacy one expands to the stub tree.
 	if !hasLegacyPointer(pkg) {
-		return pkg, false, nil
+		return pkg, nil, false, nil
 	}
-	return json.RawMessage(s.out), true, nil
+	return json.RawMessage(s.out), json.RawMessage(s.keys), true, nil
 }
 
 func legacySkillPkg() string {
-	return `{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+	return `{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
 		attachmentJSON("SKILL.md", "text/markdown", "# stub") + `,` +
 		attachmentJSON("skill/ref.json", "application/json", `{"zip_object_key":"experts/x/skill.zip"}`) + `]}`
 }
@@ -48,7 +48,7 @@ func TestExpandPluginsGuardsUpdateWithOldHash(t *testing.T) {
 	r := New(db)
 
 	manifest := `{"plugin_name":"技能","name":"skill-a","description":"d"}`
-	tree := `{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+	tree := `{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
 		attachmentJSON("SKILL.md", "text/markdown", "# real doc") + `]}`
 
 	mock.ExpectQuery(`SELECT plugin_id, manifest_json, plugin_json, plugin_hash FROM plugins WHERE plugin_type='skill'`).
@@ -63,12 +63,16 @@ func TestExpandPluginsGuardsUpdateWithOldHash(t *testing.T) {
 		t.Fatalf("actions=%d issues=%#v", len(p.actions), p.issues)
 	}
 	a := p.actions[0]
-	if a.args[2] != "s1" || a.args[3] != "sha256:old" {
+	// args: plugin_json, attachment_keys_json, plugin_hash, plugin_id, guard hash.
+	if a.args[3] != "s1" || a.args[4] != "sha256:old" {
 		t.Fatalf("guard args = %#v", a.args)
 	}
+	if a.args[1] != nil {
+		t.Fatalf("all-inline expand should carry a NULL sidecar, got %#v", a.args[1])
+	}
 	want, err := libplugin.ComputePluginHash([]byte(manifest), []byte(tree))
-	if err != nil || a.args[1] != want {
-		t.Fatalf("hash = %v want %v (err %v)", a.args[1], want, err)
+	if err != nil || a.args[2] != want {
+		t.Fatalf("hash = %v want %v (err %v)", a.args[2], want, err)
 	}
 }
 
@@ -81,7 +85,7 @@ func TestExpandPluginsSkipsTreeRows(t *testing.T) {
 	}
 	defer db.Close()
 	r := New(db)
-	tree := `{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+	tree := `{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
 		attachmentJSON("SKILL.md", "text/markdown", "# d") + `]}`
 	mock.ExpectQuery(`SELECT plugin_id, manifest_json, plugin_json, plugin_hash FROM plugins WHERE plugin_type='skill'`).
 		WillReturnRows(sqlmock.NewRows([]string{"plugin_id", "manifest_json", "plugin_json", "plugin_hash"}).

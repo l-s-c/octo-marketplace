@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
-	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
+	libplugin "github.com/Mininglamp-OSS/octo-plugin-lib/plugin"
 )
 
 // CanonicalDocuments carries contract-canonical plugin documents and their
@@ -14,11 +14,15 @@ import (
 // plugin_hash formula all come from octo-plugin-lib; the marketplace adds only
 // host-owned rules on top (storage-key scoping, tags==labels).
 type CanonicalDocuments struct {
-	Manifest     json.RawMessage
-	Package      json.RawMessage
-	Tags         json.RawMessage
-	ManifestHash string
-	PluginHash   string
+	Manifest json.RawMessage
+	Package  json.RawMessage
+	Tags     json.RawMessage
+	// AttachmentKeys is the host-private storage sidecar (path -> managed object
+	// key) split out of Package so the package stays a valid 2.0 contract
+	// document. nil when the package has no storage attachments.
+	AttachmentKeys json.RawMessage
+	ManifestHash   string
+	PluginHash     string
 }
 
 // CanonicalizeManifest validates a manifest through the octo-plugin-lib
@@ -94,23 +98,21 @@ func canonicalizeDocuments(name string, typ model.PluginType, tags, manifest, pk
 	if len(pkg) == 0 || len(pkg) > maxJSONBytes {
 		return nil, ErrInvalidRequest
 	}
-	p, err := libplugin.CanonicalJSON(pkg)
+	// The 2.0 contract package forbids a host `storage_uri` inside an attachment
+	// (DecodePackage rejects unknown fields), so split each storage attachment's
+	// object key out into the host-private sidecar map and strip it from the
+	// package BEFORE canonicalization/validation/hashing. The sidecar is never
+	// part of plugin_hash; the stored package stays a valid 2.0 document.
+	stripped, keys, err := splitStorageKeys(pkg, spaceID)
 	if err != nil {
 		return nil, ErrInvalidRequest
 	}
-	decoded, err := libplugin.DecodePackage(libplugin.Type(typ), p)
+	p, err := libplugin.CanonicalJSON(stripped)
 	if err != nil {
 		return nil, ErrInvalidRequest
 	}
-	// Host rule: storage attachments may only reference this Space's managed
-	// prefix; the lib treats storage_uri as an opaque host-private string.
-	for _, attachment := range decoded.Attachments {
-		if attachment.ContentType != libplugin.ContentStorage {
-			continue
-		}
-		if !safeObjectSegment.MatchString(spaceID) || !validReferencedObjectKey(attachment.StorageURI, spaceID) {
-			return nil, ErrInvalidRequest
-		}
+	if _, err := libplugin.DecodePackage(libplugin.Type(typ), p); err != nil {
+		return nil, ErrInvalidRequest
 	}
 	// Host rule (caller path only): a legacy skill/ref.json pointer is a raw
 	// attachment whose JSON body carries object keys the lib never inspects. Scope
@@ -126,12 +128,133 @@ func canonicalizeDocuments(name string, typ model.PluginType, tags, manifest, pk
 		return nil, ErrInvalidRequest
 	}
 	return &CanonicalDocuments{
-		Manifest:     m,
-		Package:      p,
-		Tags:         t,
-		ManifestHash: hashJSON(m),
-		PluginHash:   hash,
+		Manifest:       m,
+		Package:        p,
+		Tags:           t,
+		AttachmentKeys: keys,
+		ManifestHash:   hashJSON(m),
+		PluginHash:     hash,
 	}, nil
+}
+
+// splitStorageKeys separates the host-private object keys from a package
+// document. For every storage attachment it validates the key against this
+// Space's managed prefix, records path -> key in the returned sidecar map, and
+// removes the `storage_uri` field so the returned package is a 2.0-legal
+// contract document. A package with no storage attachments returns (pkg, nil)
+// and the row's attachment_keys_json stays NULL.
+func splitStorageKeys(pkg json.RawMessage, spaceID string) (json.RawMessage, json.RawMessage, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(pkg, &doc); err != nil {
+		return nil, nil, err
+	}
+	rawAttachments, ok := doc["attachments"]
+	if !ok {
+		return pkg, nil, nil
+	}
+	var attachments []map[string]json.RawMessage
+	if err := json.Unmarshal(rawAttachments, &attachments); err != nil {
+		return nil, nil, err
+	}
+	keys := map[string]string{}
+	changed := false
+	for _, attachment := range attachments {
+		var contentType string
+		if raw, ok := attachment["content_type"]; ok {
+			_ = json.Unmarshal(raw, &contentType)
+		}
+		if contentType != "storage" {
+			continue
+		}
+		var path, key string
+		_ = json.Unmarshal(attachment["path"], &path)
+		_ = json.Unmarshal(attachment["storage_uri"], &key)
+		if !safeObjectSegment.MatchString(spaceID) || !validReferencedObjectKey(key, spaceID) {
+			return nil, nil, ErrInvalidRequest
+		}
+		keys[path] = key
+		delete(attachment, "storage_uri")
+		changed = true
+	}
+	if !changed {
+		return pkg, nil, nil
+	}
+	reencoded, err := json.Marshal(attachments)
+	if err != nil {
+		return nil, nil, err
+	}
+	doc["attachments"] = reencoded
+	strippedPkg, err := json.Marshal(doc)
+	if err != nil {
+		return nil, nil, err
+	}
+	keysJSON, err := json.Marshal(keys)
+	if err != nil {
+		return nil, nil, err
+	}
+	return strippedPkg, keysJSON, nil
+}
+
+// injectStorageKeys is the inverse of splitStorageKeys: it re-embeds each storage
+// attachment's object key (from the sidecar map) back into the package as an
+// inline storage_uri. It is used when a STORED (already-split) package must be
+// fed back through the write path — e.g. the import rollback rebuilds a
+// WriteRequest from the persisted row, whose Package no longer carries
+// storage_uri; without re-injection canonicalizeDocuments' splitStorageKeys would
+// see a storage attachment with no key and reject the restore. A package with no
+// storage attachments, or an empty sidecar, is returned unchanged.
+func injectStorageKeys(pkg, keysJSON json.RawMessage) json.RawMessage {
+	keys := attachmentKeyMap(keysJSON)
+	if len(keys) == 0 {
+		return pkg
+	}
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(pkg, &doc) != nil {
+		return pkg
+	}
+	rawAttachments, ok := doc["attachments"]
+	if !ok {
+		return pkg
+	}
+	var attachments []map[string]json.RawMessage
+	if json.Unmarshal(rawAttachments, &attachments) != nil {
+		return pkg
+	}
+	changed := false
+	for _, attachment := range attachments {
+		var contentType string
+		if raw, ok := attachment["content_type"]; ok {
+			_ = json.Unmarshal(raw, &contentType)
+		}
+		if contentType != "storage" {
+			continue
+		}
+		var path string
+		_ = json.Unmarshal(attachment["path"], &path)
+		key, ok := keys[path]
+		if !ok || key == "" {
+			continue
+		}
+		encoded, err := json.Marshal(key)
+		if err != nil {
+			continue
+		}
+		attachment["storage_uri"] = encoded
+		changed = true
+	}
+	if !changed {
+		return pkg
+	}
+	reencoded, err := json.Marshal(attachments)
+	if err != nil {
+		return pkg
+	}
+	doc["attachments"] = reencoded
+	injected, err := json.Marshal(doc)
+	if err != nil {
+		return pkg
+	}
+	return injected
 }
 
 // skillRefKeysScoped reports whether a package's legacy skill/ref.json pointer
@@ -182,9 +305,37 @@ func rawAttachmentContent(pkg json.RawMessage, path string) (string, bool) {
 	return "", false
 }
 
-// storageAttachmentKey returns the storage_uri of one storage-backed package
-// attachment.
-func storageAttachmentKey(pkg json.RawMessage, path string) (string, bool) {
+// attachmentKeyMap decodes the host-private storage sidecar (attachment path ->
+// managed object key) persisted in the row's attachment_keys_json column. A nil
+// or malformed value yields an empty map so lookups miss cleanly.
+func attachmentKeyMap(raw json.RawMessage) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var m map[string]string
+	if json.Unmarshal(raw, &m) != nil {
+		return nil
+	}
+	return m
+}
+
+// storageAttachmentKey resolves the managed object key for a storage attachment
+// path. It prefers the host sidecar (attachment_keys_json); if the row has not
+// yet been migrated to the sidecar (NULL/missing entry) it falls back to the
+// inline storage_uri the pre-2.0 package still carries, so a storage-backed row
+// stays readable during the window between deploying this code and running the
+// backfill. The caller must still scope-check the returned key.
+func storageAttachmentKey(p *model.Plugin, path string) (string, bool) {
+	if key, ok := attachmentKeyMap(p.AttachmentKeys)[path]; ok && key != "" {
+		return key, true
+	}
+	return inlineStorageURI(p.Package, path)
+}
+
+// inlineStorageURI reads the pre-2.0 inline storage_uri of one storage
+// attachment from a package document. Migrated packages no longer carry it and
+// report false; it exists only as the sidecar fallback for un-migrated rows.
+func inlineStorageURI(pkg json.RawMessage, path string) (string, bool) {
 	var doc struct {
 		Attachments []struct {
 			Path        string `json:"path"`
@@ -196,7 +347,7 @@ func storageAttachmentKey(pkg json.RawMessage, path string) (string, bool) {
 		return "", false
 	}
 	for _, attachment := range doc.Attachments {
-		if attachment.Path == path && attachment.ContentType == "storage" {
+		if attachment.Path == path && attachment.ContentType == "storage" && attachment.StorageURI != "" {
 			return attachment.StorageURI, true
 		}
 	}

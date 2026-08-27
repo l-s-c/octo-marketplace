@@ -45,7 +45,7 @@ func (r *Repo) ListVersions(ctx context.Context, scope Scope, pluginID string, l
 	if limit > 100 {
 		limit = 100
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT v.version_id,v.plugin_id,v.version,v.manifest_json,v.plugin_json,v.manifest_hash,v.plugin_hash,v.relations_json,v.changelog,v.created_by,v.created_at
+	rows, err := r.db.QueryContext(ctx, `SELECT v.version_id,v.plugin_id,v.version,v.manifest_json,v.plugin_json,v.attachment_keys_json,v.manifest_hash,v.plugin_hash,v.relations_json,v.changelog,v.created_by,v.created_at
 FROM plugin_versions v JOIN plugins p ON p.plugin_id=v.plugin_id WHERE v.plugin_id=? AND p.status=1 AND p.deleted_at IS NULL AND `+visibilitySQL+` ORDER BY v.created_at DESC,v.version_id DESC LIMIT ? OFFSET ?`, pluginID, scope.SpaceID, scope.CallerUID, limit, max(offset, 0))
 	if err != nil {
 		return nil, 0, err
@@ -154,13 +154,14 @@ func (r *Repo) visibleTargetIDs(ctx context.Context, scope Scope, ids map[string
 
 func scanPluginVersion(s interface{ Scan(...any) error }) (*model.PluginVersion, error) {
 	var v model.PluginVersion
-	var manifest, pkg, rels []byte
+	var manifest, pkg, attachKeys, rels []byte
 	var changelog sql.NullString
-	if err := s.Scan(&v.ID, &v.PluginID, &v.Version, &manifest, &pkg, &v.ManifestHash, &v.PluginHash, &rels, &changelog, &v.CreatedBy, &v.CreatedAt); err != nil {
+	if err := s.Scan(&v.ID, &v.PluginID, &v.Version, &manifest, &pkg, &attachKeys, &v.ManifestHash, &v.PluginHash, &rels, &changelog, &v.CreatedBy, &v.CreatedAt); err != nil {
 		return nil, err
 	}
 	v.Manifest = cloneJSON(manifest)
 	v.Package = cloneJSON(pkg)
+	v.AttachmentKeys = cloneJSON(attachKeys)
 	v.Relations = cloneJSON(rels)
 	v.Changelog = nullString(changelog)
 	return &v, nil
@@ -200,8 +201,8 @@ func (r *Repo) Publish(ctx context.Context, scope Scope, p PublishParams) (*mode
 		return nil, err
 	}
 	now := r.now()
-	version := &model.PluginVersion{ID: r.id(), PluginID: p.PluginID, PluginType: current.Type, Version: p.Version, Manifest: cloneJSON(current.Manifest), Package: cloneJSON(current.Package), ManifestHash: current.ManifestHash, PluginHash: current.PluginHash, Relations: cloneJSON(relationJSON), Changelog: p.Changelog, CreatedBy: p.CreatedBy, CreatedAt: now}
-	_, err = tx.ExecContext(ctx, `INSERT INTO plugin_versions (version_id,plugin_id,version,manifest_json,plugin_json,manifest_hash,plugin_hash,relations_json,changelog,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, version.ID, version.PluginID, version.Version, string(version.Manifest), string(version.Package), version.ManifestHash, version.PluginHash, string(version.Relations), version.Changelog, version.CreatedBy, version.CreatedAt)
+	version := &model.PluginVersion{ID: r.id(), PluginID: p.PluginID, PluginType: current.Type, Version: p.Version, Manifest: cloneJSON(current.Manifest), Package: cloneJSON(current.Package), AttachmentKeys: cloneJSON(current.AttachmentKeys), ManifestHash: current.ManifestHash, PluginHash: current.PluginHash, Relations: cloneJSON(relationJSON), Changelog: p.Changelog, CreatedBy: p.CreatedBy, CreatedAt: now}
+	_, err = tx.ExecContext(ctx, `INSERT INTO plugin_versions (version_id,plugin_id,version,manifest_json,plugin_json,attachment_keys_json,manifest_hash,plugin_hash,relations_json,changelog,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, version.ID, version.PluginID, version.Version, string(version.Manifest), string(version.Package), jsonColumn(version.AttachmentKeys), version.ManifestHash, version.PluginHash, string(version.Relations), version.Changelog, version.CreatedBy, version.CreatedAt)
 	if err != nil {
 		var me *mysql.MySQLError
 		if errors.As(err, &me) && me.Number == 1062 {

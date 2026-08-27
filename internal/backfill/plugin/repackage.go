@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
+	libplugin "github.com/Mininglamp-OSS/octo-plugin-lib/plugin"
 )
 
 const (
@@ -170,7 +170,7 @@ func (r *Runner) repackagePlugins(ctx context.Context, p *repackagePlan) error {
 		if err := rows.Scan(&id, &typ, &manifest, &pkg, &oldHash); err != nil {
 			return err
 		}
-		newPkg, changed, err := transformPackage(pkg, typ, manifest)
+		newPkg, newKeys, changed, err := transformPackage(pkg, typ, manifest)
 		if err != nil {
 			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugins", id, err.Error()})
 			continue
@@ -189,12 +189,21 @@ func (r *Runner) repackagePlugins(ctx context.Context, p *repackagePlan) error {
 		if !changed && newHash == oldHash {
 			continue
 		}
-		p.actions = append(p.actions, repackageAction{
+		// Only touch attachment_keys_json when this pass actually split storage
+		// keys out of the package (an un-migrated row): rows already migrated by
+		// the expand phase carry no inline storage_uri, so newKeys is nil and their
+		// existing sidecar must be preserved rather than overwritten with NULL.
+		action := repackageAction{
 			count: func(c *RepackageCounts) *int { return &c.Plugins },
 			query: `UPDATE plugins SET plugin_json=?, plugin_hash=? WHERE plugin_id=? AND plugin_hash=?`,
 			args:  []any{string(newPkg), newHash, id, oldHash},
 			guard: true,
-		})
+		}
+		if newKeys != nil {
+			action.query = `UPDATE plugins SET plugin_json=?, attachment_keys_json=?, plugin_hash=? WHERE plugin_id=? AND plugin_hash=?`
+			action.args = []any{string(newPkg), string(newKeys), newHash, id, oldHash}
+		}
+		p.actions = append(p.actions, action)
 	}
 	return rows.Err()
 }
@@ -216,7 +225,7 @@ func (r *Runner) repackageVersions(ctx context.Context, types map[string]string,
 			p.issues = append(p.issues, Issue{"info", "orphan_version", "plugin_versions", id, "no plugin row; snapshot left untouched"})
 			continue
 		}
-		newPkg, changed, err := transformPackage(pkg, typ, manifest)
+		newPkg, newKeys, changed, err := transformPackage(pkg, typ, manifest)
 		if err != nil {
 			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_versions", id, err.Error()})
 			continue
@@ -240,12 +249,19 @@ func (r *Runner) repackageVersions(ctx context.Context, types map[string]string,
 		if !changed && !relationsChanged && newHash == oldHash {
 			continue
 		}
-		p.actions = append(p.actions, repackageAction{
+		// See repackagePlugins: only set attachment_keys_json when this pass split
+		// storage keys out (un-migrated snapshot); otherwise leave it untouched.
+		action := repackageAction{
 			count: func(c *RepackageCounts) *int { return &c.Versions },
 			query: `UPDATE plugin_versions SET plugin_json=?, relations_json=?, plugin_hash=? WHERE version_id=? AND plugin_hash=?`,
 			args:  []any{string(newPkg), string(newRelations), newHash, id, oldHash},
 			guard: true,
-		})
+		}
+		if newKeys != nil {
+			action.query = `UPDATE plugin_versions SET plugin_json=?, attachment_keys_json=?, relations_json=?, plugin_hash=? WHERE version_id=? AND plugin_hash=?`
+			action.args = []any{string(newPkg), string(newKeys), string(newRelations), newHash, id, oldHash}
+		}
+		p.actions = append(p.actions, action)
 	}
 	return rows.Err()
 }
@@ -281,7 +297,7 @@ func (r *Runner) repackageAudits(ctx context.Context, types map[string]string, p
 		}
 		newPkg, changed := pkg, false
 		if len(pkg) > 0 {
-			transformed, didChange, err := transformPackage(pkg, typ, manifest)
+			transformed, _, didChange, err := transformPackage(pkg, typ, manifest)
 			if err != nil {
 				p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_audit_logs", id, err.Error()})
 				lastHash[pluginID] = oldAfter
@@ -466,15 +482,15 @@ func decodablePackage(pkg []byte, pluginType string) error {
 	return err
 }
 
-func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, bool, error) {
+func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, []byte, bool, error) {
 	if len(strings.TrimSpace(string(raw))) == 0 {
-		return raw, false, nil
+		return raw, nil, false, nil
 	}
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.UseNumber()
 	var doc map[string]any
 	if err := dec.Decode(&doc); err != nil {
-		return nil, false, fmt.Errorf("invalid package JSON: %w", err)
+		return nil, nil, false, fmt.Errorf("invalid package JSON: %w", err)
 	}
 	attachments, _ := doc["attachments"].([]any)
 	changed := false
@@ -496,8 +512,6 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 				"content_type": "raw",
 				"mime_type":    "text/markdown",
 				"raw_content":  content,
-				"content_size": json.Number(fmt.Sprintf("%d", len(content))),
-				"content_hash": hashJSON([]byte(content)),
 			})
 			doc["attachments"] = attachments
 			changed = true
@@ -513,8 +527,6 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 				"content_type": "raw",
 				"mime_type":    "text/markdown",
 				"raw_content":  content,
-				"content_size": json.Number(fmt.Sprintf("%d", len(content))),
-				"content_hash": hashJSON([]byte(content)),
 			})
 			doc["attachments"] = attachments
 			changed = true
@@ -531,8 +543,6 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 				"content_type": "raw",
 				"mime_type":    "text/markdown",
 				"raw_content":  content,
-				"content_size": json.Number(fmt.Sprintf("%d", len(content))),
-				"content_hash": hashJSON([]byte(content)),
 			}
 			if existing := attachmentIndex(attachments, "AGENTS.md"); existing >= 0 {
 				attachments[existing] = entry
@@ -557,29 +567,65 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 				Transport string          `json:"transport"`
 			}
 			if err := json.Unmarshal([]byte(content), &wrapper); err != nil {
-				return nil, false, fmt.Errorf("invalid connector/config.json: %w", err)
+				return nil, nil, false, fmt.Errorf("invalid connector/config.json: %w", err)
 			}
 			mcpDocument, err := connectorMCPDocument(wrapper.Config, wrapper.Transport, meta.name)
 			if err != nil {
-				return nil, false, err
+				return nil, nil, false, err
 			}
 			mcpRaw, err := json.Marshal(mcpDocument)
 			if err != nil {
-				return nil, false, err
+				return nil, nil, false, err
 			}
 			attachments[idx] = map[string]any{
 				"path":         "mcp.json",
 				"content_type": "raw",
 				"mime_type":    "application/json",
 				"raw_content":  string(mcpRaw),
-				"content_size": json.Number(fmt.Sprintf("%d", len(mcpRaw))),
-				"content_hash": hashJSON(mcpRaw),
 			}
 			changed = true
 		}
 	}
+	// Normalize legacy 1.0 shapes to the 2.0 contract the linked lib enforces:
+	// raw attachments must NOT carry a derived content_size/content_hash, and a
+	// storage attachment must NOT carry a host storage_uri (DecodePackage 2.0
+	// rejects unknown fields) — its object key is split into the returned sidecar
+	// so the row's attachment_keys_json can be populated. The $schema id advances
+	// to the 2.0 generation. This runs BEFORE the no-op short-circuit so a row that
+	// needs only normalization (raw size/hash or a storage_uri split, no rename)
+	// is still migrated.
+	keys := map[string]string{}
+	for _, a := range attachments {
+		m, ok := a.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch ct, _ := m["content_type"].(string); ct {
+		case "raw":
+			if _, had := m["content_size"]; had {
+				delete(m, "content_size")
+				changed = true
+			}
+			if _, had := m["content_hash"]; had {
+				delete(m, "content_hash")
+				changed = true
+			}
+		case "storage":
+			if uri, _ := m["storage_uri"].(string); uri != "" {
+				if path, _ := m["path"].(string); path != "" {
+					keys[path] = uri
+				}
+				delete(m, "storage_uri")
+				changed = true
+			}
+		}
+	}
+	if s, _ := doc["$schema"].(string); s != "" && s != "cowork-plugin-package-2.0.json" {
+		doc["$schema"] = "cowork-plugin-package-2.0.json"
+		changed = true
+	}
 	if !changed {
-		return raw, false, nil
+		return raw, nil, false, nil
 	}
 	sort.SliceStable(attachments, func(i, j int) bool {
 		left, _ := attachments[i].(map[string]any)
@@ -589,15 +635,23 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 		return lp < rp
 	})
 	doc["attachments"] = attachments
+	var keysJSON []byte
+	if len(keys) > 0 {
+		marshaledKeys, err := json.Marshal(keys)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		keysJSON = marshaledKeys
+	}
 	marshaled, err := json.Marshal(doc)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	out, err := libplugin.CanonicalJSON(marshaled)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
-	return out, true, nil
+	return out, keysJSON, true, nil
 }
 
 // renameAttachment updates the path (content bytes and hash metadata stay). It

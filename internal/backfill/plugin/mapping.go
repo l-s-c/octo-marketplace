@@ -62,8 +62,8 @@ type pluginManifest struct {
 }
 
 type packageAttachment struct {
-	ContentHash string `json:"content_hash"`
-	ContentSize int    `json:"content_size"`
+	ContentHash string `json:"content_hash,omitempty"`
+	ContentSize *int   `json:"content_size,omitempty"`
 	ContentType string `json:"content_type"`
 	MIMEType    string `json:"mime_type"`
 	Path        string `json:"path"`
@@ -100,7 +100,7 @@ func newPluginManifest(pluginName, pluginType, name, description string, labels,
 		})
 	}
 	return pluginManifest{
-		Schema:      "cowork-plugin-manifest-1.0.json",
+		Schema:      "cowork-plugin-manifest-2.0.json",
 		PluginName:  pluginName,
 		PluginType:  pluginType,
 		Name:        name,
@@ -120,14 +120,11 @@ func connectorPackageJSON(connector *packageConnector, extras ...rawAttachment) 
 		if !validAttachmentPath(attachmentPath) {
 			return fmt.Errorf("invalid package attachment path %q", attachmentPath)
 		}
-		raw := []byte(content)
 		attachments = append(attachments, packageAttachment{
 			Path:        attachmentPath,
 			ContentType: "raw",
 			MIMEType:    mimeType,
 			RawContent:  content,
-			ContentSize: len(raw),
-			ContentHash: hashJSON(raw),
 		})
 		return nil
 	}
@@ -147,7 +144,7 @@ func connectorPackageJSON(connector *packageConnector, extras ...rawAttachment) 
 			return nil, fmt.Errorf("conflicting package attachment path %q", attachment.Path)
 		}
 	}
-	return canonical(pluginPackage{Schema: "cowork-plugin-package-1.0.json", Attachments: unique, Connector: connector})
+	return canonical(pluginPackage{Schema: "cowork-plugin-package-2.0.json", Attachments: unique, Connector: connector})
 }
 
 func validAttachmentPath(value string) bool {

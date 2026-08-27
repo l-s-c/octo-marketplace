@@ -11,8 +11,8 @@ import (
 var adminCaller = Caller{UID: "admin-1", Name: "Root", RequestID: "req-admin"}
 
 func adminSkillRequest() WriteRequest {
-	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"Ops Skill","plugin_type":"skill","name":"ops-skill","description":"An ops skill.","labels":[],"examples":[]}`)
-	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# Ops Skill"}]}`)
+	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"Ops Skill","plugin_type":"skill","name":"ops-skill","description":"An ops skill.","labels":[],"examples":[]}`)
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# Ops Skill"}]}`)
 	return WriteRequest{Name: "Ops Skill", Type: model.PluginTypeSkill, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`[]`), Manifest: manifest, Package: pkg}
 }
 
@@ -206,8 +206,8 @@ func TestAdminUpdateResolvesRelationTargetsUnderAdminScope(t *testing.T) {
 		plugins:    map[string]*model.Plugin{"expert-1": expert, "skill-1": skill},
 		relations:  map[string][]model.PluginRelation{"expert-1": {{ID: "r1", SourcePluginID: "expert-1", TargetPluginID: "skill-1", Type: "expert_skill", Status: 1}}},
 	}
-	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"E","plugin_type":"expert","name":"e","description":"d","labels":[],"examples":[]}`)
-	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[{"path":"AGENTS.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# doc"}]}`)
+	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"E","plugin_type":"expert","name":"e","description":"d","labels":[],"examples":[]}`)
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[{"path":"AGENTS.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# doc"}]}`)
 	req := WriteRequest{
 		Name:       "E",
 		Type:       model.PluginTypeExpert,
@@ -236,10 +236,10 @@ func TestAdminUpdateAcceptsStorageAttachmentUnderRowSpace(t *testing.T) {
 	tenantSpace := "tenant-space"
 	existing := &model.Plugin{ID: "skill-1", Name: "Tenant Skill", Type: model.PluginTypeSkill, OwnerUID: "tenant-user", SpaceID: &tenantSpace, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
 	f := &fakeStore{plugins: map[string]*model.Plugin{"skill-1": existing}}
-	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"Tenant Skill","plugin_type":"skill","name":"tenant-skill","description":"d","labels":[],"examples":[]}`)
-	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"Tenant Skill","plugin_type":"skill","name":"tenant-skill","description":"d","labels":[],"examples":[]}`)
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
 		`{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# Tenant Skill"},` +
-		`{"path":"assets/logo.bin","content_type":"storage","mime_type":"application/octet-stream","storage_uri":"plugins/tenant-space/attachments/skill-skill-1-deadbeefdeadbeef.bin"}` +
+		`{"path":"assets/logo.bin","content_type":"storage","mime_type":"application/octet-stream","content_size":10,"content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","storage_uri":"plugins/tenant-space/attachments/skill-skill-1-deadbeefdeadbeef.bin"}` +
 		`]}`)
 	req := WriteRequest{Name: "Tenant Skill", Type: model.PluginTypeSkill, Tags: json.RawMessage(`[]`), Manifest: manifest, Package: pkg}
 	if _, err := fixedService(f).AdminUpdate(context.Background(), adminCaller, "skill-1", req); err != nil {

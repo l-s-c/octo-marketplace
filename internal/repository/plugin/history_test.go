@@ -25,7 +25,7 @@ func TestListVersionsReturnsExactScopedTotalForEmptyPage(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(42))
 	mock.ExpectQuery(`SELECT v.version_id.*WHERE v.plugin_id=\? AND p.status=1.*p.space_id = \?.*p.owner_uid = \?.*LIMIT \? OFFSET \?`).
 		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID, 20, 40).
-		WillReturnRows(sqlmock.NewRows([]string{"version_id", "plugin_id", "version", "manifest_json", "plugin_json", "manifest_hash", "plugin_hash", "relations_json", "changelog", "created_by", "created_at"}))
+		WillReturnRows(sqlmock.NewRows([]string{"version_id", "plugin_id", "version", "manifest_json", "plugin_json", "attachment_keys_json", "manifest_hash", "plugin_hash", "relations_json", "changelog", "created_by", "created_at"}))
 
 	items, total, err := r.ListVersions(context.Background(), scope, "plugin-id", 20, 40)
 	if err != nil || len(items) != 0 || total != 42 {
@@ -53,8 +53,8 @@ func TestListVersionsRedactsCrossSpaceRelationTargets(t *testing.T) {
 	relJSON := `[{"target_plugin_id":"vis-target","relation_type":"expert_skill"},{"target_plugin_id":"priv-target","relation_type":"expert_skill","data":{"secret":"x"}}]`
 	mock.ExpectQuery(`SELECT v.version_id.*WHERE v.plugin_id=\? AND p.status=1.*p.space_id = \?.*p.owner_uid = \?.*LIMIT \? OFFSET \?`).
 		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID, 20, 0).
-		WillReturnRows(sqlmock.NewRows([]string{"version_id", "plugin_id", "version", "manifest_json", "plugin_json", "manifest_hash", "plugin_hash", "relations_json", "changelog", "created_by", "created_at"}).
-			AddRow("v1", "plugin-id", "1.0.0", "{}", "{}", "mh", "ph", relJSON, nil, "creator", now))
+		WillReturnRows(sqlmock.NewRows([]string{"version_id", "plugin_id", "version", "manifest_json", "plugin_json", "attachment_keys_json", "manifest_hash", "plugin_hash", "relations_json", "changelog", "created_by", "created_at"}).
+			AddRow("v1", "plugin-id", "1.0.0", "{}", "{}", nil, "mh", "ph", relJSON, nil, "creator", now))
 	// The visibility re-check returns only the visible target (args order is
 	// map-iteration dependent, so match the query shape, not the args). The
 	// aliased `plugins p` table is load-bearing: visibilitySQL references p.*,
@@ -120,7 +120,7 @@ func TestPublishSnapshotsLockedStateAndRelationsAndReturnsStoredVersion(t *testi
 		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID).
 		WillReturnRows(publishRelationRows("plugin-id", "target-id", model.PluginTypeSkill))
 	mock.ExpectExec(`INSERT INTO plugin_versions`).
-		WithArgs("version-id", "plugin-id", "1.2.3", `{"manifest":true}`, `{"package":true}`, "sha256:m", "sha256:p", sqlmock.AnyArg(), nil, "caller", now).
+		WithArgs("version-id", "plugin-id", "1.2.3", `{"manifest":true}`, `{"package":true}`, nil, "sha256:m", "sha256:p", sqlmock.AnyArg(), nil, "caller", now).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`DELETE pp FROM plugin_placements`).WithArgs("plugin-id", scope.CallerUID, scope.SpaceID).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`UPDATE plugins SET current_version_id`).WithArgs("version-id", "1.2.3", now, "plugin-id", scope.CallerUID, scope.SpaceID).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -181,12 +181,12 @@ func TestPublishLocksAndValidatesPlacementCategory(t *testing.T) {
 }
 
 func ownedPluginRow(id string, scope Scope, now time.Time) *sqlmock.Rows {
-	return sqlmock.NewRows(pluginTestColumns()).AddRow(id, "Plugin", model.PluginTypeExpert, 0, nil, []byte(`[]`), "pub", scope.CallerUID, scope.SpaceID, model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "", 0, []byte(`{"manifest":true}`), []byte(`{"package":true}`), "sha256:m", "sha256:p", nil, nil, 1, now, now, nil)
+	return sqlmock.NewRows(pluginTestColumns()).AddRow(id, "Plugin", model.PluginTypeExpert, 0, nil, []byte(`[]`), "pub", scope.CallerUID, scope.SpaceID, model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "", 0, []byte(`{"manifest":true}`), []byte(`{"package":true}`), nil, "sha256:m", "sha256:p", nil, nil, 1, now, now, nil)
 }
 
 // visiblePluginRow mirrors ownedPluginRow for the Get visibility path, which
 // additionally selects the correlated metric counters.
 func visiblePluginRow(id string, scope Scope, now time.Time) *sqlmock.Rows {
 	columns := append(pluginTestColumns(), "view_count", "install_count", "download_count")
-	return sqlmock.NewRows(columns).AddRow(id, "Plugin", model.PluginTypeExpert, 0, nil, []byte(`[]`), "pub", scope.CallerUID, scope.SpaceID, model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "", 0, []byte(`{"manifest":true}`), []byte(`{"package":true}`), "sha256:m", "sha256:p", nil, nil, 1, now, now, nil, 0, 0, 0)
+	return sqlmock.NewRows(columns).AddRow(id, "Plugin", model.PluginTypeExpert, 0, nil, []byte(`[]`), "pub", scope.CallerUID, scope.SpaceID, model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "", 0, []byte(`{"manifest":true}`), []byte(`{"package":true}`), nil, "sha256:m", "sha256:p", nil, nil, 1, now, now, nil, 0, 0, 0)
 }

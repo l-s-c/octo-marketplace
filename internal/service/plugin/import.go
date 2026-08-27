@@ -328,8 +328,11 @@ func restoreWriteRequest(old *model.Plugin, rels []model.PluginRelation) WriteRe
 		Icon:       old.Icon,
 		Visibility: visibility,
 		Manifest:   old.Manifest,
-		Package:    old.Package,
-		Relations:  relations,
+		// The stored package has had storage_uri split into old.AttachmentKeys; the
+		// write path re-splits it, so re-embed the keys first or splitStorageKeys
+		// would reject a storage attachment that now carries no inline key.
+		Package:   injectStorageKeys(old.Package, old.AttachmentKeys),
+		Relations: relations,
 	}
 }
 

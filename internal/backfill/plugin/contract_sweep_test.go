@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
+	libplugin "github.com/Mininglamp-OSS/octo-plugin-lib/plugin"
 	_ "github.com/go-sql-driver/mysql"
 )
 
