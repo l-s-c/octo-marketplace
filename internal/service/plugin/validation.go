@@ -81,15 +81,20 @@ func validVisibility(v model.PluginVisibility, systemAdmin bool) bool {
 	switch v {
 	case model.PluginVisibilitySpace, model.PluginVisibilityPrivate:
 		return true
-	case model.PluginVisibilityPublic, model.PluginVisibilitySystem:
-		// public and system are marketplace-wide: readable, listable and
-		// installable from every Space (see visibilitySQL). Only the admin
-		// surface (which sets IsSystemAdmin) may mint them; a tenant caller on
-		// /plugins/upsert cannot self-publish globally. Mirrors the legacy skill
-		// rule (internal/service/skill/service.go rejects public for non-admins)
-		// and the import path, which already forces uploads non-public.
+	case model.PluginVisibilitySystem:
+		// system is marketplace-wide: readable, listable and installable from every
+		// Space (see visibilitySQL). Only the admin surface (which sets
+		// IsSystemAdmin) may mint it; a tenant caller on /plugins/upsert cannot
+		// self-publish globally. Mirrors the legacy skill rule and the import path,
+		// which already forces uploads non-public.
 		return systemAdmin
 	default:
+		// `public` is retired on the WRITE path after unification: a fresh public
+		// row would vanish from the admin visibility=system filter, so no caller
+		// (tenant or systemAdmin) may mint one — the write enum is exactly
+		// system/space/private. The constant is kept only to READ legacy public
+		// rows; admin edits normalize a preserved public visibility to `system`
+		// (see adminEffectiveWrite).
 		return false
 	}
 }

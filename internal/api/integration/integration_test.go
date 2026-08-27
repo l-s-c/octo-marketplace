@@ -112,127 +112,6 @@ func skillListRow(id, name, ownerID, ownerName, spaceID, visibility string) *sql
 
 // --- Admin Category CRUD Tests ---
 
-func TestAdminCreateCategory(t *testing.T) {
-	engine, mock, db := testSetup(t)
-	defer db.Close()
-
-	mock.ExpectExec("INSERT INTO categories").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	w := doRequest(engine, "POST", "/api/v1/skill/admin/categories", map[string]interface{}{
-		"name":       "AI Tools",
-		"icon_key":   "robot",
-		"sort_order": 1,
-	})
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("status=%d want=%d body=%s", w.Code, http.StatusCreated, w.Body.String())
-	}
-	body := parseBody(t, w)
-	data := body["data"].(map[string]interface{})
-	if data["name"] != "AI Tools" {
-		t.Errorf("name=%v want=AI Tools", data["name"])
-	}
-}
-
-func TestAdminCreateCategoryMissingName(t *testing.T) {
-	engine, _, db := testSetup(t)
-	defer db.Close()
-
-	w := doRequest(engine, "POST", "/api/v1/skill/admin/categories", map[string]interface{}{
-		"icon_key": "robot",
-	})
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d want=%d body=%s", w.Code, http.StatusBadRequest, w.Body.String())
-	}
-}
-
-func TestAdminUpdateCategory(t *testing.T) {
-	engine, mock, db := testSetup(t)
-	defer db.Close()
-
-	mock.ExpectExec("UPDATE categories").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-
-	w := doRequest(engine, "PUT", "/api/v1/skill/admin/categories/cat-1", map[string]interface{}{
-		"name":       "Updated Name",
-		"icon_key":   "star",
-		"sort_order": 2,
-	})
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d want=%d body=%s", w.Code, http.StatusOK, w.Body.String())
-	}
-}
-
-func TestAdminUpdateCategoryNotFound(t *testing.T) {
-	engine, mock, db := testSetup(t)
-	defer db.Close()
-
-	mock.ExpectExec("UPDATE categories").
-		WillReturnResult(sqlmock.NewResult(0, 0))
-
-	w := doRequest(engine, "PUT", "/api/v1/skill/admin/categories/nonexist", map[string]interface{}{
-		"name": "Name",
-	})
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status=%d want=%d body=%s", w.Code, http.StatusNotFound, w.Body.String())
-	}
-}
-
-func TestAdminDeleteCategoryEmpty(t *testing.T) {
-	engine, mock, db := testSetup(t)
-	defer db.Close()
-
-	mock.ExpectQuery("SELECT COUNT").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectExec("UPDATE categories").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-
-	w := doRequest(engine, "DELETE", "/api/v1/skill/admin/categories/cat-1", nil)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d want=%d body=%s", w.Code, http.StatusOK, w.Body.String())
-	}
-}
-
-func TestAdminDeleteCategoryInUse(t *testing.T) {
-	engine, mock, db := testSetup(t)
-	defer db.Close()
-
-	mock.ExpectQuery("SELECT COUNT").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
-
-	w := doRequest(engine, "DELETE", "/api/v1/skill/admin/categories/cat-1", nil)
-
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status=%d want=%d body=%s", w.Code, http.StatusConflict, w.Body.String())
-	}
-	body := parseBody(t, w)
-	errorBody := body["error"].(map[string]interface{})
-	if errorBody["code"] != errcode.CategoryInUse {
-		t.Errorf("code=%v want=%v", errorBody["code"], errcode.CategoryInUse)
-	}
-}
-
-func TestAdminDeleteCategoryNotFound(t *testing.T) {
-	engine, mock, db := testSetup(t)
-	defer db.Close()
-
-	mock.ExpectQuery("SELECT COUNT").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectExec("UPDATE categories").
-		WillReturnResult(sqlmock.NewResult(0, 0))
-
-	w := doRequest(engine, "DELETE", "/api/v1/skill/admin/categories/nonexist", nil)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status=%d want=%d body=%s", w.Code, http.StatusNotFound, w.Body.String())
-	}
-}
-
 // --- Skill Visibility Tests ---
 
 func TestGetSkillVisibilityPublicSameSpace(t *testing.T) {
@@ -802,82 +681,6 @@ func (stubSuperAdminResolver) Resolve(_ context.Context, token string) (model.Id
 	}, nil
 }
 
-func TestAdminCreateCategoryAcceptsSuperAdminToken(t *testing.T) {
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	pubAuth := marketmiddleware.NewAuthenticator(false, nil, model.Identity{
-		UID:  "user-1",
-		Name: "Alice",
-		Role: "member",
-	}, "space-1")
-	storageCfg := router.StorageConfig{
-		Driver:   "local",
-		LocalDir: t.TempDir(),
-		BaseURL:  "http://localhost:8092",
-		MaxMB:    20,
-	}
-	var adminResolver auth.Resolver = stubSuperAdminResolver{}
-	engine := router.PublicWithDBAndAdminAuth(db, pubAuth, storageCfg, true, adminResolver)
-
-	mock.ExpectExec("INSERT INTO categories").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	w := doRequestWithHeaders(engine, "POST", "/api/v1/skill/admin/categories", map[string]interface{}{
-		"name":       "Test",
-		"icon_key":   "star",
-		"sort_order": 1,
-	}, map[string]string{"Token": "super-admin-session"})
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("status=%d want=%d body=%s", w.Code, http.StatusCreated, w.Body.String())
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestAdminCreateCategoryMissingTokenUnauthorized(t *testing.T) {
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	_ = mock
-
-	pubAuth := marketmiddleware.NewAuthenticator(false, nil, model.Identity{
-		UID:  "admin-1",
-		Name: "Admin",
-		Role: "admin",
-	}, "space-1")
-	storageCfg := router.StorageConfig{
-		Driver:   "local",
-		LocalDir: t.TempDir(),
-		BaseURL:  "http://localhost:8092",
-		MaxMB:    20,
-	}
-	var adminResolver auth.Resolver = stubSuperAdminResolver{}
-	engine := router.PublicWithDBAndAdminAuth(db, pubAuth, storageCfg, true, adminResolver)
-
-	w := doRequest(engine, "POST", "/api/v1/skill/admin/categories", map[string]interface{}{
-		"name":       "Admin Category",
-		"icon_key":   "shield",
-		"sort_order": 1,
-	})
-
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("status=%d want=%d body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
-	}
-	body := parseBody(t, w)
-	errorBody := body["error"].(map[string]interface{})
-	if errorBody["code"] != errcode.Unauthorized {
-		t.Errorf("code=%v want=%v", errorBody["code"], errcode.Unauthorized)
-	}
-}
-
 // --- Expert admin surface: mount + role gate ---
 
 // stubMemberResolver returns a fixed non-SuperAdmin identity for any non-empty
@@ -916,47 +719,6 @@ func expertAdminEngine(t *testing.T, resolver auth.Resolver) (*gin.Engine, sqlmo
 		MaxMB:    20,
 	}
 	return router.PublicWithDBAndAdminAuth(db, pubAuth, storageCfg, true, resolver), mock
-}
-
-func TestExpertAdminMountAcceptsSuperAdmin(t *testing.T) {
-	engine, mock := expertAdminEngine(t, stubSuperAdminResolver{})
-
-	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM experts").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
-	mock.ExpectQuery("SELECT .* FROM experts").
-		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "short_name", "name", "summary", "category_id", "tags", "publisher",
-			"owner_uid", "creator_name", "created_by_type", "created_by_bot_uid", "created_by_bot_name",
-			"space_id", "visibility", "instruction", "mcp_config", "skills_json", "created_at", "updated_at", "deleted_at",
-		}))
-
-	w := doRequestWithHeaders(engine, "GET", "/api/v1/admin/experts", nil,
-		map[string]string{"Token": "super-admin-session"})
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d want=%d body=%s", w.Code, http.StatusOK, w.Body.String())
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestExpertAdminMountRejectsPlainMember(t *testing.T) {
-	engine, _ := expertAdminEngine(t, stubMemberResolver{})
-
-	w := doRequestWithHeaders(engine, "GET", "/api/v1/admin/experts", nil,
-		map[string]string{"Token": "member-session"})
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("status=%d want=%d body=%s", w.Code, http.StatusForbidden, w.Body.String())
-	}
-}
-
-func TestExpertAdminMountMissingTokenUnauthorized(t *testing.T) {
-	engine, _ := expertAdminEngine(t, stubSuperAdminResolver{})
-
-	w := doRequest(engine, "GET", "/api/v1/admin/experts", nil)
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("status=%d want=%d body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
-	}
 }
 
 // Unused but needed by compiler if tests reference it
@@ -1013,47 +775,6 @@ func (stubMarketAdminResolver) Resolve(_ context.Context, token string) (model.I
 	}, nil
 }
 
-// TestExpertAdminMountAdmitsMarketAdmin pins the Expert Market half of the role.
-// marketAdmin runs the whole platform market, so these groups admit it — the
-// same assertion shape as the catalog groups, including the explicit 404
-// rejection so an unregistered route cannot pass the case vacuously.
-func TestExpertAdminMountAdmitsMarketAdmin(t *testing.T) {
-	for _, path := range []string{
-		"/api/v1/admin/experts",
-		"/api/v1/admin/squads",
-		"/api/v1/admin/expert_categories",
-		"/api/v1/admin/expert_tags",
-	} {
-		t.Run(path, func(t *testing.T) {
-			engine, _ := expertAdminEngine(t, stubMarketAdminResolver{})
-			w := doRequestWithHeaders(engine, "GET", path, nil,
-				map[string]string{"Token": "market-admin-session"})
-			requireGatePassed(t, w, path)
-		})
-	}
-}
-
-// TestExpertAdminMountAdmitsMarketAdminOnWrites covers the mutating verbs too,
-// so a gate can't be correct on GET while a POST group was missed.
-func TestExpertAdminMountAdmitsMarketAdminOnWrites(t *testing.T) {
-	for _, tc := range []struct {
-		method string
-		path   string
-	}{
-		{method: "POST", path: "/api/v1/admin/experts"},
-		{method: "POST", path: "/api/v1/admin/squads"},
-		{method: "POST", path: "/api/v1/admin/expert_categories"},
-		{method: "POST", path: "/api/v1/admin/expert_skill_uploads"},
-	} {
-		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
-			engine, _ := expertAdminEngine(t, stubMarketAdminResolver{})
-			w := doRequestWithHeaders(engine, tc.method, tc.path, nil,
-				map[string]string{"Token": "market-admin-session"})
-			requireGatePassed(t, w, tc.method+" "+tc.path)
-		})
-	}
-}
-
 // TestCatalogAdminMountAdmitsMarketAdmin is the other half: every catalog group
 // must let the role through the gate, so that dropping RoleMarketAdmin from any
 // one registration fails CI rather than silently breaking curators.
@@ -1073,9 +794,7 @@ func TestCatalogAdminMountAdmitsMarketAdmin(t *testing.T) {
 		method string
 		path   string
 	}{
-		{method: "GET", path: "/api/v1/admin/skill_categories"},
-		{method: "GET", path: "/api/v1/skill/admin/categories"},
-		{method: "GET", path: "/api/v1/admin/skills"},
+		{method: "GET", path: "/api/v1/admin/skills/sk-1/skill_md"},
 		{method: "POST", path: "/api/v1/admin/skill_uploads"},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
@@ -1091,29 +810,22 @@ func TestCatalogAdminMountAdmitsMarketAdmin(t *testing.T) {
 // now that every /api/v1/admin/* group admits marketAdmin: widening must not
 // admit everyone.
 //
-// One case per independently mis-wireable Handler() call site that this harness
-// mounts, since each carries its own gate instance and can be broken on its own:
-// category/admin.go:16 and :22, skill/admin.go:16, upload/handler.go:93, and
-// expert/admin.go:37, :45 and :56. Note skill_uploads and skills live on
-// *different* groups despite the shared prefix, and expert_categories is a third
-// group again — covering one does not cover the others.
+// After octo-admin migrated to the unified /api/v1/admin/plugins* surface, the
+// legacy per-type admin groups (skill_categories, skills CRUD, experts, squads,
+// expert_categories/tags/uploads) were removed; the still-live admin routes this
+// harness mounts are skill/admin.go (skill_md) and upload/handler.go
+// (skill_uploads), each carrying its own gate instance.
 //
-// The MCP groups (router.go:243 and :252) are not reachable here:
-// PublicWithDBAndAdminAuth passes a nil AdminMCP, so registerAdminMCP returns
-// before mounting them. Their deny direction is covered in internal/api/router
-// (TestAdminRejectsNonSuperAdminInProd).
+// The MCP groups are not reachable here: PublicWithDBAndAdminAuth passes a nil
+// AdminMCP, so registerAdminMCP returns before mounting them. Their deny
+// direction is covered in internal/api/router (TestAdminRejectsNonSuperAdminInProd).
 func TestAdminMountStillRejectsPlainMember(t *testing.T) {
 	for _, tc := range []struct {
 		method string
 		path   string
 	}{
-		{method: "GET", path: "/api/v1/admin/skill_categories"},
-		{method: "GET", path: "/api/v1/skill/admin/categories"},
-		{method: "GET", path: "/api/v1/admin/skills"},
+		{method: "GET", path: "/api/v1/admin/skills/sk-1/skill_md"},
 		{method: "POST", path: "/api/v1/admin/skill_uploads"},
-		{method: "GET", path: "/api/v1/admin/experts"},
-		{method: "GET", path: "/api/v1/admin/squads"},
-		{method: "GET", path: "/api/v1/admin/expert_categories"},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			engine, _ := expertAdminEngine(t, stubMemberResolver{})

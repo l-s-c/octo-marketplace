@@ -255,6 +255,57 @@ func ExtractSkillTree(ra io.ReaderAt, size, maxZipSize, maxFileSize int64, maxFi
 	return entries, "", ""
 }
 
+// ExtractArchive reads every regular-file entry of an in-memory zip into a
+// path->bytes map, applying the same zip-slip/symlink guards and per-entry /
+// total size caps as ExtractSkillTree but WITHOUT the single-SKILL.md rule. It
+// backs the expert/expert_team container import, whose archive holds a root
+// manifest (expert.json/squad.json) plus bundled skill packages rather than a
+// single skill. Exceeding maxFileSize, maxTotal, or maxFiles is a hard error so
+// no entry is silently dropped. Directories are excluded; entry paths are
+// returned verbatim. A duplicate path is a hard error (a container must not ship
+// two files at one path).
+func ExtractArchive(ra io.ReaderAt, size, maxTotal, maxFileSize int64, maxFiles int) (map[string][]byte, string, string) {
+	if size > maxTotal {
+		return nil, "FILE_TOO_LARGE", fmt.Sprintf("archive exceeds %dMB limit", maxTotal/(1024*1024))
+	}
+	zr, err := zip.NewReader(ra, size)
+	if err != nil {
+		return nil, "INVALID_ZIP", "cannot open zip file: " + err.Error()
+	}
+	if maxFiles <= 0 {
+		maxFiles = maxManifestFiles
+	}
+	out := make(map[string][]byte)
+	var actualSize int64
+	for _, f := range zr.File {
+		if errCode, errMsg := validateZipEntry(f); errCode != "" {
+			return nil, errCode, errMsg
+		}
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		if len(out) >= maxFiles {
+			return nil, "TOO_MANY_FILES", fmt.Sprintf("archive exceeds %d files", maxFiles)
+		}
+		if int64(f.UncompressedSize64) > maxFileSize {
+			return nil, "FILE_TOO_LARGE", fmt.Sprintf("entry %s exceeds %dMB limit", f.Name, maxFileSize/(1024*1024))
+		}
+		if _, dup := out[f.Name]; dup {
+			return nil, "DUPLICATE_ENTRY", "duplicate archive entry: " + f.Name
+		}
+		data, err := readZipFileLimited(f, maxFileSize)
+		if err != nil {
+			return nil, "INVALID_ZIP", "cannot read entry " + f.Name + ": " + err.Error()
+		}
+		actualSize += int64(len(data))
+		if actualSize > maxTotal {
+			return nil, "FILE_TOO_LARGE", fmt.Sprintf("extracted content exceeds %dMB limit", maxTotal/(1024*1024))
+		}
+		out[f.Name] = data
+	}
+	return out, "", ""
+}
+
 // IsSkillMDCandidate reports whether an entry path is the package's SKILL.md
 // (root or exactly one directory deep). Exported for callers that reconstruct
 // the attachment tree and must root it at the SKILL.md directory.

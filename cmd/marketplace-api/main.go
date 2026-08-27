@@ -47,6 +47,8 @@ import (
 // @tag.description MCP server catalog
 // @tag.name plugin
 // @tag.description Unified Plugin catalog, versions, audit history, categories, and Connector probes
+// @tag.name admin_plugin
+// @tag.description Administrative unified Plugin catalog — cross-Space system connectors, global skills/experts, and categories
 // @tag.name admin_mcp
 // @tag.description Administrative MCP catalog
 // @tag.name session
@@ -57,8 +59,6 @@ import (
 // @tag.description Expert catalog — single experts (专家) and tag suggestions
 // @tag.name expert_squad
 // @tag.description Expert squad catalog — expert teams (专家团)
-// @tag.name admin_expert
-// @tag.description Administrative Expert catalog — system experts, squads, categories, tags
 // @securityDefinitions.bearerauth Bearer
 
 // @securityDefinitions.apikey AdminToken

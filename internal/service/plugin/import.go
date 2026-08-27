@@ -89,7 +89,10 @@ func (s *Service) Import(ctx context.Context, caller Caller, p ImportParams) (*D
 		if err != nil {
 			return nil, mapStoreError(err)
 		}
-		if old.OwnerUID != caller.UID || old.Type != model.PluginTypeSkill {
+		// A bundled skill / squad member (is_embedded=1) is owned by its container
+		// graph and must be swapped only through a container reupload — a standalone
+		// skill re-import must not content-edit it out of band, matching AdminUpdate.
+		if old.OwnerUID != caller.UID || old.Type != model.PluginTypeSkill || old.IsEmbedded {
 			return nil, ErrNotFound
 		}
 		oldPlugin, oldRels = old, rels
@@ -194,38 +197,8 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 	if updateID != "" && f.icon == "" && oldPlugin != nil {
 		f.icon = oldPlugin.Icon
 	}
-	zipData, err := s.readVerifiedUpload(ctx, task)
+	req, pluginID, uploaded, err := s.buildImportedSkillWrite(ctx, caller.SpaceID, updateID, task, f, true)
 	if err != nil {
-		return nil, err
-	}
-	pluginID := updateID
-	if pluginID == "" {
-		pluginID = s.id()
-	}
-	rewritten, err := skillsvc.RewriteZipPackage(bytes.NewReader(zipData), int64(len(zipData)), skillsvc.RewriteParams{
-		Name:        f.name,
-		Desc:        f.description,
-		Version:     f.version,
-		Tags:        f.tags,
-		ID:          pluginID,
-		RawMetadata: decodeMetadata(task.ResultMetadata),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("rewrite skill package: %w", err)
-	}
-	if !safeObjectSegment.MatchString(caller.SpaceID) {
-		return nil, ErrInvalidRequest
-	}
-	// Expand the rewritten package into a flat attachment tree: text inline as
-	// raw, binary/oversize spilled to the managed prefix under deterministic
-	// keys. The rewritten SKILL.md (frontmatter injected) is the entry document.
-	attachments, uploaded, _, err := s.buildSkillAttachmentTree(ctx, caller.SpaceID, pluginID, rewritten.ZipBytes, rewritten.SkillMD)
-	if err != nil {
-		return nil, err
-	}
-	req, err := buildImportWriteRequest(f, attachments)
-	if err != nil {
-		s.deleteObjects(ctx, uploaded...)
 		return nil, err
 	}
 	var detail *Detail
@@ -278,6 +251,54 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 		return nil, err
 	}
 	return detail, nil
+}
+
+// buildImportedSkillWrite verifies the uploaded skill zip, reserves the plugin
+// ID (reservedID for a reupload, freshly minted otherwise), rewrites the package
+// under that ID, expands it into the flat attachment tree namespaced under
+// objectSpace, and assembles the skill WriteRequest. It returns the reserved
+// pluginID — baked into the shipped SKILL.md frontmatter and the spilled object
+// keys, so the persisted row must carry the same one — plus the newly-uploaded
+// object keys for rollback. Shared by the tenant Import and the admin skill
+// import: requireSafeSpace enforces a valid managed-prefix Space up front (tenant
+// callers always carry one), while the admin global-Space import passes false and
+// relies on buildSkillAttachmentTree to reject only a binary that must spill.
+func (s *Service) buildImportedSkillWrite(ctx context.Context, objectSpace, reservedID string, task *skillrepo.ParseTaskRow, f *importFields, requireSafeSpace bool) (*WriteRequest, string, []string, error) {
+	zipData, err := s.readVerifiedUpload(ctx, task)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	pluginID := reservedID
+	if pluginID == "" {
+		pluginID = s.id()
+	}
+	rewritten, err := skillsvc.RewriteZipPackage(bytes.NewReader(zipData), int64(len(zipData)), skillsvc.RewriteParams{
+		Name:        f.name,
+		Desc:        f.description,
+		Version:     f.version,
+		Tags:        f.tags,
+		ID:          pluginID,
+		RawMetadata: decodeMetadata(task.ResultMetadata),
+	})
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("rewrite skill package: %w", err)
+	}
+	if requireSafeSpace && !safeObjectSegment.MatchString(objectSpace) {
+		return nil, "", nil, ErrInvalidRequest
+	}
+	// Expand the rewritten package into a flat attachment tree: text inline as
+	// raw, binary/oversize spilled to the managed prefix under deterministic
+	// keys. The rewritten SKILL.md (frontmatter injected) is the entry document.
+	attachments, uploaded, _, err := s.buildSkillAttachmentTree(ctx, objectSpace, pluginID, rewritten.ZipBytes, rewritten.SkillMD, nil)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	req, err := buildImportWriteRequest(f, attachments)
+	if err != nil {
+		s.deleteObjects(ctx, uploaded...)
+		return nil, "", nil, err
+	}
+	return req, pluginID, uploaded, nil
 }
 
 // restoreWriteRequest rebuilds the write request that reproduces a plugin's

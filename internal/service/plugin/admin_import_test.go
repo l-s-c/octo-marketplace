@@ -1,0 +1,186 @@
+package plugin
+
+import (
+	"archive/zip"
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+	skillrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/skill"
+)
+
+// adminSkillZipFixture is an all-text skill zip (no binary), so it expands to an
+// all-inline attachment tree that needs no managed-prefix Space — the constraint
+// admin skills live under in the empty global Space.
+func adminSkillZipFixture(t *testing.T) ([]byte, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	md, err := zw.Create("SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := md.Write([]byte("---\nname: admin-skill\nversion: 1.0.0\n---\n# Admin Skill\nBody.")); err != nil {
+		t.Fatal(err)
+	}
+	extra, err := zw.Create("scripts/run.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extra.Write([]byte("echo ok")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(buf.Bytes())
+	return buf.Bytes(), hex.EncodeToString(sum[:])
+}
+
+func adminImportFixtures(t *testing.T) (*fakeStore, *importStorage, *fakeParseTasks, *Service) {
+	t.Helper()
+	zipBytes, sha := adminSkillZipFixture(t)
+	store := &fakeStore{plugins: map[string]*model.Plugin{}}
+	blobs := &importStorage{objects: map[string][]byte{"tmp/admin.zip": zipBytes}}
+	// The admin upload lives in the empty global Space (GlobalTagSpaceID).
+	tasks := &fakeParseTasks{task: &skillrepo.ParseTaskRow{
+		ID: "task-admin", OwnerID: "admin-1", SpaceID: "", Status: "success",
+		FileName: "orig.zip", FileURL: "tmp/admin.zip", FileSize: int64(len(zipBytes)), FileSHA256: sha,
+		ResultName: "Admin Skill", ResultVersion: "1.0.0", ResultTags: []byte(`["deploy"]`),
+	}}
+	svc := New(store, blobs).WithParseTasks(tasks).WithRuntime(sequenceIDs("plugin-admin", "audit-1", "extra-1", "extra-2"), func() time.Time { return time.Date(2026, 8, 22, 8, 0, 0, 0, time.UTC) })
+	return store, blobs, tasks, svc
+}
+
+// TestAdminImportCreatesPublicGlobalSkillWithPlacement locks the admin create
+// conventions: a public, empty-global-Space skill plugin created under the admin
+// scope with a default visible market placement, the unified category threaded
+// through, and the caller-supplied visibility ignored.
+func TestAdminImportCreatesPublicGlobalSkillWithPlacement(t *testing.T) {
+	store, _, tasks, svc := adminImportFixtures(t)
+	category := "cat-ops"
+	// The request even tries to set a public/other visibility; it must be ignored
+	// and the skill convention (public) applied regardless.
+	detail, err := svc.AdminImport(context.Background(), adminCaller, ImportParams{
+		ParseTaskID: "task-admin", Name: "Admin Skill", CategoryID: &category, Tags: []string{"deploy"}, Version: "1.0.0", Visibility: model.PluginVisibilityPrivate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.consumed) != 1 || tasks.consumed[0] != "task-admin|admin-1||" {
+		t.Fatalf("consumed = %#v", tasks.consumed)
+	}
+	if len(tasks.released) != 0 {
+		t.Fatalf("released = %#v", tasks.released)
+	}
+	created := store.create
+	if created == nil || created.Type != model.PluginTypeSkill {
+		t.Fatalf("created = %#v", created)
+	}
+	if created.Visibility != model.PluginVisibilitySystem {
+		t.Fatalf("visibility = %q, want system (caller visibility must not be trusted)", created.Visibility)
+	}
+	if created.SpaceID == nil || *created.SpaceID != adminGlobalSpace {
+		t.Fatalf("space = %v, want empty global", created.SpaceID)
+	}
+	if created.OwnerUID != "admin-1" {
+		t.Fatalf("owner = %q, want admin-1", created.OwnerUID)
+	}
+	if !store.createScope.Admin {
+		t.Fatalf("create not under admin scope: %#v", store.createScope)
+	}
+	if created.CategoryID == nil || *created.CategoryID != category {
+		t.Fatalf("category = %v, want %q threaded through", created.CategoryID, category)
+	}
+	// The reserved package ID is the persisted row ID.
+	if created.ID != "plugin-admin" || detail.Plugin.ID != "plugin-admin" {
+		t.Fatalf("id = %q / %q, want reserved plugin-admin", created.ID, detail.Plugin.ID)
+	}
+	if len(store.createPlace) != 1 {
+		t.Fatalf("placements = %#v, want exactly one default placement", store.createPlace)
+	}
+	pl := store.createPlace[0]
+	if pl.PlacementCode != "default" || !pl.Visible || pl.CategoryID == nil || *pl.CategoryID != category {
+		t.Fatalf("placement = %#v, want default+visible carrying the category", pl)
+	}
+	if !strings.Contains(string(created.Package), "# Admin Skill") {
+		t.Fatalf("package missing inline SKILL.md body: %s", created.Package)
+	}
+	// Create must not publish a version.
+	if store.publishParams.PluginID != "" {
+		t.Fatalf("admin create must not publish: %#v", store.publishParams)
+	}
+}
+
+// TestAdminImportReuploadPreservesVisibilitySpaceOwner locks the admin reupload
+// conventions: the existing row's visibility, Space, owner, and creator
+// provenance survive a package replacement, the row is loaded/updated
+// cross-Space, no publish happens, and an omitted icon is preserved.
+func TestAdminImportReuploadPreservesVisibilitySpaceOwner(t *testing.T) {
+	store, _, tasks, svc := adminImportFixtures(t)
+	tenant := "tenant-space"
+	existing := &model.Plugin{
+		ID: "skill-9", Name: "Old", Type: model.PluginTypeSkill, OwnerUID: "tenant-user", SpaceID: &tenant,
+		Visibility: model.PluginVisibilityPrivate, Icon: "icons/keep.png", CreatorName: "Creator", CreatedByType: "human",
+		Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{"attachments":[]}`),
+	}
+	store.plugins["skill-9"] = existing
+
+	detail, err := svc.AdminImport(context.Background(), adminCaller, ImportParams{ParseTaskID: "task-admin", PluginID: "skill-9", Version: "2.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.update == nil {
+		t.Fatal("no update issued")
+	}
+	if store.update.Visibility != model.PluginVisibilityPrivate {
+		t.Fatalf("visibility force-flipped to %q; tenant-private row would be published", store.update.Visibility)
+	}
+	if store.update.SpaceID == nil || *store.update.SpaceID != tenant {
+		t.Fatalf("space not preserved: %v", store.update.SpaceID)
+	}
+	if store.update.OwnerUID != "tenant-user" {
+		t.Fatalf("owner rewritten to %q, want tenant-user", store.update.OwnerUID)
+	}
+	if store.update.CreatorName != "Creator" || store.update.CreatedByType != "human" {
+		t.Fatalf("creation provenance not preserved: %#v", store.update)
+	}
+	if store.update.Icon != "icons/keep.png" {
+		t.Fatalf("icon not preserved on package-only reupload: %q", store.update.Icon)
+	}
+	if detail.Plugin.ID != "skill-9" {
+		t.Fatalf("persisted id = %q, want skill-9", detail.Plugin.ID)
+	}
+	// Reupload must not publish a version.
+	if store.publishParams.PluginID != "" {
+		t.Fatalf("admin reupload must not publish: %#v", store.publishParams)
+	}
+	if len(tasks.consumed) != 1 || tasks.consumed[0] != "task-admin|admin-1||" {
+		t.Fatalf("consumed = %#v", tasks.consumed)
+	}
+}
+
+// TestAdminImportRejectsForeignOrUnfinishedTasks proves the admin import only
+// consumes the admin's own completed, unbound upload.
+func TestAdminImportRejectsForeignOrUnfinishedTasks(t *testing.T) {
+	for _, mutate := range []func(*skillrepo.ParseTaskRow){
+		func(task *skillrepo.ParseTaskRow) { task.OwnerID = "someone-else" },
+		func(task *skillrepo.ParseTaskRow) { task.Status = "processing" },
+		func(task *skillrepo.ParseTaskRow) { task.SkillID = "legacy-skill" },
+	} {
+		_, _, tasks, svc := adminImportFixtures(t)
+		mutate(tasks.task)
+		if _, err := svc.AdminImport(context.Background(), adminCaller, ImportParams{ParseTaskID: "task-admin"}); err != ErrInvalidParseTask {
+			t.Fatalf("err = %v, want ErrInvalidParseTask", err)
+		}
+		if len(tasks.consumed) != 0 {
+			t.Fatalf("foreign task was consumed: %#v", tasks.consumed)
+		}
+	}
+}

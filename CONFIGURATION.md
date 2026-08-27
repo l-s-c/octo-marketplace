@@ -151,9 +151,10 @@ All routes require authentication (token via `Token:` or `Authorization: Bearer`
 - `GET /api/v1/skill/categories` — List all categories with visible skill counts
 
 #### Admin Categories (operations dashboard)
-- `POST /api/v1/skill/admin/categories` — Create category (`name` required, optional `icon_key`, `sort_order`)
-- `PUT /api/v1/skill/admin/categories/:id` — Update category
-- `DELETE /api/v1/skill/admin/categories/:id` — Delete category (returns 409 if skills exist in category)
+Retired. Category management moved to the unified plugin admin surface —
+`GET/POST /api/v1/admin/plugin_categories` and
+`PATCH/DELETE /api/v1/admin/plugin_categories/:category_id` (gated by the admin
+role). The legacy `/api/v1/skill/admin/categories` routes are gone.
 
 #### Skills
 - `GET /api/v1/skill` — List skills (visibility-filtered, supports `?q=`, `?category_id=`, `?cursor=`, `?limit=`)

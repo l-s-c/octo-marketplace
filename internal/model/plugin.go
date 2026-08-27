@@ -25,6 +25,20 @@ const (
 	PluginVisibilitySystem  PluginVisibility = "system"
 )
 
+// NormalizeLegacyVisibility maps a row's PRESERVED legacy `public` visibility to
+// the unified `system` global value, passing every current enum value through
+// unchanged. Write paths that carry an existing row's visibility forward — an
+// admin metadata edit (adminEffectiveWrite) and a container reupload (RebuildGraph
+// re-deriving the locked row's visibility) — route it through this single helper
+// so a preserved `public` revalidates as `system` and the row stops carrying the
+// value retired on the write path.
+func NormalizeLegacyVisibility(v PluginVisibility) PluginVisibility {
+	if v == PluginVisibilityPublic {
+		return PluginVisibilitySystem
+	}
+	return v
+}
+
 // Plugin is the authoritative mutable current state of a unified Plugin.
 type Plugin struct {
 	ID               string

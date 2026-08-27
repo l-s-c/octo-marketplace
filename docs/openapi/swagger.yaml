@@ -33,27 +33,11 @@ components:
           type: array
           uniqueItems: false
       type: object
-    ? github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-array_github_com_Mininglamp-OSS_octo-marketplace_internal_service_category_AdminItem
-    : properties:
-        data:
-          items:
-            $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_service_category.AdminItem'
-          type: array
-          uniqueItems: false
-      type: object
     ? github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-array_github_com_Mininglamp-OSS_octo-marketplace_internal_service_category_CategoryItem
     : properties:
         data:
           items:
             $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_service_category.CategoryItem'
-          type: array
-          uniqueItems: false
-      type: object
-    ? github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-array_github_com_Mininglamp-OSS_octo-marketplace_internal_service_expert_AdminCategory
-    : properties:
-        data:
-          items:
-            $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_service_expert.AdminCategory'
           type: array
           uniqueItems: false
       type: object
@@ -84,16 +68,6 @@ components:
     : properties:
         data:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_service.ProbeResponse'
-      type: object
-    ? github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_category_AdminItem
-    : properties:
-        data:
-          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_service_category.AdminItem'
-      type: object
-    ? github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_expert_AdminCategory
-    : properties:
-        data:
-          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_service_expert.AdminCategory'
       type: object
     ? github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_parse_IconUploadResult
     : properties:
@@ -170,6 +144,11 @@ components:
             $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.TagFilter'
           type: array
           uniqueItems: false
+      type: object
+    github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_categoryResponse:
+      properties:
+        data:
+          $ref: '#/components/schemas/internal_api_handler_plugin.categoryResponse'
       type: object
     github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_deleteResponse:
       properties:
@@ -270,16 +249,6 @@ components:
         data:
           items:
             $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.ListItem'
-          type: array
-          uniqueItems: false
-        pagination:
-          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetPagination'
-      type: object
-    ? github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_service_skill_SkillItem
-    : properties:
-        data:
-          items:
-            $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_service_skill.SkillItem'
           type: array
           uniqueItems: false
         pagination:
@@ -1102,17 +1071,6 @@ components:
         version:
           type: string
       type: object
-    github_com_Mininglamp-OSS_octo-marketplace_internal_service_category.AdminItem:
-      properties:
-        icon_key:
-          type: string
-        name:
-          type: string
-        skill_category_id:
-          type: string
-        sort_order:
-          type: integer
-      type: object
     github_com_Mininglamp-OSS_octo-marketplace_internal_service_category.CategoryItem:
       properties:
         icon_key:
@@ -1122,19 +1080,6 @@ components:
         skill_category_id:
           type: string
         skill_count:
-          type: integer
-      type: object
-    github_com_Mininglamp-OSS_octo-marketplace_internal_service_expert.AdminCategory:
-      properties:
-        count:
-          type: integer
-        expert_category_id:
-          type: string
-        icon_key:
-          type: string
-        name:
-          type: string
-        sort_order:
           type: integer
       type: object
     github_com_Mininglamp-OSS_octo-marketplace_internal_service_parse.IconUploadResult:
@@ -1294,26 +1239,6 @@ components:
           type: string
         uid:
           type: string
-      type: object
-    internal_api_handler_category.AdminCategoryRequest:
-      properties:
-        icon_key:
-          type: string
-        name:
-          type: string
-        sort_order:
-          type: integer
-      required:
-      - name
-      type: object
-    internal_api_handler_expert.AdminCategoryRequest:
-      properties:
-        icon_key:
-          type: string
-        name:
-          type: string
-        sort_order:
-          type: integer
       type: object
     internal_api_handler_expert.ExpertDetailResp:
       properties:
@@ -1483,6 +1408,26 @@ components:
         resource_type:
           type: string
       type: object
+    internal_api_handler_plugin.adminSkillImportRequest:
+      properties:
+        category_id:
+          type: string
+        changelog:
+          type: string
+        description:
+          type: string
+        name:
+          type: string
+        parse_task_id:
+          type: string
+        tags:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        version:
+          type: string
+      type: object
     internal_api_handler_plugin.categoryResponse:
       properties:
         category_id:
@@ -1500,6 +1445,22 @@ components:
           uniqueItems: false
         sort_order:
           type: integer
+      type: object
+    internal_api_handler_plugin.categoryWriteRequest:
+      properties:
+        icon_key:
+          type: string
+        name:
+          type: string
+        plugin_types:
+          items:
+            $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginType'
+          type: array
+          uniqueItems: false
+        sort_order:
+          type: integer
+      required:
+      - name
       type: object
     internal_api_handler_plugin.deleteRequest:
       properties:
@@ -1850,70 +1811,6 @@ components:
         version_id:
           type: string
       type: object
-    internal_api_handler_skill.AdminCreateRequest:
-      properties:
-        category_id:
-          type: string
-        description:
-          type: string
-        display_name:
-          type: string
-        icon_url:
-          type: string
-        name:
-          type: string
-        parse_task_id:
-          type: string
-        tags:
-          items:
-            maxLength: 10
-            type: string
-          maxItems: 10
-          type: array
-          uniqueItems: false
-        version:
-          type: string
-      required:
-      - parse_task_id
-      type: object
-    internal_api_handler_skill.AdminReuploadRequest:
-      properties:
-        changelog:
-          type: string
-        parse_task_id:
-          type: string
-        tags:
-          items:
-            maxLength: 10
-            type: string
-          maxItems: 10
-          type: array
-          uniqueItems: false
-        version:
-          type: string
-      required:
-      - parse_task_id
-      type: object
-    internal_api_handler_skill.AdminUpdateRequest:
-      properties:
-        category_id:
-          type: string
-        description:
-          type: string
-        display_name:
-          type: string
-        icon_url:
-          type: string
-        name:
-          type: string
-        tags:
-          items:
-            maxLength: 10
-            type: string
-          maxItems: 10
-          type: array
-          uniqueItems: false
-      type: object
     internal_api_handler_skill.CreateRequest:
       properties:
         category_id:
@@ -2131,738 +2028,6 @@ info:
   version: 1.0.0
 openapi: 3.1.0
 paths:
-  /admin/expert_categories:
-    get:
-      description: List every category with usage counts, including empty ones.
-      operationId: admin_expert_category.list
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-array_github_com_Mininglamp-OSS_octo-marketplace_internal_service_expert_AdminCategory'
-          description: OK
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: List expert categories (admin)
-      tags:
-      - admin_expert
-    post:
-      description: Create a category for the expert market taxonomy.
-      operationId: admin_expert_category.create
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/internal_api_handler_expert.AdminCategoryRequest'
-                description: Category payload
-                summary: request
-        description: Category payload
-        required: true
-      responses:
-        '201':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_expert_AdminCategory'
-          description: Created
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: CONFLICT
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Create expert category (admin)
-      tags:
-      - admin_expert
-  /admin/expert_categories/{category_id}:
-    delete:
-      description: Rejected with 409 (and the reference count) while records still
-        use it.
-      operationId: admin_expert_category.delete
-      parameters:
-      - description: Category ID
-        in: path
-        name: category_id
-        required: true
-        schema:
-          type: string
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
-          description: OK
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: CONFLICT
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Delete expert category (admin)
-      tags:
-      - admin_expert
-    patch:
-      description: Update name, icon and sort order; all three columns are written.
-      operationId: admin_expert_category.update
-      parameters:
-      - description: Category ID
-        in: path
-        name: category_id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/internal_api_handler_expert.AdminCategoryRequest'
-                description: Category payload
-                summary: request
-        description: Category payload
-        required: true
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_expert_AdminCategory'
-          description: OK
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: CONFLICT
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Update expert category (admin)
-      tags:
-      - admin_expert
-  /admin/expert_tags:
-    get:
-      description: Aggregate tags across system records of the given kind.
-      operationId: admin_expert_tag.list
-      parameters:
-      - description: agent (default) or squad
-        in: query
-        name: kind
-        schema:
-          type: string
-      - description: Max tags, default 50, max 100
-        in: query
-        name: limit
-        schema:
-          type: integer
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_TagListResp'
-          description: OK
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: List expert tags (admin)
-      tags:
-      - admin_expert
-  /admin/experts:
-    get:
-      description: List every visibility=system expert across Spaces.
-      operationId: admin_expert.list
-      parameters:
-      - description: Search name/summary/creator
-        in: query
-        name: keyword
-        schema:
-          type: string
-      - description: Category id filter; 'all' disables
-        in: query
-        name: category
-        schema:
-          type: string
-      - description: Page number, default 1
-        in: query
-        name: page
-        schema:
-          type: integer
-      - description: Page size, default 20, max 100
-        in: query
-        name: page_size
-        schema:
-          type: integer
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_model_ExpertAgentListItem'
-          description: OK
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: List system experts (admin)
-      tags:
-      - admin_expert
-    post:
-      description: Create a platform-provided expert (visibility=system, cross-Space).
-      operationId: admin_expert.create
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.ExpertCreateRequest'
-                description: Create payload
-                summary: request
-        description: Create payload
-        required: true
-      responses:
-        '201':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_ExpertDetailResp'
-          description: Created
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: DUPLICATE
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Create system expert (admin)
-      tags:
-      - admin_expert
-  /admin/experts/{expert_id}:
-    delete:
-      description: Soft delete; the name frees up for reuse.
-      operationId: admin_expert.delete
-      parameters:
-      - description: Expert ID
-        in: path
-        name: expert_id
-        required: true
-        schema:
-          type: string
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
-          description: OK
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Delete system expert (admin)
-      tags:
-      - admin_expert
-    get:
-      description: Full system expert record, including instruction, mcp_config and
-        skills.
-      operationId: admin_expert.get
-      parameters:
-      - description: Expert ID
-        in: path
-        name: expert_id
-        required: true
-        schema:
-          type: string
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_ExpertDetailResp'
-          description: OK
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Get system expert detail (admin)
-      tags:
-      - admin_expert
-    patch:
-      description: Partial update; sending skills replaces the stored set.
-      operationId: admin_expert.update
-      parameters:
-      - description: Expert ID
-        in: path
-        name: expert_id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.ExpertPatchRequest'
-                description: Patch payload
-                summary: request
-        description: Patch payload
-        required: true
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_ExpertDetailResp'
-          description: OK
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: DUPLICATE
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Update system expert (admin)
-      tags:
-      - admin_expert
-  /admin/experts/{expert_id}/skill_md:
-    get:
-      description: Return the stored SKILL.md text for the expert's skill at index
-        i.
-      operationId: admin_expert.skill_md
-      parameters:
-      - description: Expert ID
-        in: path
-        name: expert_id
-        required: true
-        schema:
-          type: string
-      - description: Skill index (default 0)
-        in: query
-        name: i
-        schema:
-          type: integer
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SkillContentResp'
-          description: OK
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Get system expert skill content (admin)
-      tags:
-      - admin_expert
-  /admin/mcps:
-    get:
-      description: List system-visible MCP servers using offset pagination.
-      operationId: admin_mcp.list
-      parameters:
-      - description: Search keyword
-        in: query
-        name: keyword
-        schema:
-          type: string
-      - description: Category key
-        in: query
-        name: category
-        schema:
-          type: string
-      - description: Transport filters
-        in: query
-        name: transport
-        schema:
-          items:
-            type: string
-          type: array
-      - description: Tag filters
-        in: query
-        name: tag
-        schema:
-          items:
-            type: string
-          type: array
-      - description: 'Sort: relevance, updated'
-        in: query
-        name: sort
-        schema:
-          type: string
-      - description: Page number, default 1
-        in: query
-        name: page
-        schema:
-          type: integer
-      - description: Page size, default 20, max 100
-        in: query
-        name: page_size
-        schema:
-          type: integer
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_model_ListItem'
-          description: OK
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: List system MCP servers
-      tags:
-      - admin_mcp
-    post:
-      description: Create a system-visible MCP server through the administrator surface.
-      operationId: admin_mcp.create
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.CreateRequest'
-                description: System MCP server
-                summary: body
-        description: System MCP server
-        required: true
-      responses:
-        '201':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_model_Detail'
-          description: Created
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: DUPLICATE
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Create system MCP server
-      tags:
-      - admin_mcp
   /admin/mcps/_probe:
     post:
       description: Probe a remote MCP connection through the administrator surface
@@ -2921,79 +2086,24 @@ paths:
       summary: Probe system MCP server
       tags:
       - admin_mcp
-  /admin/mcps/{mcp_id}:
-    delete:
-      description: Soft-delete a system-visible MCP server.
-      operationId: admin_mcp.delete
-      parameters:
-      - description: MCP ID
-        in: path
-        name: mcp_id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
-          description: OK
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Delete system MCP server
-      tags:
-      - admin_mcp
+  /admin/plugin_categories:
     get:
-      description: Return one system-visible MCP server for administration.
-      operationId: admin_mcp.get
+      description: List every category applicable to a plugin type with its live-plugin
+        usage count, including empty ones. Admin only.
+      operationId: admin_plugin_category.list
       parameters:
-      - description: MCP ID
-        in: path
-        name: mcp_id
+      - description: Plugin type
+        in: query
+        name: plugin_type
         required: true
         schema:
           type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
       responses:
         '200':
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_model_Detail'
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-array_internal_api_handler_plugin_categoryResponse'
           description: OK
         '401':
           content:
@@ -3007,12 +2117,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
         '500':
           content:
             application/json:
@@ -3020,146 +2124,32 @@ paths:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: INTERNAL_ERROR
       security:
-      - AdminToken: []
-      summary: Get system MCP server
+      - Bearer: []
+      summary: List plugin categories (admin)
       tags:
-      - admin_mcp
-    patch:
-      description: Partially update one system-visible MCP server.
-      operationId: admin_mcp.update
-      parameters:
-      - description: MCP ID
-        in: path
-        name: mcp_id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PatchRequest'
-                description: MCP changes
-                summary: body
-        description: MCP changes
-        required: true
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_model_Detail'
-          description: OK
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: DUPLICATE
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Update system MCP server
-      tags:
-      - admin_mcp
-  /admin/skill_categories:
-    get:
-      description: Return non-deleted Skill categories for administrator management.
-      operationId: skill_category.admin.list
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-array_github_com_Mininglamp-OSS_octo-marketplace_internal_service_category_AdminItem'
-          description: OK
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: List Skill categories (admin)
-      tags:
-      - skill_category
+      - admin_plugin
     post:
-      description: Create a Skill category through the administrator surface (superAdmin,
-        or marketAdmin).
-      operationId: skill_category.create
+      description: Create a taxonomy row applicable to one or more plugin types. Admin
+        only.
+      operationId: admin_plugin_category.create
       requestBody:
         content:
           application/json:
             schema:
               oneOf:
               - type: object
-              - $ref: '#/components/schemas/internal_api_handler_category.AdminCategoryRequest'
-                description: Skill category
+              - $ref: '#/components/schemas/internal_api_handler_plugin.categoryWriteRequest'
+                description: Category document
                 summary: body
-        description: Skill category
+        description: Category document
         required: true
       responses:
-        '201':
+        '200':
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_category_AdminItem'
-          description: Created
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_categoryResponse'
+          description: OK
         '400':
           content:
             application/json:
@@ -3178,18 +2168,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: CONFLICT
         '500':
           content:
             application/json:
@@ -3197,27 +2175,22 @@ paths:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: INTERNAL_ERROR
       security:
-      - AdminToken: []
-      summary: Create Skill category
+      - Bearer: []
+      summary: Create plugin category (admin)
       tags:
-      - skill_category
-  /admin/skill_categories/{skill_category_id}:
+      - admin_plugin
+  /admin/plugin_categories/{category_id}:
     delete:
-      description: Delete an unused Skill category through the administrator surface
-        (superAdmin, or marketAdmin); categories referenced by Skills are rejected.
-      operationId: skill_category.delete
+      description: Soft-delete an unused taxonomy row. Categories still referenced
+        by a live plugin are rejected with CONFLICT. Admin only.
+      operationId: admin_plugin_category.delete
       parameters:
-      - description: Skill category ID
+      - description: Category ID
         in: path
-        name: skill_category_id
+        name: category_id
         required: true
         schema:
           type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
       responses:
         '200':
           content:
@@ -3256,18 +2229,18 @@ paths:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: INTERNAL_ERROR
       security:
-      - AdminToken: []
-      summary: Delete Skill category
+      - Bearer: []
+      summary: Delete plugin category (admin)
       tags:
-      - skill_category
+      - admin_plugin
     patch:
-      description: Replace mutable fields of an existing Skill category through the
-        administrator surface (superAdmin, or marketAdmin).
-      operationId: skill_category.update
+      description: Update an existing taxonomy row's editable fields (name, icon,
+        plugin types, sort order). Admin only.
+      operationId: admin_plugin_category.update
       parameters:
-      - description: Skill category ID
+      - description: Category ID
         in: path
-        name: skill_category_id
+        name: category_id
         required: true
         schema:
           type: string
@@ -3277,17 +2250,17 @@ paths:
             schema:
               oneOf:
               - type: object
-              - $ref: '#/components/schemas/internal_api_handler_category.AdminCategoryRequest'
-                description: Skill category changes
+              - $ref: '#/components/schemas/internal_api_handler_plugin.categoryWriteRequest'
+                description: Category document
                 summary: body
-        description: Skill category changes
+        description: Category document
         required: true
       responses:
         '200':
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_category_AdminItem'
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_categoryResponse'
           description: OK
         '400':
           content:
@@ -3320,31 +2293,47 @@ paths:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: INTERNAL_ERROR
       security:
-      - AdminToken: []
-      summary: Update Skill category
+      - Bearer: []
+      summary: Update plugin category (admin)
       tags:
-      - skill_category
-  /admin/skills:
+      - admin_plugin
+  /admin/plugins:
     get:
-      description: List all visibility=public skills without Space restriction.
-      operationId: admin_skill.list
+      description: List plugins of one type across all Spaces, optionally narrowed
+        to a visibility class (e.g. system connectors). Admin only.
+      operationId: admin_plugin.list
       parameters:
-      - description: Search name/description
+      - description: Plugin type
+        in: query
+        name: plugin_type
+        required: true
+        schema:
+          enum:
+          - expert
+          - expert_team
+          - skill
+          - connector
+          type: string
+      - description: Filter by visibility
+        in: query
+        name: visibility
+        schema:
+          enum:
+          - space
+          - private
+          - system
+          type: string
+      - description: Search keyword
         in: query
         name: q
         schema:
           type: string
-      - description: Category ID
+      - description: Category id
         in: query
         name: category_id
         schema:
           type: string
-      - description: Comma-separated tags
-        in: query
-        name: tags
-        schema:
-          type: string
-      - description: 'Sort: latest, downloads, views, comprehensive'
+      - description: Sort mode
         in: query
         name: sort
         schema:
@@ -3354,23 +2343,24 @@ paths:
         name: page
         schema:
           type: integer
-      - description: Page size
+      - description: Page size, default 20, max 100
         in: query
         name: page_size
         schema:
           type: integer
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
       responses:
         '200':
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_service_skill_SkillItem'
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_listItemResponse'
           description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
         '401':
           content:
             application/json:
@@ -3383,12 +2373,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
         '500':
           content:
             application/json:
@@ -3396,31 +2380,33 @@ paths:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: INTERNAL_ERROR
       security:
-      - AdminToken: []
-      summary: List public skills (admin)
+      - Bearer: []
+      summary: List plugins (admin)
       tags:
-      - admin_skill
+      - admin_plugin
     post:
-      description: Create a system skill with visibility=public.
-      operationId: admin_skill.create
+      description: Mint a system connector or system-visible skill/expert. Visibility
+        and Space are set by convention (connector=system/NULL Space; others=system/global).
+        Admin only.
+      operationId: admin_plugin.create
       requestBody:
         content:
           application/json:
             schema:
               oneOf:
               - type: object
-              - $ref: '#/components/schemas/internal_api_handler_skill.AdminCreateRequest'
-                description: Skill
+              - $ref: '#/components/schemas/internal_api_handler_plugin.upsertRequest'
+                description: Plugin document
                 summary: body
-        description: Skill
+        description: Plugin document
         required: true
       responses:
-        '201':
+        '200':
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_skill_SkillItem'
-          description: Created
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
+          description: OK
         '400':
           content:
             application/json:
@@ -3439,12 +2425,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
         '409':
           content:
             application/json:
@@ -3458,32 +2438,27 @@ paths:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: INTERNAL_ERROR
       security:
-      - AdminToken: []
-      summary: Create public skill (admin)
+      - Bearer: []
+      summary: Create plugin (admin)
       tags:
-      - admin_skill
-  /admin/skills/{skill_id}:
+      - admin_plugin
+  /admin/plugins/{plugin_id}:
     delete:
-      description: Delete a public skill and its versions.
-      operationId: admin_skill.delete
+      description: Soft-delete any plugin by id, ignoring owner/Space. Admin only.
+      operationId: admin_plugin.delete
       parameters:
-      - description: Skill ID
+      - description: Plugin ID
         in: path
-        name: skill_id
+        name: plugin_id
         required: true
         schema:
           type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
       responses:
         '200':
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_deleteResponse'
           description: OK
         '401':
           content:
@@ -3510,31 +2485,32 @@ paths:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: INTERNAL_ERROR
       security:
-      - AdminToken: []
-      summary: Delete public skill (admin)
+      - Bearer: []
+      summary: Delete plugin (admin)
       tags:
-      - admin_skill
+      - admin_plugin
     get:
-      description: Return one public skill without Space restriction.
-      operationId: admin_skill.get
+      description: Return any plugin's full detail by id, ignoring Space scope. Admin
+        only.
+      operationId: admin_plugin.get
       parameters:
-      - description: Skill ID
+      - description: Plugin ID
         in: path
-        name: skill_id
+        name: plugin_id
         required: true
         schema:
           type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
+      - description: Include one-level relations (default true)
+        in: query
+        name: include_relations
+        schema:
+          type: boolean
       responses:
         '200':
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_skill_SkillItem'
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
           description: OK
         '401':
           content:
@@ -3561,17 +2537,17 @@ paths:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: INTERNAL_ERROR
       security:
-      - AdminToken: []
-      summary: Get public skill detail (admin)
+      - Bearer: []
+      summary: Get plugin (admin)
       tags:
-      - admin_skill
+      - admin_plugin
     patch:
-      description: Update basic info of a public skill.
-      operationId: admin_skill.update
+      description: Update any plugin by id, ignoring owner/Space. Admin only.
+      operationId: admin_plugin.update
       parameters:
-      - description: Skill ID
+      - description: Plugin ID
         in: path
-        name: skill_id
+        name: plugin_id
         required: true
         schema:
           type: string
@@ -3581,17 +2557,364 @@ paths:
             schema:
               oneOf:
               - type: object
-              - $ref: '#/components/schemas/internal_api_handler_skill.AdminUpdateRequest'
-                description: Skill changes
+              - $ref: '#/components/schemas/internal_api_handler_plugin.upsertRequest'
+                description: Plugin document
                 summary: body
-        description: Skill changes
+        description: Plugin document
         required: true
       responses:
         '200':
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_skill_SkillItem'
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Update plugin (admin)
+      tags:
+      - admin_plugin
+  /admin/plugins/{plugin_id}/download:
+    get:
+      description: Stream the reconstructed package zip of any skill plugin by id,
+        read cross-Space from the unified plugins table (no presigned URL). Serves
+        embedded (bundled) skills via their id too. Admin only.
+      operationId: admin_plugin.download
+      parameters:
+      - description: Plugin ID
+        in: path
+        name: plugin_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+          description: Skill package zip
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: PAYLOAD_TOO_LARGE
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Download skill plugin package (admin)
+      tags:
+      - admin_plugin
+  /admin/plugins/{plugin_id}/skill_md:
+    get:
+      description: Return the SKILL.md text of any skill plugin by id, read cross-Space
+        from the unified plugins table. Serves embedded (bundled) skills via their
+        id too. Admin only.
+      operationId: admin_plugin.skill_md
+      parameters:
+      - description: Plugin ID
+        in: path
+        name: plugin_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_skillMarkdownResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Read skill plugin SKILL.md (admin)
+      tags:
+      - admin_plugin
+  /admin/plugins/container_reupload/{plugin_id}:
+    post:
+      description: Re-upload an expert or expert_team container archive (multipart
+        file field "file") to rebuild an EXISTING plugin in place, preserving its
+        plugin_id, visibility, Space, owner, and market placement while replacing
+        its package/manifest/tags and swapping its embedded children (bundled skills
+        for an expert; member experts and their skills for a squad). The container
+        kind must match the existing plugin's type. Admin only.
+      operationId: admin_plugin.container_reupload
+      parameters:
+      - description: Plugin ID
+        in: path
+        name: plugin_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              oneOf:
+              - title: file
+                type: string
+              - title: category_id
+                type: string
+          multipart/form-data:
+            schema:
+              type: object
+        description: Expert/expert_team container zip (binary) | Optional plugin category
+          for the top-level expert/team
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: CONFLICT
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: PAYLOAD_TOO_LARGE
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Reupload expert/expert_team container (admin)
+      tags:
+      - admin_plugin
+  /admin/plugins/import:
+    post:
+      description: 'Ingest an uploaded expert or expert_team container archive (multipart
+        file field "file") and store it as the unified plugin graph in one transaction:
+        the expert/team plugin, its bundled skills as separate skill plugins, its
+        squad members as separate expert plugins, and the relations wiring them. Admin
+        only.'
+      operationId: admin_plugin.import
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              oneOf:
+              - title: file
+                type: string
+              - title: category_id
+                type: string
+          multipart/form-data:
+            schema:
+              type: object
+        description: Expert/expert_team container zip (binary) | Optional plugin category
+          for the top-level expert/team
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: CONFLICT
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: PAYLOAD_TOO_LARGE
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Import expert/expert_team container (admin)
+      tags:
+      - admin_plugin
+  /admin/plugins/skill_import:
+    post:
+      description: Create a system-visible skill plugin from a completed admin upload-parse
+        task, under the admin conventions (system visibility, global Space, a default
+        visible market placement). The category_id is a unified plugin_categories
+        id. Admin only.
+      operationId: admin_plugin.skill_import
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/internal_api_handler_plugin.adminSkillImportRequest'
+                description: Skill import request
+                summary: body
+        description: Skill import request
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
           description: OK
         '400':
           content:
@@ -3630,10 +2953,82 @@ paths:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: INTERNAL_ERROR
       security:
-      - AdminToken: []
-      summary: Update public skill (admin)
+      - Bearer: []
+      summary: Import skill plugin (admin)
       tags:
-      - admin_skill
+      - admin_plugin
+  /admin/plugins/skill_reupload/{plugin_id}:
+    post:
+      description: Replace an existing skill plugin's package from a completed admin
+        upload-parse task, preserving its visibility, Space, and owner. The category_id
+        is a unified plugin_categories id. Admin only.
+      operationId: admin_plugin.skill_reupload
+      parameters:
+      - description: Plugin ID
+        in: path
+        name: plugin_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/internal_api_handler_plugin.adminSkillImportRequest'
+                description: Skill reupload request
+                summary: body
+        description: Skill reupload request
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: CONFLICT
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Reupload skill plugin (admin)
+      tags:
+      - admin_plugin
   /admin/skills/{skill_id}/download:
     get:
       description: Return a presigned artifact URL for a public Skill, or redirect
@@ -3694,76 +3089,6 @@ paths:
       summary: Download public Skill archive (admin)
       tags:
       - admin_skill
-  /admin/skills/{skill_id}/reupload:
-    post:
-      description: Upload a new zip to update the skill version.
-      operationId: admin_skill.reupload
-      parameters:
-      - description: Skill ID
-        in: path
-        name: skill_id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/internal_api_handler_skill.AdminReuploadRequest'
-                description: Reupload params
-                summary: body
-        description: Reupload params
-        required: true
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_service_skill_SkillItem'
-          description: OK
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: CONFLICT
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Reupload public skill version (admin)
-      tags:
-      - admin_skill
   /admin/skills/{skill_id}/skill_md:
     get:
       description: Return SKILL.md for a public skill without Space restriction.
@@ -3816,339 +3141,6 @@ paths:
       summary: Get SKILL.md (admin)
       tags:
       - admin_skill
-  /admin/squads:
-    get:
-      description: List every visibility=system squad across Spaces.
-      operationId: admin_squad.list
-      parameters:
-      - description: Search name/summary/creator
-        in: query
-        name: keyword
-        schema:
-          type: string
-      - description: Category id filter; 'all' disables
-        in: query
-        name: category
-        schema:
-          type: string
-      - description: Page number, default 1
-        in: query
-        name: page
-        schema:
-          type: integer
-      - description: Page size, default 20, max 100
-        in: query
-        name: page_size
-        schema:
-          type: integer
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-github_com_Mininglamp-OSS_octo-marketplace_internal_model_ExpertSquadListItem'
-          description: OK
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: List system squads (admin)
-      tags:
-      - admin_expert
-    post:
-      description: Create a platform-provided squad (visibility=system, cross-Space).
-      operationId: admin_squad.create
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.SquadCreateRequest'
-                description: Create payload
-                summary: request
-        description: Create payload
-        required: true
-      responses:
-        '201':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SquadDetailResp'
-          description: Created
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: DUPLICATE
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Create system squad (admin)
-      tags:
-      - admin_expert
-  /admin/squads/{squad_id}:
-    delete:
-      description: Soft delete; the name frees up for reuse.
-      operationId: admin_squad.delete
-      parameters:
-      - description: Squad ID
-        in: path
-        name: squad_id
-        required: true
-        schema:
-          type: string
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
-          description: OK
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Delete system squad (admin)
-      tags:
-      - admin_expert
-    get:
-      description: Full system squad record, including strategies, dependencies and
-        the member roster.
-      operationId: admin_squad.get
-      parameters:
-      - description: Squad ID
-        in: path
-        name: squad_id
-        required: true
-        schema:
-          type: string
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SquadDetailResp'
-          description: OK
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Get system squad detail (admin)
-      tags:
-      - admin_expert
-    patch:
-      description: Partial update; sending members replaces the whole roster.
-      operationId: admin_squad.update
-      parameters:
-      - description: Squad ID
-        in: path
-        name: squad_id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.SquadPatchRequest'
-                description: Patch payload
-                summary: request
-        description: Patch payload
-        required: true
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SquadDetailResp'
-          description: OK
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: DUPLICATE
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Update system squad (admin)
-      tags:
-      - admin_expert
-  /admin/squads/{squad_id}/skill_md:
-    get:
-      description: Return the stored SKILL.md text for a squad member's skill at index
-        i.
-      operationId: admin_squad.skill_md
-      parameters:
-      - description: Squad ID
-        in: path
-        name: squad_id
-        required: true
-        schema:
-          type: string
-      - description: Member key
-        in: query
-        name: member
-        required: true
-        schema:
-          type: string
-      - description: Skill index (default 0)
-        in: query
-        name: i
-        schema:
-          type: integer
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_expert_SkillContentResp'
-          description: OK
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - AdminToken: []
-      summary: Get system squad member skill content (admin)
-      tags:
-      - admin_expert
   /bot/skills/publish:
     post:
       description: Parse an uploaded Skill archive synchronously through the bounded
@@ -8455,6 +7447,9 @@ tags:
 - description: Unified Plugin catalog, versions, audit history, categories, and Connector
     probes
   name: plugin
+- description: Administrative unified Plugin catalog — cross-Space system connectors,
+    global skills/experts, and categories
+  name: admin_plugin
 - description: Administrative MCP catalog
   name: admin_mcp
 - description: Current authenticated user context
@@ -8465,6 +7460,3 @@ tags:
   name: expert
 - description: Expert squad catalog — expert teams (专家团)
   name: expert_squad
-- description: Administrative Expert catalog — system experts, squads, categories,
-    tags
-  name: admin_expert

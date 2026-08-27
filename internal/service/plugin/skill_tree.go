@@ -57,10 +57,31 @@ var extMIME = map[string]string{
 // package $schema wrapper), the storage keys written (for rollback), and the
 // rooted paths that spilled to storage (for logging). On any error every object
 // written so far is deleted.
-func (s *Service) buildSkillAttachmentTree(ctx context.Context, spaceID, pluginID string, zipData, skillMDOverride []byte) (attachments []map[string]any, uploaded, spilled []string, err error) {
+//
+// budget, when non-nil, is a shared remaining-decompressed-bytes allowance
+// threaded across every skill expanded in one container import/reupload: this
+// skill's uncompressed tree size is charged against it, and an expansion that
+// would drive the container-wide aggregate over budget is rejected with
+// ErrTooLarge before any object is uploaded. The per-skill maxArchiveBytes cap is
+// unchanged; the budget bounds the aggregate so one small nested archive
+// referenced by many skill refs cannot be expanded without limit.
+func (s *Service) buildSkillAttachmentTree(ctx context.Context, spaceID, pluginID string, zipData, skillMDOverride []byte, containerBudget *int64) (attachments []map[string]any, uploaded, spilled []string, err error) {
 	entries, code, _ := parse.ExtractSkillTree(bytes.NewReader(zipData), int64(len(zipData)), s.maxArchiveBytes, s.maxAttachmentBytes, 0)
 	if code != "" {
 		return nil, nil, nil, ErrInvalidRequest
+	}
+	// Charge this skill's decompressed size against the shared container budget
+	// before building/uploading anything, so an over-budget expansion fails cleanly
+	// without leaving orphan objects.
+	if containerBudget != nil {
+		var consumed int64
+		for _, e := range entries {
+			consumed += int64(len(e.Bytes))
+		}
+		if consumed > *containerBudget {
+			return nil, nil, nil, ErrTooLarge
+		}
+		*containerBudget -= consumed
 	}
 
 	// Root every path at the SKILL.md directory so the package is anchored at a
@@ -246,7 +267,7 @@ func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID stri
 		}
 		// buildSkillAttachmentTree requires a valid Space only if a file must be
 		// uploaded to storage; an all-text package expands without one.
-		atts, _, _, err := s.buildSkillAttachmentTree(ctx, spaceID, pluginID, zipData, nil)
+		atts, _, _, err := s.buildSkillAttachmentTree(ctx, spaceID, pluginID, zipData, nil, nil)
 		if err != nil {
 			return nil, false, err
 		}

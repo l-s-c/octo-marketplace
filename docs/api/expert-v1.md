@@ -697,27 +697,12 @@ records — mirroring `mcp-v1.md` §9, and gated the same way: the resolved
 identity must carry `role == "superAdmin"` or `role == "marketAdmin"`. The
 public surface still REJECTS `visibility = system` on write.
 
-Implemented endpoints (all under `/api/v1/admin`, gated by
-`AdminAuthenticator`; wire shapes reuse §3, and generated OpenAPI under
-`docs/openapi/` is the field-level reference — tag `admin_expert`):
-
-- `POST/GET /admin/experts`, `GET/PATCH/DELETE /admin/experts/{expert_id}` —
-  create stamps `visibility = system`; a client-sent `visibility` is rejected
-  with `400 VALIDATION_ERROR` (the field is declared on the shared create
-  shape, so the strict decoder accepts it — the admin service refuses it
-  explicitly). List bypasses Space scoping and pages by `page`/`page_size`;
-  create/patch bodies are §4.1/§4.5 shapes. System names are unique
-  platform-wide (§7); a collision is `409 DUPLICATE`.
-- `GET /admin/experts/{expert_id}/skill_md?i=N` — stored SKILL.md text of the
-  skill at index `i` (§3.1 `SkillContentResp`).
-- The same six verbs for squads under `/admin/squads`, plus
-  `GET /admin/squads/{squad_id}/skill_md?member=<member_key>&i=N`.
-- `GET/POST /admin/expert_categories`,
-  `PATCH/DELETE /admin/expert_categories/{category_id}` — taxonomy management;
-  delete is rejected 409 with the reference count while records still use the
-  category. NOTE: update writes all three columns (`name`, `icon_key`,
-  `sort_order`) — clients must echo the current `icon_key` back or it is
-  cleared.
-- `GET /admin/expert_tags?kind=agent|squad` — tag aggregation over system rows.
-- `POST /admin/expert_skill_uploads` — the §5 presigned-upload handshake,
-  reused verbatim.
+Implemented endpoints: **retired.** The per-type expert/squad admin CRUD
+(`/admin/experts`, `/admin/squads`, `/admin/expert_categories`,
+`/admin/expert_tags`, `/admin/expert_skill_uploads`) has been removed. octo-admin
+now manages experts and squads through the unified plugin admin surface —
+`/api/v1/admin/plugins*` with `plugin_type=expert` / `plugin_type=expert_team`,
+and `/api/v1/admin/plugin_categories` for the shared taxonomy (see the
+`admin_plugin` tag in `docs/openapi/`). A whole-zip expert/squad edit lands on
+`POST /api/v1/admin/plugins/container_reupload/{plugin_id}`. Old clients calling
+the retired paths receive `404`.

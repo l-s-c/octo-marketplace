@@ -64,11 +64,6 @@ type ListFilter struct {
 	// (GET /mcps/mine, doc §4.3). When false, the visible-set rule applies
 	// (GET /mcps, doc §4.2).
 	MineOnly bool
-	// SystemOnly restricts the result to visibility='system' rows regardless
-	// of Space. Used by the admin surface (/admin/api/v1/mcps) which lists
-	// platform-provided records across all Spaces. Mutually exclusive with
-	// MineOnly; when both are set SystemOnly wins.
-	SystemOnly bool
 }
 
 // mysqlErrDupEntry is MySQL's duplicate-key error number (ER_DUP_ENTRY). An
@@ -398,9 +393,7 @@ func (f ListFilter) buildWhere() (string, []any) {
 	var clauses []string
 	var args []any
 
-	if f.SystemOnly {
-		clauses = append(clauses, "visibility = 'system'")
-	} else if f.MineOnly {
+	if f.MineOnly {
 		clauses = append(clauses, "owner_uid = ? AND space_id = ?")
 		args = append(args, f.CallerUID, f.SpaceID)
 	} else {

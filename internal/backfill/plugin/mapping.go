@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"path"
 	"sort"
 	"strings"
@@ -13,12 +12,9 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/id"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/plugindoc"
 	pluginsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/plugin"
 )
-
-const secretPlaceholder = "__OCTO_SECRET_PLACEHOLDER__"
-
-var secretFragments = []string{"token", "secret", "password", "passwd", "api_key", "apikey", "access_key", "private_key", "authorization", "cookie"}
 
 // DeterministicID creates stable IDs for backfilled rows, rendered as UUIDs
 // (version 8 = derived per RFC 9562, RFC variant) from sha256(family NUL
@@ -201,193 +197,32 @@ func canonicalConnectorDocs(outerName, pluginType string, tags []string, draftMa
 	return docs, nil
 }
 
-// teamAgentsMarkdown renders the deterministic AGENTS.md entry document of an
-// expert_team package from its legacy squad fields: collaboration prose,
-// leader, ordered dispatch strategies, dependencies, and permission. It is the
-// team package's O\nY attachment under the contract layout, and backfill and
-// repackage must render byte-identical output.
+// teamAgentsMarkdown delegates to the shared renderer so backfill, repackage,
+// and the live admin import all emit byte-identical expert_team AGENTS.md.
 func teamAgentsMarkdown(name, summary, leader string, strategies, dependencies any, permission string) string {
-	var b strings.Builder
-	b.WriteString("# " + strings.TrimSpace(name) + "\n")
-	if trimmed := strings.TrimSpace(summary); trimmed != "" {
-		b.WriteString("\n" + trimmed + "\n")
-	}
-	b.WriteString("\n## 协作方式\n")
-	if trimmed := strings.TrimSpace(leader); trimmed != "" {
-		b.WriteString("\n- Leader: " + trimmed + "\n")
-	}
-	if lines := stringItems(strategies); len(lines) > 0 {
-		b.WriteString("\n### 策略\n")
-		for i, line := range lines {
-			b.WriteString(fmt.Sprintf("%d. %s\n", i+1, line))
-		}
-	}
-	if deps, ok := dependencies.(map[string]any); ok {
-		blocking := stringItems(deps["blocking"])
-		recommended := stringItems(deps["recommended"])
-		if len(blocking) > 0 || len(recommended) > 0 {
-			b.WriteString("\n### 依赖\n")
-			for _, line := range blocking {
-				b.WriteString("- 阻塞: " + line + "\n")
-			}
-			for _, line := range recommended {
-				b.WriteString("- 推荐: " + line + "\n")
-			}
-		}
-	}
-	if trimmed := strings.TrimSpace(permission); trimmed != "" {
-		b.WriteString("\n### 权限\n" + trimmed + "\n")
-	}
-	return b.String()
+	return plugindoc.TeamAgentsMarkdown(name, summary, leader, strategies, dependencies, permission)
 }
 
-// entryMarkdown renders the minimal deterministic entry document (used when a
-// package must carry its contract entry file but the legacy source has no
-// authored text).
+// entryMarkdown delegates to the shared minimal-entry renderer.
 func entryMarkdown(name, summary string) string {
-	var b strings.Builder
-	b.WriteString("# " + strings.TrimSpace(name) + "\n")
-	if trimmed := strings.TrimSpace(summary); trimmed != "" {
-		b.WriteString("\n" + trimmed + "\n")
-	}
-	return b.String()
+	return plugindoc.EntryMarkdown(name, summary)
 }
 
-// expertAgentsMarkdown picks the expert package's AGENTS.md entry document:
-// the legacy instruction verbatim when present, else a minimal deterministic
-// document from the display fields (the contract requires the entry file).
+// expertAgentsMarkdown delegates to the shared expert AGENTS.md renderer.
 func expertAgentsMarkdown(name, summary, instruction string) string {
-	if trimmed := strings.TrimSpace(instruction); trimmed != "" {
-		return instruction
-	}
-	return entryMarkdown(name, summary)
+	return plugindoc.ExpertAgentsMarkdown(name, summary, instruction)
 }
 
-// stringItems extracts the non-blank string entries of a decoded JSON array.
+// stringItems delegates to the shared decoded-JSON-array extractor.
 func stringItems(value any) []string {
-	items, ok := value.([]any)
-	if !ok {
-		return nil
-	}
-	out := make([]string, 0, len(items))
-	for _, item := range items {
-		if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
-			out = append(out, strings.TrimSpace(text))
-		}
-	}
-	return out
+	return plugindoc.StringItems(value)
 }
 
-func secretShaped(key string) bool {
-	key = strings.TrimSpace(key)
-	var normalized strings.Builder
-	for i, r := range key {
-		if r == '-' || r == '.' || r == ' ' {
-			normalized.WriteByte('_')
-			continue
-		}
-		if i > 0 && r >= 'A' && r <= 'Z' {
-			prev := rune(key[i-1])
-			if prev != '_' && !(prev >= 'A' && prev <= 'Z') {
-				normalized.WriteByte('_')
-			}
-		}
-		normalized.WriteRune(r)
-	}
-	key = strings.ToLower(normalized.String())
-	for _, fragment := range secretFragments {
-		if strings.Contains(key, fragment) {
-			return true
-		}
-	}
-	return false
-}
-
-// SanitizeConnectorJSON enforces a deliberately stricter policy than legacy
-// writes: env/header values are blanked, and any non-empty value beneath a
-// secret-shaped key rejects the source record. It never returns secret values.
+// SanitizeConnectorJSON delegates to the shared connector-config sanitizer so
+// backfill and the live admin import blank env/header and secret-shaped values
+// identically. It never returns secret values.
 func SanitizeConnectorJSON(raw []byte) ([]byte, error) {
-	if len(strings.TrimSpace(string(raw))) == 0 {
-		raw = []byte(`{}`)
-	}
-	var value any
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
-	dec.UseNumber()
-	if err := dec.Decode(&value); err != nil {
-		return nil, fmt.Errorf("invalid JSON: %w", err)
-	}
-	if err := ensureJSONEOF(dec); err != nil {
-		return nil, err
-	}
-	root, ok := value.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("connector config must be an object")
-	}
-	if servers, present := root["mcpServers"]; present {
-		if _, ok := servers.(map[string]any); !ok {
-			return nil, fmt.Errorf("/mcpServers must be an object")
-		}
-	}
-	if err := sanitizeNode(value, ""); err != nil {
-		return nil, err
-	}
-	return json.Marshal(value)
-}
-
-func ensureJSONEOF(dec *json.Decoder) error {
-	var extra any
-	if err := dec.Decode(&extra); err == io.EOF {
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("invalid trailing JSON: %w", err)
-	}
-	return fmt.Errorf("multiple JSON values are not allowed")
-}
-
-func sanitizeNode(value any, path string) error {
-	switch node := value.(type) {
-	case map[string]any:
-		for key, child := range node {
-			childPath := path + "/" + key
-			normalizedKey := strings.ToLower(strings.TrimSpace(key))
-			if normalizedKey == "env" || normalizedKey == "headers" {
-				values, ok := child.(map[string]any)
-				if !ok {
-					return fmt.Errorf("%s must be an object", childPath)
-				}
-				for name, raw := range values {
-					if _, ok := raw.(string); !ok {
-						return fmt.Errorf("%s/%s must be a string", childPath, name)
-					}
-					values[name] = ""
-				}
-				continue
-			}
-			if secretShaped(key) {
-				switch typed := child.(type) {
-				case nil:
-				case string:
-					if typed != "" && typed != secretPlaceholder {
-						return fmt.Errorf("secret-shaped value rejected at %s", childPath)
-					}
-				default:
-					return fmt.Errorf("secret-shaped value rejected at %s", childPath)
-				}
-				node[key] = ""
-				continue
-			}
-			if err := sanitizeNode(child, childPath); err != nil {
-				return err
-			}
-		}
-	case []any:
-		for i, child := range node {
-			if err := sanitizeNode(child, fmt.Sprintf("%s/%d", path, i)); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return plugindoc.SanitizeConnectorJSON(raw)
 }
 
 func namesFromTagIDs(raw []byte, dictionary map[int64]string) ([]string, error) {

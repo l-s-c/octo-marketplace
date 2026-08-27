@@ -144,8 +144,12 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 
 		pluginSvc := pluginsvc.New(pluginRepo, store)
 		pluginSvc.SetArtifactLimits(int64(storageCfg.MaxMB) << 20)
-		pluginCats := pluginsvc.NewCategories(pluginRepo)
+		pluginCats := pluginsvc.NewCategories(pluginRepo, generateID)
 		pluginhandler.New(pluginSvc, pluginCats).Register(v1)
+		// Admin surface: /api/v1/admin/plugins(+/plugin_categories), cross-Space
+		// management of system connectors and global skills/experts, gated by the
+		// admin authenticator.
+		pluginhandler.NewAdmin(pluginSvc, pluginCats).RegisterAdmin(r, adminAuth)
 
 		catSvc := categorysvc.New(catRepo, skRepo)
 		skSvc := skillsvc.New(skRepo, catRepo, store, generateID)
@@ -153,7 +157,6 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 
 		catH := categoryhandler.New(catSvc)
 		catH.Register(v1)
-		catH.RegisterAdmin(r, adminAuth, generateID)
 		skHandler := skillhandler.New(skSvc)
 		skHandler.Register(v1)
 		skHandler.RegisterAdmin(r, adminAuth)
@@ -182,10 +185,6 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 		pluginSvc.WithProvisioner(expertSvc).WithMetrics(mSvc).WithParseTasks(skRepo)
 		expertHandler := experthandler.New(expertSvc)
 		expertHandler.Register(v1)
-		// Admin (superAdmin ∪ marketAdmin) surface: /api/v1/admin/experts|squads
-		// |expert_categories|expert_tags|expert_skill_uploads for managing
-		// platform-provided (visibility=system) records.
-		expertHandler.RegisterAdmin(r, adminAuth)
 
 		metricssvc.RegisterResolver("skill", metricssvc.NewSkillResolver(skSvc))
 		metricssvc.RegisterResolver("expert", metricssvc.NewExpertResolver(expertSvc))
@@ -257,13 +256,8 @@ func registerAdminMCP(r *gin.Engine, adminAuth *marketmiddleware.AdminAuthentica
 		return
 	}
 	rg := r.Group("/api/v1/admin/mcps", adminAuth.Handler(marketmiddleware.RoleMarketAdmin))
-	rg.POST("", admin.Create)
 	rg.POST("/_probe", admin.Probe)
 	rg.POST("/probe", deprecatedRoute("/api/v1/admin/mcps/_probe"), admin.Probe)
-	rg.GET("", admin.List)
-	rg.GET("/:mcp_id", admin.Get)
-	rg.PATCH("/:mcp_id", admin.Patch)
-	rg.DELETE("/:mcp_id", admin.Delete)
 	if mcpIcon != nil {
 		adminRoot := r.Group("/api/v1/admin", adminAuth.Handler(marketmiddleware.RoleMarketAdmin))
 		adminRoot.POST("/mcp_icon_uploads", mcpIcon.Init)

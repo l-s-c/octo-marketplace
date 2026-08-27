@@ -175,6 +175,16 @@ PR #67; this note is the decision record the brief's earlier wording predates.
     unguarded after the removal is only the skill package expansion/repackage
     *content* path (`expand.go`/`repackage.go`), which no longer runs a value
     scan over the rewritten package.
+  - The live admin **container import/reupload** path
+    (`Service.ImportContainer` / `ReuploadContainer`, via
+    `mcpAttachmentContent` in `internal/service/plugin/container.go`) also does
+    NOT scan or blank the container's `mcp_config`: it stores the value verbatim
+    into the rendered `mcp.json` attachment. This is deliberate and consistent
+    with the removal above — secret handling on this path is the client-side
+    `${PLACEHOLDER}` control (the browser sends references, not values), so the
+    backend must not reject or blank the config it is handed. It diverges from
+    the offline backfill, which still runs `SanitizeConnectorJSON`. (Owner
+    decision; the `mcpAttachmentContent` doc comment records the same rationale.)
 
   The "must not persist secret values" invariant in the load-bearing section is
   therefore **not enforced at the backend**. The tradeoff (accept this exposure
@@ -193,3 +203,80 @@ PR #67; this note is the decision record the brief's earlier wording predates.
   accepted as-is. This is recorded as an explicit decision (not an omission) so a
   future owner re-weighing it starts from a documented baseline; adding read-side
   blanking remains the cleanest non-heuristic mitigation if that call is revised.
+
+## Addendum: admin container-reupload endpoint (`feat/admin-plugin-surface`)
+
+### Goal
+
+Give octo-admin's expert/squad edit flow (a whole-zip re-upload) a first-class
+in-place rebuild endpoint, mirroring `POST /admin/plugins/skill_reupload/:plugin_id`
+for skills, so it can stop editing experts/squads through the legacy
+`/admin/experts/:id` / `/admin/squads/:id` PATCH routes.
+
+- Route: `POST /api/v1/admin/plugins/container_reupload/:plugin_id`
+  (operationId `admin_plugin.container_reupload`, `RoleMarketAdmin` gate).
+- Request shape identical to `POST /admin/plugins/import`: multipart `file`
+  (the container zip) + optional `category_id` form field — but targets an
+  existing plugin id instead of minting a new one.
+
+### Load-bearing behavior
+
+- Loads the existing top plugin under `adminScope(caller)`; 404 if missing or if
+  it is not `expert`/`expert_team` (a non-container row is reported as NOT_FOUND,
+  not probed). The parsed container kind must match the existing plugin's type,
+  else VALIDATION_ERROR. The zip stays hostile input (shared
+  zip-slip/symlink/bomb/size guards via `parseContainer`).
+- Rebuilds atomically in one transaction (`Repo.RebuildGraph`), PRESERVING the
+  top `plugin_id`, visibility, Space, owner, creator provenance, `created_at`,
+  icon, and its existing market placement. Only content is replaced
+  (package/manifest/hash/tags, and category per the `category_id` override —
+  empty keeps/clears exactly like import). The top's embedded children are
+  SWAPPED: new bundled skills / member experts + their skills get fresh ids and
+  `IsEmbedded=true`; the previous children and all their now-orphaned relations
+  are soft-deleted so they stop surfacing in any catalog/list.
+- Node-building is shared with the import path: `buildExpertGraph` /
+  `buildSquadGraph` produce the child mutations + top plugin + top relations for
+  both `ImportContainer` (→ `CreateGraph`) and `ReuploadContainer` (→
+  `RebuildGraph`); the import byte-for-byte behavior is unchanged.
+- New repo primitive `RebuildGraph(ctx, scope, top Mutation, newChildren
+  []Mutation, oldChildIDs []string) (*RelationSync, error)`: locks/proves the top
+  (phase 0), inserts new children so relation-target locks resolve (1) and wires
+  their relations (2), updates the top row in place — owner/space/creator/
+  created_at deliberately absent from the SET list (3), resyncs the top's
+  relations to the new children (4), soft-deletes the old children + their
+  outgoing relations with a delete audit each (5), and appends one update audit
+  for the top plus one create audit per new child (6). Object uploads for new
+  binary skill files are rolled back if the tx fails; old children's committed
+  objects are left untouched.
+
+### Out of scope
+
+- Retiring the legacy `/admin/experts` / `/admin/squads` PATCH routes (a
+  frontend-cutover concern).
+
+> **Superseded (owner directive, 2026-08).** The retirement of the legacy
+> per-type admin CRUD — including `/admin/experts` and `/admin/squads` — is no
+> longer out of scope: it was carried out on `feat/admin-plugin-surface` once
+> octo-admin cut over to the unified `/admin/plugins*` surface. This addendum's
+> out-of-scope line above predates that directive.
+- Re-attaching a market placement to a top plugin that never had one (rebuild
+  preserves the existing placement; it does not create one, matching AdminUpdate).
+- Any read-side secret blanking (unchanged; see the divergence record above).
+
+### Acceptance
+
+- `go build/vet ./...`, `gofmt -l` clean, `go test ./...` green, including:
+  service `TestReuploadExpertContainerRebuildsPackageAndSwapsSkillsPreservingIdentity`,
+  `TestReuploadExpertContainerThreadsCategoryOverride`,
+  `TestReuploadSquadContainerReplacesMembersAndTheirSkills`,
+  `TestReuploadContainerRejectsTypeMismatch`,
+  `TestReuploadContainerMissingPluginIs404`,
+  `TestReuploadContainerRejectsNonContainerType`; repo
+  `TestRebuildGraphSwapsChildrenPreservesTopAndSoftDeletesOld`,
+  `TestRebuildGraphMissingTopIsNotFound`; handler
+  `TestAdminReuploadContainerForwardsPluginIDArchiveAndAdminCaller`,
+  `TestAdminReuploadContainerRejectsNonAdminRole`.
+- `make openapi-check`: coverage ✅, lint ✅ (0 errors); the endpoint renders with
+  the standard envelopes and fixed error codes and regenerates idempotently. The
+  verify gate reports uncommitted-spec drift only because the generated spec is
+  intentionally not committed in this change.

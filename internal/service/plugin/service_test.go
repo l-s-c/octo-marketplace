@@ -22,11 +22,22 @@ type fakeStore struct {
 	create         *model.Plugin
 	createScope    pluginrepo.Scope
 	createRels     []model.PluginRelation
+	createPlace    []model.PluginPlacement
 	createAudit    model.PluginAuditLog
+	graphNodes     []pluginrepo.Mutation
+	graphScope     pluginrepo.Scope
+	graphErr       error
+	rebuildTop     *pluginrepo.Mutation
+	rebuildChild   []pluginrepo.Mutation
+	rebuildOldIDs  []string
+	rebuildScope   pluginrepo.Scope
+	rebuildErr     error
 	update         *model.Plugin
 	updateRels     []model.PluginRelation
 	deleteScope    pluginrepo.Scope
 	deleteID       string
+	deleteGraphID  string
+	deleteChildIDs []string
 	versionID      string
 	publishParams  pluginrepo.PublishParams
 	versions       []model.PluginVersion
@@ -80,6 +91,7 @@ func (f *fakeStore) GetWithRelations(_ context.Context, sc pluginrepo.Scope, id 
 func (f *fakeStore) Create(_ context.Context, s pluginrepo.Scope, m pluginrepo.Mutation) (*pluginrepo.RelationSync, error) {
 	p := m.Plugin
 	f.create, f.createRels, f.createScope = &p, m.Relations, s
+	f.createPlace = m.Placements
 	f.createAudit = model.PluginAuditLog{OperatorID: m.OperatorID, OperatorName: m.OperatorName, RequestID: m.RequestID, Remark: m.Remark}
 	if f.err != nil {
 		return nil, f.err
@@ -102,10 +114,133 @@ func (f *fakeStore) Update(_ context.Context, _ pluginrepo.Scope, m pluginrepo.M
 	}
 	return &pluginrepo.RelationSync{Created: []string{}, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}, nil
 }
+func (f *fakeStore) CreateGraph(_ context.Context, s pluginrepo.Scope, nodes []pluginrepo.Mutation) ([]*pluginrepo.RelationSync, error) {
+	f.graphNodes, f.graphScope = nodes, s
+	if f.graphErr != nil {
+		return nil, f.graphErr
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.plugins == nil {
+		f.plugins = map[string]*model.Plugin{}
+	}
+	if f.relations == nil {
+		f.relations = map[string][]model.PluginRelation{}
+	}
+	syncs := make([]*pluginrepo.RelationSync, len(nodes))
+	rc := 0
+	for i := range nodes {
+		p := nodes[i].Plugin
+		stored := p
+		f.plugins[p.ID] = &stored
+		rels := nodes[i].Relations
+		created := make([]string, 0, len(rels))
+		for j := range rels {
+			if rels[j].ID == "" {
+				rc++
+				rels[j].ID = "relation-" + strconv.Itoa(rc)
+			}
+			created = append(created, rels[j].ID)
+		}
+		f.relations[p.ID] = append([]model.PluginRelation(nil), rels...)
+		syncs[i] = &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: rels}
+	}
+	return syncs, nil
+}
 func (f *fakeStore) Delete(_ context.Context, s pluginrepo.Scope, id, _, _, _ string, _ *string) error {
 	f.deleteScope, f.deleteID = s, id
 	return f.err
 }
+func (f *fakeStore) DeleteGraph(_ context.Context, s pluginrepo.Scope, topID string, _, _, _ string, _ *string) error {
+	// Emulate the repo's in-tx derivation: the embedded child set is resolved from
+	// the committed graph here, NOT supplied by the caller, so these fakes exercise
+	// the same derivation the real DeleteGraph performs under the top's lock.
+	f.deleteScope, f.deleteGraphID, f.deleteChildIDs = s, topID, f.collectEmbeddedChildren(topID)
+	return f.err
+}
+func (f *fakeStore) RebuildGraph(_ context.Context, s pluginrepo.Scope, top pluginrepo.Mutation, children []pluginrepo.Mutation) (*pluginrepo.RelationSync, error) {
+	// Emulate the repo's in-tx derivation: derive the previous embedded child set
+	// from the committed graph BEFORE the new children overwrite it, mirroring the
+	// real RebuildGraph which resolves it under the top's FOR UPDATE lock instead of
+	// trusting a caller-supplied pre-parse snapshot.
+	oldChildIDs := f.collectEmbeddedChildren(top.Plugin.ID)
+	f.rebuildTop, f.rebuildChild, f.rebuildOldIDs, f.rebuildScope = &top, children, oldChildIDs, s
+	if f.rebuildErr != nil {
+		return nil, f.rebuildErr
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.plugins == nil {
+		f.plugins = map[string]*model.Plugin{}
+	}
+	if f.relations == nil {
+		f.relations = map[string][]model.PluginRelation{}
+	}
+	// Persist the new children and the rebuilt top so a follow-up read reflects
+	// the swap; soft-delete the old children by dropping them from the store.
+	for i := range children {
+		p := children[i].Plugin
+		stored := p
+		f.plugins[p.ID] = &stored
+		f.relations[p.ID] = append([]model.PluginRelation(nil), children[i].Relations...)
+	}
+	tp := top.Plugin
+	f.plugins[tp.ID] = &tp
+	for _, id := range oldChildIDs {
+		delete(f.plugins, id)
+		delete(f.relations, id)
+	}
+	rels := top.Relations
+	created := make([]string, 0, len(rels))
+	for j := range rels {
+		if rels[j].ID == "" {
+			rels[j].ID = "relation-rebuilt-" + strconv.Itoa(j+1)
+		}
+		created = append(created, rels[j].ID)
+	}
+	f.relations[tp.ID] = append([]model.PluginRelation(nil), rels...)
+	return &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: rels}, nil
+}
+
+// collectEmbeddedChildren mirrors the repository's in-tx collectEmbeddedChildren:
+// it resolves the top's embedded descendants from the fake's committed graph
+// (plugins + relations), collecting only is_embedded targets so a standalone
+// catalog row the top merely references is never torn down. RebuildGraph and
+// DeleteGraph call it so the service tests exercise derivation-from-committed-
+// state instead of a caller-supplied child list.
+func (f *fakeStore) collectEmbeddedChildren(topID string) []string {
+	top := f.plugins[topID]
+	if top == nil {
+		return nil
+	}
+	embeddedTargets := func(source, relType string) []string {
+		var out []string
+		for _, r := range f.relations[source] {
+			if r.Type != relType {
+				continue
+			}
+			if t := f.plugins[r.TargetPluginID]; t != nil && t.IsEmbedded {
+				out = append(out, r.TargetPluginID)
+			}
+		}
+		return out
+	}
+	switch top.Type {
+	case model.PluginTypeExpert:
+		return embeddedTargets(topID, "expert_skill")
+	case model.PluginTypeExpertTeam:
+		var ids []string
+		for _, member := range embeddedTargets(topID, "expert_team_expert") {
+			ids = append(ids, member)
+			ids = append(ids, embeddedTargets(member, "expert_skill")...)
+		}
+		return ids
+	}
+	return nil
+}
+
 func (f *fakeStore) ListVersions(_ context.Context, _ pluginrepo.Scope, id string, _, _ int) ([]model.PluginVersion, int64, error) {
 	f.versionID = id
 	return f.versions, f.versionTotal, f.err
@@ -328,8 +463,8 @@ func TestCreateRejectsInvalidFieldsAndJSONShapes(t *testing.T) {
 
 func TestCreateRejectsPublicVisibilityForNonAdmin(t *testing.T) {
 	// A tenant caller (IsSystemAdmin=false) may not self-publish a globally
-	// visible plugin; public/system are admin-only. Mirrors the import rule
-	// (TestImportRejectsPublicVisibility) and the legacy skill service.
+	// visible plugin; public/system are admin-only on the tenant path. Mirrors the
+	// import rule (TestImportRejectsPublicVisibility) and the legacy skill service.
 	for _, vis := range []model.PluginVisibility{model.PluginVisibilityPublic, model.PluginVisibilitySystem} {
 		req := validRequest()
 		req.Visibility = vis
@@ -337,13 +472,19 @@ func TestCreateRejectsPublicVisibilityForNonAdmin(t *testing.T) {
 			t.Fatalf("visibility=%s non-admin create err = %v, want ErrInvalidRequest", vis, err)
 		}
 	}
-	// An admin caller (IsSystemAdmin=true) may set public.
+	// An admin caller (IsSystemAdmin=true) may set the unified `system` global
+	// value, but NOT `public` — public is retired on the write path (validVisibility
+	// rejects it for everyone), so even a systemAdmin upsert cannot mint one.
 	admin := testCaller
 	admin.IsSystemAdmin = true
 	req := validRequest()
+	req.Visibility = model.PluginVisibilitySystem
+	if _, err := fixedService(&fakeStore{plugins: map[string]*model.Plugin{}}).Create(context.Background(), admin, req); err != nil {
+		t.Fatalf("admin system create err = %v", err)
+	}
 	req.Visibility = model.PluginVisibilityPublic
-	if _, err := fixedService(&fakeStore{}).Create(context.Background(), admin, req); err != nil {
-		t.Fatalf("admin public create err = %v", err)
+	if _, err := fixedService(&fakeStore{}).Create(context.Background(), admin, req); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("admin public create err = %v, want ErrInvalidRequest (public retired on write)", err)
 	}
 }
 
@@ -486,6 +627,73 @@ func TestCreateReturnsRelationResultWithGeneratedIDs(t *testing.T) {
 	}
 	if len(v.Relations) != 1 || v.Relations[0].ID != "relation-created" {
 		t.Fatalf("relations = %#v", v.Relations)
+	}
+}
+
+// TestDeleteExpertRemovesEmbeddedChildrenNotStandalone is the P1-1 tenant
+// regression: a tenant deleting their own expert routes through DeleteGraph under
+// the TENANT scope and tears down its embedded bundled skills, while a standalone
+// catalog skill (is_embedded=0) merely referenced by the same expert survives.
+func TestDeleteExpertRemovesEmbeddedChildrenNotStandalone(t *testing.T) {
+	expert := &model.Plugin{ID: "expert-1", Name: "E", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), Visibility: model.PluginVisibilitySpace, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	embedded := &model.Plugin{ID: "skill-emb", Name: "Bundled", Type: model.PluginTypeSkill, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), Visibility: model.PluginVisibilitySpace, IsEmbedded: true, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	standalone := &model.Plugin{ID: "skill-std", Name: "Shared", Type: model.PluginTypeSkill, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), Visibility: model.PluginVisibilitySystem, IsEmbedded: false, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	f := &fakeStore{
+		plugins: map[string]*model.Plugin{"expert-1": expert, "skill-emb": embedded, "skill-std": standalone},
+		relations: map[string][]model.PluginRelation{"expert-1": {
+			{ID: "r1", SourcePluginID: "expert-1", TargetPluginID: "skill-emb", TargetPluginType: model.PluginTypeSkill, Type: "expert_skill", Status: 1},
+			{ID: "r2", SourcePluginID: "expert-1", TargetPluginID: "skill-std", TargetPluginType: model.PluginTypeSkill, Type: "expert_skill", Status: 1},
+		}},
+	}
+	if err := fixedService(f).Delete(context.Background(), testCaller, "expert-1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if f.deleteGraphID != "expert-1" {
+		t.Fatalf("tenant expert must delete through DeleteGraph, got graph id %q (deleteID=%q)", f.deleteGraphID, f.deleteID)
+	}
+	if f.deleteScope.Admin {
+		t.Fatal("tenant delete must run under the tenant scope, not admin")
+	}
+	if len(f.deleteChildIDs) != 1 || f.deleteChildIDs[0] != "skill-emb" {
+		t.Fatalf("child ids = %#v, want only the embedded [skill-emb]", f.deleteChildIDs)
+	}
+}
+
+// TestUpdateForwardsOwnEmbeddedChildEdge is the P0-1 service-level regression: the
+// service must not itself block resubmitting an edge to an embedded child on an
+// Update — it forwards the edge to the repo, which enforces the ALREADY-owns
+// exemption. (A NEW edge to a foreign embedded child is rejected at the repo
+// boundary; see the repo-level tests.)
+func TestUpdateForwardsOwnEmbeddedChildEdge(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{
+		"expert-1":  {ID: "expert-1", Name: "Example Plugin", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},
+		"skill-emb": {ID: "skill-emb", Type: model.PluginTypeSkill, IsEmbedded: true},
+	}}
+	req := validRequest()
+	req.Relations = []RelationRequest{{ID: "rel-1", SourcePluginID: "expert-1", TargetPluginID: "skill-emb", Type: "expert_skill"}}
+	if _, err := fixedService(f).Update(context.Background(), testCaller, "expert-1", req); err != nil {
+		t.Fatalf("service Update blocked its own embedded-child edge: %v", err)
+	}
+	if len(f.updateRels) != 1 || f.updateRels[0].TargetPluginID != "skill-emb" {
+		t.Fatalf("embedded-child edge not forwarded to repo: %#v", f.updateRels)
+	}
+}
+
+// TestUpdateRejectsEmbeddedChildOutOfBand is the tenant-side embedded-guard
+// regression (service.go): a bundled skill / squad member (is_embedded=1) is
+// owned by its container graph and may be content-swapped only through a
+// container reupload. Even the OWNER hitting the standalone /plugins upsert path
+// on an embedded child gets ErrNotFound — the row is invisible to out-of-band
+// edits — and the write never reaches the repo. Mirrors AdminUpdate's guard.
+func TestUpdateRejectsEmbeddedChildOutOfBand(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{
+		"skill-emb": {ID: "skill-emb", Name: "Bundled", Type: model.PluginTypeSkill, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), Visibility: model.PluginVisibilitySpace, IsEmbedded: true, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)},
+	}}
+	if _, err := fixedService(f).Update(context.Background(), testCaller, "skill-emb", validRequest()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound for an embedded child", err)
+	}
+	if f.update != nil {
+		t.Fatalf("an embedded-child update must not reach the repo: %#v", f.update)
 	}
 }
 

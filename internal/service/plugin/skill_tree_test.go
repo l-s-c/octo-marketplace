@@ -65,7 +65,7 @@ func TestBuildSkillAttachmentTreeClassifiesAndRoots(t *testing.T) {
 	})
 	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
 
-	atts, uploaded, spilled, err := svc.buildSkillAttachmentTree(context.Background(), "space-a", "plug-1", zipData, nil)
+	atts, uploaded, spilled, err := svc.buildSkillAttachmentTree(context.Background(), "space-a", "plug-1", zipData, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestBuildSkillAttachmentTreeDeterministicAndOverride(t *testing.T) {
 
 	// skillMDOverride replaces the SKILL.md bytes (import injects frontmatter).
 	override := []byte("---\nname: x\n---\n# rewritten")
-	a1, _, _, err := svc.buildSkillAttachmentTree(context.Background(), "space-a", "plug-1", zipData, override)
+	a1, _, _, err := svc.buildSkillAttachmentTree(context.Background(), "space-a", "plug-1", zipData, override, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestBuildSkillAttachmentTreeDeterministicAndOverride(t *testing.T) {
 		t.Fatalf("override not applied: %#v", decodeTree(t, a1)["SKILL.md"])
 	}
 	// Same inputs → byte-identical attachment maps (idempotent re-run).
-	a2, _, _, err := svc.buildSkillAttachmentTree(context.Background(), "space-a", "plug-1", zipData, override)
+	a2, _, _, err := svc.buildSkillAttachmentTree(context.Background(), "space-a", "plug-1", zipData, override, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestBuildSkillAttachmentTreeSpillsOversizeText(t *testing.T) {
 		"references/big.txt": big,
 	})
 	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
-	atts, uploaded, spilled, err := svc.buildSkillAttachmentTree(context.Background(), "space-a", "plug-1", zipData, nil)
+	atts, uploaded, spilled, err := svc.buildSkillAttachmentTree(context.Background(), "space-a", "plug-1", zipData, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestSkillPackageRoundTrip(t *testing.T) {
 	blobs := &importStorage{objects: map[string][]byte{}}
 	svc := New(&fakeStore{}, blobs)
 
-	atts, _, _, err := svc.buildSkillAttachmentTree(context.Background(), space, "plug-1", zipData, nil)
+	atts, _, _, err := svc.buildSkillAttachmentTree(context.Background(), space, "plug-1", zipData, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

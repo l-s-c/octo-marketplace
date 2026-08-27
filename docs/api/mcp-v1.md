@@ -762,8 +762,7 @@ A separate, non-public path used by `octo-admin` (the platform admin
 console) to create and list platform-provided (`visibility = system`) MCP
 records. The public `/api/v1/mcps` endpoints continue to REJECT
 `visibility = system` on write with
-`err.marketplace.mcp.invalid_visibility` (§2) — the admin surface is the
-ONLY path that can mint or manage system-visibility records.
+`err.marketplace.mcp.invalid_visibility` (§2).
 
 Base path: **`/api/v1/admin/mcps`** (a subpath of the same `/api/v1`
 namespace as the public surface, so the gateway `/market/*` prefix
@@ -777,10 +776,7 @@ rewrite handles both uniformly).
 
 `marketAdmin` is an octo-server role for staff who run the platform market and
 hold no administrative power outside this service. It is admitted on every
-`/api/v1/admin/*` group — the MCP admin routes documented here, the Skill catalog
-routes, and the Expert Market routes — and on the legacy
-`/api/v1/skill/admin/categories` alias, which sits outside that prefix but mounts
-the same handlers as `/api/v1/admin/skill_categories`.
+`/api/v1/admin/*` group.
 
 **No `X-Space-Id` required.** Admin routes operate globally — the middleware
 resolves the caller's admin identity and stamps it into the request
@@ -795,61 +791,24 @@ octo-server during local development.
 
 ### 9.2 Endpoints
 
-**`POST /api/v1/admin/mcps`** — create a system MCP.
+**Retired.** The per-type MCP admin CRUD (`POST/GET /api/v1/admin/mcps`,
+`GET/PATCH/DELETE /api/v1/admin/mcps/{mcp_id}`) has been removed. octo-admin now
+creates, lists, edits and deletes system MCPs through the unified plugin admin
+surface — `/api/v1/admin/plugins*` with `plugin_type=connector` (see the
+`admin_plugin` tag in `docs/openapi/`). Old clients calling the retired CRUD
+paths receive `404`.
 
-- Body: same shape as public `POST /mcps` (§4.1). Any `visibility` value
-  in the body is silently overridden to `"system"`. `space_id` is
-  always stored as NULL (system records are cross-Space).
-- Response (201): full `McpDetail` (§3.1) with `visibility = "system"`,
-  `creator_name` = the configured admin identity, and no space
-  attribution on the wire.
-- Errors: 400 `invalid_request` / `invalid_transport` /
-  `slug_invalid`; 401 `auth.admin_unauthorized`;
-  409 `name_taken` / `slug_taken`
-  (the `(owner_uid, space_id=NULL, name)` uniqueness constraint applies
-  per §7).
+Only two admin MCP endpoints are retained on this base path, because they have
+no unified-surface equivalent:
 
-**`GET /api/v1/admin/mcps`** — list system MCPs across all Spaces.
+**`POST /api/v1/admin/mcps/_probe`** — stateless connection probe (the wizard's
+"试连 / 获取工具列表" button). Same request/response as the public
+`POST /api/v1/mcps/_probe` (§4.7); admin-gated so the console can probe before a
+record exists. (`POST /api/v1/admin/mcps/probe` remains as a deprecated alias.)
 
-- Query: same `keyword` / `category` / `limit` / `offset` as public
-  `GET /mcps` (§4.2). `category=all` disables the category filter.
-- Response (200): `{items, total, categories}` envelope (§4.2), with
-  the visibility rule collapsed to `visibility = 'system'`. `space_id`
-  is never returned (system rows carry NULL).
-- Errors: 401 `auth.admin_unauthorized`.
-
-**`GET /api/v1/admin/mcps/{mcp_id}`** — fetch a system MCP detail.
-
-- Response (200): full `McpDetail` (§3.1). A record whose visibility is
-  not `system` collapses to 404 — the admin surface deliberately cannot
-  peek at Space-scoped records by ID.
-- Errors: 401 `auth.admin_unauthorized`; 404 `not_found`.
-
-**`PATCH /api/v1/admin/mcps/{mcp_id}`** — update a system MCP.
-
-- Body: same partial-update shape as public `PATCH /mcps/{mcp_id}` (§4.5).
-  Any `visibility` in the body must be `"system"` (or omitted); other
-  values are rejected 400 `invalid_visibility` — a PATCH cannot demote
-  a system row to public/private (which would silently strip it from
-  the admin list and grant it a fictitious Space).
-- Ownership is not enforced on this path: any authenticated admin can
-  edit any system MCP (contrast with public `PATCH` which is
-  owner-only per §4.5).
-- Response (200): the refreshed `McpDetail` (§3.1). Secret redaction
-  rules from §5 apply to any touched `env` / `headers` entries.
-- Errors: 400 `invalid_request` / `invalid_transport` /
-  `invalid_visibility` / `slug_invalid`; 401
-  `auth.admin_unauthorized`; 404 `not_found`; 409 `name_taken` /
-  `slug_taken`.
-
-**`DELETE /api/v1/admin/mcps/{mcp_id}`** — soft-delete a system MCP.
-
-- Same soft-delete semantics as public `DELETE /mcps/{mcp_id}` (§4.6):
-  `deleted_at` is stamped; the record disappears from admin/public
-  list responses and detail lookups.
-- Ownership is not enforced (see PATCH note above).
-- Response (204): empty body.
-- Errors: 401 `auth.admin_unauthorized`; 404 `not_found`.
+**`POST /api/v1/admin/mcp_icon_uploads`** — presigned icon-upload handshake for
+the admin console, sharing the user surface's icon handler. (`POST
+/api/v1/admin/mcps/upload/icon` remains as a deprecated alias.)
 
 ### 9.3 Error codes added by this surface
 

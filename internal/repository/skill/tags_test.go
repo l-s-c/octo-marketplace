@@ -2,8 +2,6 @@ package skill
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -109,53 +107,6 @@ func TestResolveOrCreateTagIDsPrefersSpaceLocalCollision(t *testing.T) {
 	}
 	if len(ids) != 1 || ids[0] != 22 {
 		t.Fatalf("ids = %#v, want local tag id 22", ids)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestAdminUpdateSkillAndConsumeTaskUpsertsGlobalTags(t *testing.T) {
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE parse_tasks SET status = 'consumed'").
-		WithArgs("task-1", "admin-1", GlobalTagSpaceID, "skill-1").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery("SELECT id").
-		WithArgs("official", GlobalTagSpaceID, GlobalTagSpaceID, GlobalTagSpaceID).
-		WillReturnError(sql.ErrNoRows)
-	mock.ExpectExec("INSERT INTO skill_tags").
-		WithArgs(GlobalTagSpaceID, "official", "admin-1").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery("SELECT id").
-		WithArgs("official", GlobalTagSpaceID, GlobalTagSpaceID, GlobalTagSpaceID).
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(1)))
-	mock.ExpectExec("UPDATE skills SET tags = \\? WHERE id = \\? AND is_deleted = 0").
-		WithArgs(`[1]`, "skill-1").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
-
-	err = New(db).AdminUpdateSkillAndConsumeTask(
-		context.Background(),
-		"skill-1",
-		"admin-1",
-		"admin-1",
-		GlobalTagSpaceID,
-		UpdateParams{
-			Tags:     json.RawMessage(`["official"]`),
-			TagNames: []string{"official"},
-		},
-		"task-1",
-		"skill-1",
-		nil,
-	)
-	if err != nil {
-		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

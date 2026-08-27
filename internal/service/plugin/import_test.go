@@ -251,6 +251,29 @@ func TestImportReuploadPreservesIconWhenOmitted(t *testing.T) {
 	}
 }
 
+// TestImportReuploadRejectsEmbeddedChild is the tenant-side embedded-guard
+// regression (import.go): re-importing (a standalone skill upload bound to an
+// existing plugin_id) an is_embedded=1 row — a bundled skill / squad member owned
+// by its container graph — returns ErrNotFound even for the owner, so it can only
+// be swapped through a container reupload. The parse task is never consumed (the
+// guard fires before mutation), so the upload stays retryable.
+func TestImportReuploadRejectsEmbeddedChild(t *testing.T) {
+	store, _, tasks, svc := importFixtures(t)
+	space := "space-a"
+	store.plugins["skill-emb"] = &model.Plugin{ID: "skill-emb", Name: "Bundled", Type: model.PluginTypeSkill, OwnerUID: "user-1", SpaceID: &space, Visibility: model.PluginVisibilitySpace, IsEmbedded: true, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{"attachments":[]}`)}
+
+	_, err := svc.Import(context.Background(), testCaller, ImportParams{ParseTaskID: "task-1", PluginID: "skill-emb", Version: "3.0.0"})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound for an embedded child", err)
+	}
+	if store.update != nil {
+		t.Fatalf("an embedded-child re-import must not mutate the row: %#v", store.update)
+	}
+	if len(tasks.consumed) != 0 {
+		t.Fatalf("parse task consumed on the embedded-child guard: %#v", tasks.consumed)
+	}
+}
+
 func TestImportRejectsForeignUnfinishedOrReboundTasks(t *testing.T) {
 	for _, mutate := range []func(*skillrepo.ParseTaskRow){
 		func(task *skillrepo.ParseTaskRow) { task.OwnerID = "attacker" },
