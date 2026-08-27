@@ -126,6 +126,26 @@ func (r *Runner) buildEnrich(ctx context.Context) (enrichPlan, error) {
 // unified category so the API and web adapters can rely on one derivation.
 func ConnectorCategoryID(key string) string { return DeterministicID("mcpcat", key) }
 
+// connectorCategoryNames localizes the legacy MCP category slugs to the display
+// names stored directly in plugin_categories — mirroring how skill categories
+// carry their Chinese name from the legacy `categories` table. The web renders
+// the stored name as-is (dynamic categories), so the display label lives in the
+// DB rather than a client-side translation. Unknown slugs keep their raw key.
+var connectorCategoryNames = map[string]string{
+	"dev":          "开发工具",
+	"data":         "数据服务",
+	"search":       "搜索检索",
+	"productivity": "效率协作",
+	"ai":           "AI能力",
+}
+
+func connectorCategoryName(key string) string {
+	if name, ok := connectorCategoryNames[key]; ok {
+		return name
+	}
+	return key
+}
+
 func (r *Runner) enrichConnectorCategories(ctx context.Context, p *enrichPlan) error {
 	rows, err := r.db.QueryContext(ctx, `SELECT id, category FROM mcp_servers WHERE deleted_at IS NULL ORDER BY id`)
 	if err != nil {
@@ -158,12 +178,12 @@ func (r *Runner) enrichConnectorCategories(ctx context.Context, p *enrichPlan) e
 			return err
 		}
 		if !exists {
-			// The category name is the legacy enum key itself: the web client keeps
-			// translating keys to localized labels exactly as before.
+			// Store the localized display name directly (see connectorCategoryNames);
+			// the web renders plugin_categories.name as-is.
 			p.actions = append(p.actions, enrichAction{
 				count: func(c *EnrichCounts) *int { return &c.ConnectorCategories },
 				query: `INSERT INTO plugin_categories(category_id,name,icon_key,plugin_types_json,sort_order,status,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?)`,
-				args:  []any{catID, key, "", `["connector"]`, order, enrichStamp, enrichStamp},
+				args:  []any{catID, connectorCategoryName(key), "", `["connector"]`, order, enrichStamp, enrichStamp},
 			})
 		}
 		cpID := DeterministicID("category_placement", "default#connector#"+catID)
