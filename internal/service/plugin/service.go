@@ -53,6 +53,7 @@ type Store interface {
 	RebuildGraph(context.Context, pluginrepo.Scope, pluginrepo.Mutation, []pluginrepo.Mutation, []string) (*pluginrepo.RelationSync, error)
 	Update(context.Context, pluginrepo.Scope, pluginrepo.Mutation) (*pluginrepo.RelationSync, error)
 	Delete(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
+	DeleteGraph(context.Context, pluginrepo.Scope, string, []string, string, string, string, *string) error
 	ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, int64, error)
 	VersionExists(context.Context, pluginrepo.Scope, string, string) (bool, error)
 	Publish(context.Context, pluginrepo.Scope, pluginrepo.PublishParams) (*model.PluginVersion, error)

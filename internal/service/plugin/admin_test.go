@@ -231,4 +231,68 @@ func TestAdminDeleteUsesAdminScope(t *testing.T) {
 	if !f.deleteScope.Admin || f.deleteID != "plugin-1" {
 		t.Fatalf("deleteScope=%#v id=%q", f.deleteScope, f.deleteID)
 	}
+	if f.deleteGraphID != "" {
+		t.Fatalf("a skill must take the single-row Delete, not DeleteGraph: %q", f.deleteGraphID)
+	}
+}
+
+// TestAdminDeleteExpertRemovesEmbeddedChildrenNotStandalone is the orphaned-child
+// regression: deleting an expert top routes through DeleteGraph and tears down its
+// embedded bundled skills, while a standalone catalog skill (is_embedded=0) merely
+// referenced by the same expert is left intact.
+func TestAdminDeleteExpertRemovesEmbeddedChildrenNotStandalone(t *testing.T) {
+	space := "space-x"
+	expert := &model.Plugin{ID: "expert-1", Name: "E", Type: model.PluginTypeExpert, SpaceID: &space, Visibility: model.PluginVisibilitySpace, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	embedded := &model.Plugin{ID: "skill-emb", Name: "Bundled", Type: model.PluginTypeSkill, SpaceID: &space, Visibility: model.PluginVisibilitySpace, IsEmbedded: true, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	standalone := &model.Plugin{ID: "skill-std", Name: "Shared", Type: model.PluginTypeSkill, SpaceID: &space, Visibility: model.PluginVisibilitySystem, IsEmbedded: false, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	f := &fakeStore{
+		plugins: map[string]*model.Plugin{"expert-1": expert, "skill-emb": embedded, "skill-std": standalone},
+		relations: map[string][]model.PluginRelation{"expert-1": {
+			{ID: "r1", SourcePluginID: "expert-1", TargetPluginID: "skill-emb", TargetPluginType: model.PluginTypeSkill, Type: "expert_skill", Status: 1},
+			{ID: "r2", SourcePluginID: "expert-1", TargetPluginID: "skill-std", TargetPluginType: model.PluginTypeSkill, Type: "expert_skill", Status: 1},
+		}},
+	}
+	if err := fixedService(f).AdminDelete(context.Background(), adminCaller, "expert-1"); err != nil {
+		t.Fatalf("AdminDelete: %v", err)
+	}
+	if f.deleteGraphID != "expert-1" {
+		t.Fatalf("expert must be deleted through DeleteGraph, got graph id %q", f.deleteGraphID)
+	}
+	if f.deleteID != "" {
+		t.Fatalf("expert must not use the single-row Delete: %q", f.deleteID)
+	}
+	if len(f.deleteChildIDs) != 1 || f.deleteChildIDs[0] != "skill-emb" {
+		t.Fatalf("child ids = %#v, want only the embedded [skill-emb]", f.deleteChildIDs)
+	}
+}
+
+// TestAdminUpdateRejectsEmbeddedChild pins that a bundled skill / squad member
+// (is_embedded=1) cannot be content-edited through the standalone PATCH surface —
+// it is owned by its container graph and reported as not found.
+func TestAdminUpdateRejectsEmbeddedChild(t *testing.T) {
+	space := "space-x"
+	embedded := &model.Plugin{ID: "skill-emb", Name: "Bundled", Type: model.PluginTypeSkill, SpaceID: &space, Visibility: model.PluginVisibilitySpace, IsEmbedded: true, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	f := &fakeStore{plugins: map[string]*model.Plugin{"skill-emb": embedded}}
+	if _, err := fixedService(f).AdminUpdate(context.Background(), adminCaller, "skill-emb", adminSkillRequest()); err != ErrNotFound {
+		t.Fatalf("err=%v want ErrNotFound", err)
+	}
+	if f.update != nil {
+		t.Fatal("an embedded child must not reach Update")
+	}
+}
+
+// TestAdminUpdatePreservesCurrentVersion confirms the reupload/edit response
+// carries the published version LABEL, not just its id.
+func TestAdminUpdatePreservesCurrentVersion(t *testing.T) {
+	space := adminGlobalSpace
+	ver := "3.1.0"
+	verID := "ver-9"
+	existing := &model.Plugin{ID: "skill-1", Name: "Ops Skill", Type: model.PluginTypeSkill, SpaceID: &space, Visibility: model.PluginVisibilityPublic, CurrentVersionID: &verID, CurrentVersion: &ver, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	f := &fakeStore{plugins: map[string]*model.Plugin{"skill-1": existing}}
+	if _, err := fixedService(f).AdminUpdate(context.Background(), adminCaller, "skill-1", adminSkillRequest()); err != nil {
+		t.Fatalf("AdminUpdate: %v", err)
+	}
+	if f.update == nil || f.update.CurrentVersion == nil || *f.update.CurrentVersion != ver {
+		t.Fatalf("current_version not preserved: %#v", f.update)
+	}
 }

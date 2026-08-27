@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +31,9 @@ type fakeAdminService struct {
 	reuploadID   string
 	skillParams  pluginsvc.ImportParams
 	deletedID    string
+	skillMD      string
+	download     *pluginsvc.SkillPackageStream
+	artifactID   string
 	err          error
 }
 
@@ -64,6 +68,17 @@ func (f *fakeAdminService) AdminUpdate(_ context.Context, c pluginsvc.Caller, _ 
 func (f *fakeAdminService) AdminDelete(_ context.Context, c pluginsvc.Caller, id string) error {
 	f.caller, f.deletedID = c, id
 	return f.err
+}
+func (f *fakeAdminService) AdminSkillMarkdown(_ context.Context, c pluginsvc.Caller, id string) (string, error) {
+	f.caller, f.artifactID = c, id
+	return f.skillMD, f.err
+}
+func (f *fakeAdminService) AdminOpenSkillPackage(_ context.Context, c pluginsvc.Caller, id string) (*pluginsvc.SkillPackageStream, error) {
+	f.caller, f.artifactID = c, id
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.download, nil
 }
 
 type fakeAdminCategories struct {
@@ -389,6 +404,69 @@ func TestAdminDeleteReturnsPluginID(t *testing.T) {
 	}
 }
 
+// TestAdminSkillMarkdownReturnsContent proves the admin skill_md route admits a
+// marketAdmin (not 403/404), forwards the plugin_id, and renders the SKILL.md as
+// { "data": { "content": ... } }.
+func TestAdminSkillMarkdownReturnsContent(t *testing.T) {
+	f := &fakeAdminService{skillMD: "# Ops Skill\nbody"}
+	rec := httptest.NewRecorder()
+	adminTestEngine(f, &fakeAdminCategories{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/plugins/skill-1/skill_md", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !f.caller.IsSystemAdmin || f.artifactID != "skill-1" {
+		t.Fatalf("caller=%#v artifactID=%q", f.caller, f.artifactID)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"content":"# Ops Skill\nbody"`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"data"`)) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestAdminSkillMarkdownNotFoundIs404(t *testing.T) {
+	f := &fakeAdminService{err: pluginsvc.ErrNotFound}
+	rec := httptest.NewRecorder()
+	adminTestEngine(f, &fakeAdminCategories{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/plugins/other/skill_md", nil))
+	if rec.Code != http.StatusNotFound || !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"NOT_FOUND"`)) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAdminDownloadStreamsZip proves the admin download route admits a marketAdmin,
+// forwards the plugin_id, streams the reconstructed zip, and sets the zip content
+// headers (application/zip + nosniff).
+func TestAdminDownloadStreamsZip(t *testing.T) {
+	f := &fakeAdminService{download: &pluginsvc.SkillPackageStream{FileName: "Ops.zip", Write: func(w io.Writer) error {
+		_, err := w.Write([]byte("PK-zip-bytes"))
+		return err
+	}}}
+	rec := httptest.NewRecorder()
+	adminTestEngine(f, &fakeAdminCategories{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/plugins/skill-9/download", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if f.artifactID != "skill-9" || !f.caller.IsSystemAdmin {
+		t.Fatalf("caller=%#v artifactID=%q", f.caller, f.artifactID)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/zip" {
+		t.Fatalf("Content-Type=%q, want application/zip", ct)
+	}
+	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("missing nosniff header")
+	}
+	if rec.Body.String() != "PK-zip-bytes" {
+		t.Fatalf("body=%q", rec.Body.String())
+	}
+}
+
+func TestAdminDownloadNotFoundIs404(t *testing.T) {
+	f := &fakeAdminService{err: pluginsvc.ErrNotFound}
+	rec := httptest.NewRecorder()
+	adminTestEngine(f, &fakeAdminCategories{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/plugins/other/download", nil))
+	if rec.Code != http.StatusNotFound || !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"NOT_FOUND"`)) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAdminCreateCategoryForwardsFieldsAndRendersDTO(t *testing.T) {
 	cats := &fakeAdminCategories{created: &model.PluginCategory{ID: "cat-new", Name: "Ops", IconKey: "k", PluginTypes: json.RawMessage(`["expert","expert_team"]`), SortOrder: 5}}
 	body := []byte(`{"name":"Ops","icon_key":"k","plugin_types":["expert","expert_team"],"sort_order":5}`)
@@ -477,6 +555,8 @@ func TestAdminRoutesAreRoleGated(t *testing.T) {
 		{http.MethodPost, "/api/v1/admin/plugins/skill_import"},
 		{http.MethodPost, "/api/v1/admin/plugins/skill_reupload/p1"},
 		{http.MethodGet, "/api/v1/admin/plugins/p1"},
+		{http.MethodGet, "/api/v1/admin/plugins/p1/skill_md"},
+		{http.MethodGet, "/api/v1/admin/plugins/p1/download"},
 		{http.MethodPatch, "/api/v1/admin/plugins/p1"},
 		{http.MethodDelete, "/api/v1/admin/plugins/p1"},
 		{http.MethodGet, "/api/v1/admin/plugin_categories?plugin_type=skill"},

@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -28,6 +29,8 @@ type AdminService interface {
 	AdminImport(context.Context, pluginsvc.Caller, pluginsvc.ImportParams) (*pluginsvc.Detail, error)
 	AdminUpdate(context.Context, pluginsvc.Caller, string, pluginsvc.WriteRequest) (*pluginsvc.Detail, error)
 	AdminDelete(context.Context, pluginsvc.Caller, string) error
+	AdminSkillMarkdown(context.Context, pluginsvc.Caller, string) (string, error)
+	AdminOpenSkillPackage(context.Context, pluginsvc.Caller, string) (*pluginsvc.SkillPackageStream, error)
 }
 
 // AdminCategoryService is the handler-facing boundary over the admin taxonomy
@@ -67,6 +70,8 @@ func (h *AdminHandler) RegisterAdmin(r *gin.Engine, adminAuth *marketmiddleware.
 	plugins.POST("/skill_import", h.SkillImport)
 	plugins.POST("/skill_reupload/:plugin_id", h.SkillReupload)
 	plugins.GET("/:plugin_id", h.Get)
+	plugins.GET("/:plugin_id/skill_md", h.SkillMarkdown)
+	plugins.GET("/:plugin_id/download", h.DownloadSkillPackage)
 	plugins.PATCH("/:plugin_id", h.Update)
 	plugins.DELETE("/:plugin_id", h.Delete)
 
@@ -179,6 +184,83 @@ func (h *AdminHandler) Get(c *gin.Context) {
 		return
 	}
 	apiresponse.OK(c, detailDTO(v))
+}
+
+// SkillMarkdown godoc
+// @Summary Read skill plugin SKILL.md (admin)
+// @Description Return the SKILL.md text of any skill plugin by id, read cross-Space from the unified plugins table. Serves embedded (bundled) skills via their id too. Admin only.
+// @Tags admin_plugin
+// @ID admin_plugin.skill_md
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param plugin_id path string true "Plugin ID"
+// @Success 200 {object} apiresponse.Data[skillMarkdownResponse]
+// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
+// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
+// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
+// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
+// @Router /admin/plugins/{plugin_id}/skill_md [get]
+func (h *AdminHandler) SkillMarkdown(c *gin.Context) {
+	caller, ok := adminCaller(c)
+	if !ok {
+		unauthorized(c)
+		return
+	}
+	content, err := h.svc.AdminSkillMarkdown(c.Request.Context(), caller, c.Param("plugin_id"))
+	if err != nil {
+		writeServiceError(c, err, "plugin.admin.skill_md")
+		return
+	}
+	apiresponse.OK(c, skillMarkdownResponse{Content: content})
+}
+
+// DownloadSkillPackage godoc
+// @Summary Download skill plugin package (admin)
+// @Description Stream the reconstructed package zip of any skill plugin by id, read cross-Space from the unified plugins table (no presigned URL). Serves embedded (bundled) skills via their id too. Admin only.
+// @Tags admin_plugin
+// @ID admin_plugin.download
+// @Accept json
+// @Produce application/zip
+// @Security Bearer
+// @Param plugin_id path string true "Plugin ID"
+// @Success 200 {file} binary "Skill package zip"
+// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
+// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
+// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
+// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
+// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
+// @Router /admin/plugins/{plugin_id}/download [get]
+func (h *AdminHandler) DownloadSkillPackage(c *gin.Context) {
+	caller, ok := adminCaller(c)
+	if !ok {
+		unauthorized(c)
+		return
+	}
+	result, err := h.svc.AdminOpenSkillPackage(c.Request.Context(), caller, c.Param("plugin_id"))
+	if err != nil {
+		writeServiceError(c, err, "plugin.admin.download")
+		return
+	}
+	// Reconstruct/copy the zip into a bounded buffer FIRST: writeSkillZip caps the
+	// aggregate size and fails closed on an integrity mismatch, so a mid-stream
+	// error must surface as a proper error code rather than a truncated archive
+	// already committed under a 200.
+	var buf bytes.Buffer
+	if err := result.Write(&buf); err != nil {
+		writeServiceError(c, err, "plugin.admin.download")
+		return
+	}
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", contentDisposition(result.FileName))
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Content-Length", strconv.Itoa(buf.Len()))
+	c.Status(http.StatusOK)
+	if _, err := c.Writer.Write(buf.Bytes()); err != nil {
+		logging.Error("plugin_admin_skill_package_stream_failed", logging.ErrorField(err))
+	}
 }
 
 // Create godoc
@@ -531,7 +613,7 @@ func (h *AdminHandler) ListCategories(c *gin.Context) {
 
 // categoryWriteRequest is the create/update body for the admin taxonomy surface.
 type categoryWriteRequest struct {
-	Name        string             `json:"name"`
+	Name        string             `json:"name" binding:"required"`
 	IconKey     string             `json:"icon_key"`
 	PluginTypes []model.PluginType `json:"plugin_types"`
 	SortOrder   int                `json:"sort_order"`

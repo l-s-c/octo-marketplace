@@ -36,6 +36,8 @@ type fakeStore struct {
 	updateRels     []model.PluginRelation
 	deleteScope    pluginrepo.Scope
 	deleteID       string
+	deleteGraphID  string
+	deleteChildIDs []string
 	versionID      string
 	publishParams  pluginrepo.PublishParams
 	versions       []model.PluginVersion
@@ -148,6 +150,10 @@ func (f *fakeStore) CreateGraph(_ context.Context, s pluginrepo.Scope, nodes []p
 }
 func (f *fakeStore) Delete(_ context.Context, s pluginrepo.Scope, id, _, _, _ string, _ *string) error {
 	f.deleteScope, f.deleteID = s, id
+	return f.err
+}
+func (f *fakeStore) DeleteGraph(_ context.Context, s pluginrepo.Scope, topID string, childIDs []string, _, _, _ string, _ *string) error {
+	f.deleteScope, f.deleteGraphID, f.deleteChildIDs = s, topID, childIDs
 	return f.err
 }
 func (f *fakeStore) RebuildGraph(_ context.Context, s pluginrepo.Scope, top pluginrepo.Mutation, children []pluginrepo.Mutation, oldChildIDs []string) (*pluginrepo.RelationSync, error) {

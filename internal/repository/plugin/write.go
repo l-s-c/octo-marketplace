@@ -51,7 +51,8 @@ func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	if err = lockPluginCategory(ctx, tx, p.CategoryID, p.Type); err != nil {
 		return nil, err
 	}
-	if err = lockRelationTargets(ctx, tx, scope, p.Type, m.Relations); err != nil {
+	// A single Create is not a container graph, so no embedded target is exempt.
+	if err = lockRelationTargets(ctx, tx, scope, p.Type, m.Relations, nil); err != nil {
 		return nil, err
 	}
 	if err = insertPlugin(ctx, tx, now, p); err != nil {
@@ -127,11 +128,17 @@ func (r *Repo) CreateGraph(ctx context.Context, scope Scope, nodes []Mutation) (
 		}
 		nodes[i].Plugin = p
 	}
-	// Phase 2: validate + insert every relation now that all targets exist.
+	// Phase 2: validate + insert every relation now that all targets exist. Every
+	// in-graph plugin ID is exempt from the embedded-target guard so a container top
+	// may wire its just-created embedded children.
+	inGraph := make(map[string]struct{}, len(nodes))
+	for i := range nodes {
+		inGraph[nodes[i].Plugin.ID] = struct{}{}
+	}
 	syncs := make([]*RelationSync, len(nodes))
 	for i := range nodes {
 		p := nodes[i].Plugin
-		if err = lockRelationTargets(ctx, tx, scope, p.Type, nodes[i].Relations); err != nil {
+		if err = lockRelationTargets(ctx, tx, scope, p.Type, nodes[i].Relations, inGraph); err != nil {
 			return nil, err
 		}
 		created, err := insertRelations(ctx, tx, r.id, now, p.ID, nodes[i].OperatorID, nodes[i].Relations)
@@ -212,10 +219,18 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 		}
 		newChildren[i].Plugin = p
 	}
-	// Phase 2: wire each new child's own relations now that all targets exist.
+	// Phase 2: wire each new child's own relations now that all targets exist. The
+	// top plus every new child is exempt from the embedded-target guard so a member
+	// expert may wire its just-created embedded skills, and (phase 4) the top may
+	// wire its embedded children.
+	inGraph := make(map[string]struct{}, len(newChildren)+1)
+	inGraph[topPlugin.ID] = struct{}{}
+	for i := range newChildren {
+		inGraph[newChildren[i].Plugin.ID] = struct{}{}
+	}
 	for i := range newChildren {
 		p := newChildren[i].Plugin
-		if err = lockRelationTargets(ctx, tx, scope, p.Type, newChildren[i].Relations); err != nil {
+		if err = lockRelationTargets(ctx, tx, scope, p.Type, newChildren[i].Relations, inGraph); err != nil {
 			return nil, err
 		}
 		if _, err = insertRelations(ctx, tx, r.id, now, p.ID, newChildren[i].OperatorID, newChildren[i].Relations); err != nil {
@@ -246,7 +261,7 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 	// Phase 4: resync the top plugin's relations to the new children. Every new
 	// edge carries an empty ID so syncRelations inserts it and soft-deletes the
 	// leftover old top→child edges.
-	if err = lockRelationTargets(ctx, tx, scope, topPlugin.Type, top.Relations); err != nil {
+	if err = lockRelationTargets(ctx, tx, scope, topPlugin.Type, top.Relations, inGraph); err != nil {
 		return nil, err
 	}
 	sync, err := syncRelations(ctx, tx, r.id, now, topPlugin.ID, top.OperatorID, top.Relations)
@@ -330,7 +345,8 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	if err = lockPluginCategory(ctx, tx, p.CategoryID, p.Type); err != nil {
 		return nil, err
 	}
-	if err = lockRelationTargets(ctx, tx, scope, p.Type, m.Relations); err != nil {
+	// A single Update is not a container graph, so no embedded target is exempt.
+	if err = lockRelationTargets(ctx, tx, scope, p.Type, m.Relations, nil); err != nil {
 		return nil, err
 	}
 	// getOwnedForUpdate already proved existence under lock; RowsAffected reports
@@ -409,6 +425,61 @@ WHERE source_plugin_id=? AND deleted_at IS NULL`, now, now, pluginID)
 	return tx.Commit()
 }
 
+// DeleteGraph soft-deletes a container top (expert or expert_team) together with
+// its embedded children (an expert's bundled skills; a squad's member experts and
+// their skills) in ONE transaction, so deleting the top never orphans a live,
+// unreachable is_embedded row. The top is locked and proved under scope, refused
+// if a live plugin still holds an incoming relation to it (matching Delete), then
+// soft-deleted with its outgoing edges and a delete audit; each child (whose IDs
+// the service resolved via collectContainerChildren, so only genuine is_embedded
+// descendants are here — a standalone catalog skill merely referenced by the top
+// is not) is soft-deleted through softDeleteRebuiltChild, which is idempotent and
+// carries the same operator identity. A failure at any step rolls the whole
+// delete back. Connector/skill deletes stay on the single-row Delete.
+func (r *Repo) DeleteGraph(ctx context.Context, scope Scope, topID string, childIDs []string, operatorID, operatorName, requestID string, remark *string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	before, err := getOwnedForUpdate(ctx, tx, scope, topID)
+	if err != nil {
+		return err
+	}
+	if err = rejectLiveIncomingRelations(ctx, tx, topID); err != nil {
+		return err
+	}
+	now := r.now()
+	m := Mutation{OperatorID: operatorID, OperatorName: operatorName, RequestID: requestID, Remark: remark}
+	delWhere, delTail := `WHERE plugin_id=? AND owner_uid=? AND space_id=? AND deleted_at IS NULL`, []any{now, now, topID, scope.CallerUID, scope.SpaceID}
+	if scope.Admin {
+		delWhere, delTail = `WHERE plugin_id=? AND deleted_at IS NULL`, []any{now, now, topID}
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE plugins SET deleted_at=?,updated_at=? `+delWhere, delTail...)
+	if err != nil {
+		return err
+	}
+	if err = mustAffect(res); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE plugin_relations SET deleted_at=?,updated_at=?
+WHERE source_plugin_id=? AND deleted_at IS NULL`, now, now, topID); err != nil {
+		return err
+	}
+	if err = insertAudit(ctx, tx, r.id(), now, *before, "delete", m, before.PluginHash, ""); err != nil {
+		return err
+	}
+	// Each embedded child is torn down together with the top; softDeleteRebuiltChild
+	// is a no-op for a child already gone, so a duplicate ID (a skill shared by two
+	// members) stays idempotent.
+	for _, id := range childIDs {
+		if err = softDeleteRebuiltChild(ctx, tx, r.id, scope, now, id, m); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func rejectLiveIncomingRelations(ctx context.Context, tx *sql.Tx, pluginID string) error {
 	rows, err := tx.QueryContext(ctx, `SELECT r.relation_id FROM plugin_relations r
 JOIN plugins source ON source.plugin_id=r.source_plugin_id
@@ -465,7 +536,17 @@ func mustAffect(res sql.Result) error {
 // mutation transaction. The visibility predicate prevents cross-scope edges,
 // and FOR UPDATE prevents a target from being deleted between validation and
 // insertion.
-func lockRelationTargets(ctx context.Context, tx *sql.Tx, scope Scope, sourceType model.PluginType, relations []model.PluginRelation) error {
+//
+// inGraph is the set of plugin IDs created/rebuilt inside THIS transaction. An
+// is_embedded target is a per-parent copy owned by a single container graph (a
+// bundled skill / squad member); a standalone write path must never adopt one as
+// a relation target, because a later container reupload soft-deletes it out from
+// under the adopter (softDeleteRebuiltChild skips the incoming-relation guard).
+// So an embedded target is rejected unless it is an intra-graph edge — the
+// container top legitimately wiring its just-created embedded children, whose IDs
+// are all in inGraph. The single Create/Update path passes nil (any embedded
+// target → ErrInvalidRelation); CreateGraph/RebuildGraph pass every node ID.
+func lockRelationTargets(ctx context.Context, tx *sql.Tx, scope Scope, sourceType model.PluginType, relations []model.PluginRelation, inGraph map[string]struct{}) error {
 	seen := make(map[string]struct{}, len(relations))
 	for _, relation := range relations {
 		if relation.TargetPluginID == "" {
@@ -480,9 +561,10 @@ func lockRelationTargets(ctx context.Context, tx *sql.Tx, scope Scope, sourceTyp
 		if scope.Admin {
 			relWhere, relArgs = "1=1", []any{relation.TargetPluginID}
 		}
-		row := tx.QueryRowContext(ctx, `SELECT p.plugin_type FROM plugins p WHERE p.plugin_id=? AND p.status=1 AND p.deleted_at IS NULL AND `+relWhere+` FOR UPDATE`, relArgs...)
+		row := tx.QueryRowContext(ctx, `SELECT p.plugin_type,p.is_embedded FROM plugins p WHERE p.plugin_id=? AND p.status=1 AND p.deleted_at IS NULL AND `+relWhere+` FOR UPDATE`, relArgs...)
 		var targetType model.PluginType
-		if err := row.Scan(&targetType); err != nil {
+		var embedded bool
+		if err := row.Scan(&targetType, &embedded); err != nil {
 			if err == sql.ErrNoRows {
 				return ErrNotFound
 			}
@@ -490,6 +572,11 @@ func lockRelationTargets(ctx context.Context, tx *sql.Tx, scope Scope, sourceTyp
 		}
 		if !validPersistedRelation(relation.Type, sourceType, targetType) {
 			return ErrInvalidRelation
+		}
+		if embedded {
+			if _, ok := inGraph[relation.TargetPluginID]; !ok {
+				return ErrInvalidRelation
+			}
 		}
 	}
 	return nil

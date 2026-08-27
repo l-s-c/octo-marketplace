@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 )
@@ -68,25 +69,32 @@ WHERE category_id=? AND deleted_at IS NULL`, c.Name, c.IconKey, string(c.PluginT
 // DeleteCategory soft-deletes a live category (status=0, deleted_at stamped). It
 // refuses (ErrConflict) while any live plugin still references the category, so
 // the taxonomy row never disappears out from under an in-use plugin. ErrNotFound
-// when no live row carries the id.
+// when no live row carries the id. The row lock, the reference count, and the
+// soft-delete run in one transaction (the category row is locked FOR UPDATE
+// first) so a plugin cannot adopt the category between the count and the delete.
 func (r *Repo) DeleteCategory(ctx context.Context, id string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var locked string
+	err = tx.QueryRowContext(ctx, `SELECT category_id FROM plugin_categories WHERE category_id=? AND deleted_at IS NULL FOR UPDATE`, id).Scan(&locked)
+	if err == sql.ErrNoRows {
+		return ErrNotFound
+	}
+	if err != nil {
+		return wrapped("lock category", err)
+	}
 	var count int
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugins WHERE category_id=? AND status=1 AND deleted_at IS NULL`, id).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugins WHERE category_id=? AND status=1 AND deleted_at IS NULL`, id).Scan(&count); err != nil {
 		return wrapped("count category plugins", err)
 	}
 	if count > 0 {
 		return ErrConflict
 	}
-	res, err := r.db.ExecContext(ctx, `UPDATE plugin_categories SET status=0, deleted_at=? WHERE category_id=? AND deleted_at IS NULL`, r.now(), id)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE plugin_categories SET status=0, deleted_at=? WHERE category_id=? AND deleted_at IS NULL`, r.now(), id); err != nil {
 		return wrapped("delete category", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return wrapped("delete category", err)
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return tx.Commit()
 }

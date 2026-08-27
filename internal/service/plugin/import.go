@@ -286,7 +286,7 @@ func (s *Service) buildImportedSkillWrite(ctx context.Context, objectSpace, rese
 	// Expand the rewritten package into a flat attachment tree: text inline as
 	// raw, binary/oversize spilled to the managed prefix under deterministic
 	// keys. The rewritten SKILL.md (frontmatter injected) is the entry document.
-	attachments, uploaded, _, err := s.buildSkillAttachmentTree(ctx, objectSpace, pluginID, rewritten.ZipBytes, rewritten.SkillMD)
+	attachments, uploaded, _, err := s.buildSkillAttachmentTree(ctx, objectSpace, pluginID, rewritten.ZipBytes, rewritten.SkillMD, nil)
 	if err != nil {
 		return nil, "", nil, err
 	}

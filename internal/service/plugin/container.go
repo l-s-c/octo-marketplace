@@ -219,6 +219,7 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 	top.OwnerUID = old.OwnerUID
 	top.CreatedAt = old.CreatedAt
 	top.CurrentVersionID = old.CurrentVersionID
+	top.CurrentVersion = old.CurrentVersion
 	top.CreatorName, top.CreatedByType = old.CreatorName, old.CreatedByType
 	top.CreatedByBotUID, top.CreatedByBotName = old.CreatedByBotUID, old.CreatedByBotName
 	top.Icon = old.Icon
@@ -227,6 +228,17 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 	// the surviving market placement, which keeps the old category).
 	if top.CategoryID == nil {
 		top.CategoryID = old.CategoryID
+	}
+	// Every rebuilt embedded child (an expert's bundled skills; a squad's member
+	// experts and their skills) inherits the container top's visibility/Space/owner
+	// rather than the system/global-Space defaults buildGraphPlugin mints — else
+	// reuploading a space/private container would silently promote its parts to
+	// platform-global. The IMPORT path keeps minting `system` because its top is
+	// `system`; only the reupload path re-stamps, mirroring how the top is preserved.
+	for i := range childNodes {
+		childNodes[i].Plugin.Visibility = old.Visibility
+		childNodes[i].Plugin.SpaceID = old.SpaceID
+		childNodes[i].Plugin.OwnerUID = old.OwnerUID
 	}
 
 	audit := s.audit(eff, top.ID, "update", old, top, s.now())
@@ -333,13 +345,24 @@ func (s *Service) buildExpertGraph(ctx context.Context, eff Caller, parsed *pars
 	var uploaded []string
 	var expertRels []model.PluginRelation
 
+	state := s.newSkillBuildState()
+	seenTargets := map[string]struct{}{}
 	for i, ref := range e.skills {
-		skillNode, keys, err := s.buildSkillNode(ctx, eff, parsed, ref)
+		skillNode, keys, isNew, err := s.buildSkillNode(ctx, eff, parsed, ref, state)
 		uploaded = append(uploaded, keys...)
 		if err != nil {
 			return nil, nil, nil, uploaded, err
 		}
-		childNodes = append(childNodes, skillNode.mutation)
+		if isNew {
+			childNodes = append(childNodes, skillNode.mutation)
+		}
+		// One expert wires at most one expert_skill edge to a given skill target;
+		// two refs collapsing onto the same nested archive do not create a duplicate
+		// edge (which validateGraphRelations / lockRelationTargets would reject).
+		if _, dup := seenTargets[skillNode.plugin.ID]; dup {
+			continue
+		}
+		seenTargets[skillNode.plugin.ID] = struct{}{}
 		expertRels = append(expertRels, s.skillRelation(eff, skillNode.plugin, i))
 	}
 
@@ -406,16 +429,27 @@ func (s *Service) buildSquadGraph(ctx context.Context, eff Caller, parsed *parse
 		return nil, nil, nil, uploaded, err
 	}
 
+	// One shared build state spans the whole squad so a nested archive bundled by
+	// several members is parsed/expanded exactly once and charged against a single
+	// container-wide budget.
+	state := s.newSkillBuildState()
 	for i := range sq.members {
 		member := sq.members[i]
 		var memberRels []model.PluginRelation
+		seenTargets := map[string]struct{}{}
 		for j, ref := range member.skills {
-			skillNode, keys, err := s.buildSkillNode(ctx, eff, parsed, ref)
+			skillNode, keys, isNew, err := s.buildSkillNode(ctx, eff, parsed, ref, state)
 			uploaded = append(uploaded, keys...)
 			if err != nil {
 				return nil, nil, nil, uploaded, err
 			}
-			childNodes = append(childNodes, skillNode.mutation)
+			if isNew {
+				childNodes = append(childNodes, skillNode.mutation)
+			}
+			if _, dup := seenTargets[skillNode.plugin.ID]; dup {
+				continue
+			}
+			seenTargets[skillNode.plugin.ID] = struct{}{}
 			memberRels = append(memberRels, s.skillRelation(eff, skillNode.plugin, j))
 		}
 		manifest, pkg, err := memberDocuments(member)
@@ -456,41 +490,69 @@ type graphNode struct {
 	mutation pluginrepo.Mutation
 }
 
+// skillBuildState is the per-container shared state threaded through every
+// bundled-skill build so a nested archive referenced by many skill refs is
+// parsed and expanded exactly once. cache maps a container-relative skill file
+// to the skill node already built from it (container-wide dedupe by file); budget
+// is the shared remaining-decompressed-bytes allowance passed to
+// buildSkillAttachmentTree so the aggregate expansion is bounded.
+type skillBuildState struct {
+	cache  map[string]*graphNode
+	budget int64
+}
+
+func (s *Service) newSkillBuildState() *skillBuildState {
+	return &skillBuildState{cache: map[string]*graphNode{}, budget: s.maxArchiveBytes}
+}
+
 // buildSkillNode parses one bundled skill package into a skill plugin exactly
 // like a normal skill import (canonical flat attachment tree). It returns the
-// node and the object keys uploaded for binary files (for rollback).
-func (s *Service) buildSkillNode(ctx context.Context, eff Caller, parsed *parsedContainer, ref parsedSkillRef) (*graphNode, []string, error) {
+// node, the object keys uploaded for binary files (for rollback), and whether
+// the node is newly built (isNew) — a repeated file resolves from the shared
+// cache instead of re-expanding the archive, so the caller adds the node to the
+// graph only on the first occurrence. A cache hit whose ref name differs from the
+// first build is ambiguous (two skills would collapse onto one node under
+// different names) and is rejected.
+func (s *Service) buildSkillNode(ctx context.Context, eff Caller, parsed *parsedContainer, ref parsedSkillRef, state *skillBuildState) (node *graphNode, uploaded []string, isNew bool, err error) {
 	if ref.file == "" {
-		return nil, nil, ErrInvalidContainer
+		return nil, nil, false, ErrInvalidContainer
+	}
+	if cached, ok := state.cache[ref.file]; ok {
+		if cached.plugin.Name != ref.name {
+			return nil, nil, false, ErrInvalidContainer
+		}
+		return cached, nil, false, nil
 	}
 	zipData, ok := parsed.skillZs[ref.file]
 	if !ok {
-		return nil, nil, ErrInvalidContainer
+		return nil, nil, false, ErrInvalidContainer
 	}
 	skillID := s.id()
-	attachments, uploaded, _, err := s.buildSkillAttachmentTree(ctx, eff.SpaceID, skillID, zipData, nil)
+	attachments, uploaded, _, err := s.buildSkillAttachmentTree(ctx, eff.SpaceID, skillID, zipData, nil, &state.budget)
 	if err != nil {
-		return nil, uploaded, err
+		return nil, uploaded, false, err
 	}
 	manifest, err := skillManifest(ref.name)
 	if err != nil {
-		return nil, uploaded, err
+		return nil, uploaded, false, err
 	}
 	pkg, err := json.Marshal(map[string]any{"$schema": packageSchema, "attachments": attachments})
 	if err != nil {
-		return nil, uploaded, ErrInvalidRequest
+		return nil, uploaded, false, ErrInvalidRequest
 	}
 	// Persist under the reserved ID the spilled object keys namespace under, so
 	// the row, the object namespace, and any storage_uri all agree.
 	plugin, err := s.buildGraphPlugin(ctx, eff, model.PluginTypeSkill, ref.name, nil, nil, manifest, pkg, skillID)
 	if err != nil {
-		return nil, uploaded, err
+		return nil, uploaded, false, err
 	}
 	// A bundled skill is a part of its parent expert/team, not a standalone
 	// catalog entry — mark it embedded so it is reachable via detail/relations
 	// but excluded from the skill list (matching the backfill's embedded skills).
 	plugin.IsEmbedded = true
-	return &graphNode{plugin: plugin, mutation: s.graphMutation(eff, plugin, nil)}, uploaded, nil
+	built := &graphNode{plugin: plugin, mutation: s.graphMutation(eff, plugin, nil)}
+	state.cache[ref.file] = built
+	return built, uploaded, true, nil
 }
 
 // buildGraphPlugin canonicalizes a plugin's documents and constructs its

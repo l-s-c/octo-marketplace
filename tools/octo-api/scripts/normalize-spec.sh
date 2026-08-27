@@ -60,6 +60,7 @@ if os.path.exists(yaml_path):
         spec = yaml.safe_load(f)
     streams = {
         '/plugins/download': 'application/zip',
+        '/admin/plugins/{plugin_id}/download': 'application/zip',
     }
     for path_name, success_media in streams.items():
         operation = spec.get('paths', {}).get(path_name, {}).get('get')

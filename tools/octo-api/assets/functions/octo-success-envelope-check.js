@@ -8,6 +8,7 @@ module.exports = (schema, opts, context) => {
     operationId = operation.paths && operation.paths[pathName] && operation.paths[pathName][method] && operation.paths[pathName][method].operationId;
   }
   if (operationId === 'plugin.skill_download') return;
+  if (operationId === 'admin_plugin.download') return;
   if (!schema || !schema.properties || !schema.properties.data) {
     return [{message: '2xx response must wrap payload in envelope (top-level `data` property required) (R1)'}];
   }

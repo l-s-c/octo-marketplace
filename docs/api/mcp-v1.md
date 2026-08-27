@@ -762,8 +762,7 @@ A separate, non-public path used by `octo-admin` (the platform admin
 console) to create and list platform-provided (`visibility = system`) MCP
 records. The public `/api/v1/mcps` endpoints continue to REJECT
 `visibility = system` on write with
-`err.marketplace.mcp.invalid_visibility` (§2) — the admin surface is the
-ONLY path that can mint or manage system-visibility records.
+`err.marketplace.mcp.invalid_visibility` (§2).
 
 Base path: **`/api/v1/admin/mcps`** (a subpath of the same `/api/v1`
 namespace as the public surface, so the gateway `/market/*` prefix
@@ -777,10 +776,7 @@ rewrite handles both uniformly).
 
 `marketAdmin` is an octo-server role for staff who run the platform market and
 hold no administrative power outside this service. It is admitted on every
-`/api/v1/admin/*` group — the MCP admin routes documented here, the Skill catalog
-routes, and the Expert Market routes — and on the legacy
-`/api/v1/skill/admin/categories` alias, which sits outside that prefix but mounts
-the same handlers as `/api/v1/admin/skill_categories`.
+`/api/v1/admin/*` group.
 
 **No `X-Space-Id` required.** Admin routes operate globally — the middleware
 resolves the caller's admin identity and stamps it into the request

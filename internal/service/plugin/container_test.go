@@ -679,7 +679,137 @@ func TestReuploadExpertContainerLeavesStandaloneRelationTargets(t *testing.T) {
 	}
 }
 
-// A container mcp_config carrying a credential-shaped value is imported as-is:
+// A container reupload must re-stamp every rebuilt embedded child with the
+// container top's visibility/Space/owner, not the system/global-Space defaults
+// buildGraphPlugin mints — otherwise reuploading a space/private expert silently
+// promotes its bundled skills to platform-global.
+func TestReuploadExpertContainerStampsChildrenWithContainerScope(t *testing.T) {
+	for _, vis := range []model.PluginVisibility{model.PluginVisibilitySpace, model.PluginVisibilityPrivate} {
+		t.Run(string(vis), func(t *testing.T) {
+			space := "space-x"
+			created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+			expert := &model.Plugin{ID: "expert-9", Name: "Release Captain", Type: model.PluginTypeExpert, Visibility: vis, SpaceID: &space, OwnerUID: "owner-1", Tags: []byte(`["ops"]`), Manifest: []byte(`{}`), Package: []byte(`{}`), CreatedAt: created, UpdatedAt: created, Status: 1}
+			oldSkill := &model.Plugin{ID: "skill-old-1", Name: "Deployer", Type: model.PluginTypeSkill, Visibility: model.PluginVisibilitySystem, SpaceID: &space, OwnerUID: "owner-1", IsEmbedded: true, Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), Status: 1}
+			store := &fakeStore{
+				plugins: map[string]*model.Plugin{"expert-9": expert, "skill-old-1": oldSkill},
+				relations: map[string][]model.PluginRelation{"expert-9": {
+					{ID: "rel-old-1", SourcePluginID: "expert-9", TargetPluginID: "skill-old-1", TargetPluginType: model.PluginTypeSkill, Type: "expert_skill", Status: 1},
+				}},
+			}
+			svc := containerService(store)
+			if _, err := svc.ReuploadContainer(context.Background(), containerCaller, "expert-9", ContainerImportParams{Archive: expertReuploadArchive(t)}); err != nil {
+				t.Fatalf("ReuploadContainer: %v", err)
+			}
+			if len(store.rebuildChild) == 0 {
+				t.Fatal("no children rebuilt")
+			}
+			for _, n := range store.rebuildChild {
+				if n.Plugin.Visibility != vis {
+					t.Fatalf("child visibility = %q, want inherited %q (not system)", n.Plugin.Visibility, vis)
+				}
+				if n.Plugin.SpaceID == nil || *n.Plugin.SpaceID != space {
+					t.Fatalf("child space = %v, want inherited %q", n.Plugin.SpaceID, space)
+				}
+				if n.Plugin.OwnerUID != "owner-1" {
+					t.Fatalf("child owner = %q, want inherited owner-1", n.Plugin.OwnerUID)
+				}
+			}
+		})
+	}
+}
+
+// sizedSkillZip packs a skill package whose SKILL.md is the given bytes (used to
+// exercise the container-wide extraction budget with highly compressible content).
+func sizedSkillZip(t *testing.T, body []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	md, _ := zw.Create("SKILL.md")
+	if _, err := md.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// A container that points many skill refs at ONE nested archive must parse and
+// expand it exactly once and mint exactly one skill row — not hundreds — so a
+// decompression bomb cannot be amplified by ref count.
+func TestImportExpertContainerDedupesRepeatedSkillFile(t *testing.T) {
+	store := &fakeStore{plugins: map[string]*model.Plugin{}}
+	svc := containerService(store)
+	refs := make([]map[string]any, 0, 10)
+	for i := 0; i < 10; i++ {
+		refs = append(refs, map[string]any{"name": "Common", "file": "skills/common.zip"})
+	}
+	manifest := map[string]any{"name": "Bulk", "summary": "many refs, one zip", "instruction": "do", "skills": refs}
+	archive := containerZip(t, "expert.json", manifest, map[string][]byte{"skills/common.zip": textSkillZip(t, "Common")})
+
+	detail, err := svc.ImportContainer(context.Background(), containerCaller, ContainerImportParams{Archive: archive})
+	if err != nil {
+		t.Fatalf("ImportContainer: %v", err)
+	}
+	// One deduped skill node + the expert = 2 nodes, and a single expert_skill edge.
+	if len(store.graphNodes) != 2 {
+		t.Fatalf("graph nodes = %d, want 2 (one deduped skill + expert)", len(store.graphNodes))
+	}
+	if store.graphNodes[0].Plugin.Type != model.PluginTypeSkill {
+		t.Fatalf("first node type = %q, want skill", store.graphNodes[0].Plugin.Type)
+	}
+	if len(detail.Relations) != 1 {
+		t.Fatalf("expert relations = %d, want 1 (deduped by file)", len(detail.Relations))
+	}
+}
+
+// The same nested file referenced under two different names is ambiguous (two
+// skills would collapse onto one node) and is rejected.
+func TestImportExpertContainerRejectsSameFileDifferentNames(t *testing.T) {
+	store := &fakeStore{plugins: map[string]*model.Plugin{}}
+	svc := containerService(store)
+	manifest := map[string]any{"name": "Bulk", "summary": "same file two names", "instruction": "do",
+		"skills": []map[string]any{
+			{"name": "A", "file": "skills/x.zip"},
+			{"name": "B", "file": "skills/x.zip"},
+		}}
+	archive := containerZip(t, "expert.json", manifest, map[string][]byte{"skills/x.zip": textSkillZip(t, "X")})
+	if _, err := svc.ImportContainer(context.Background(), containerCaller, ContainerImportParams{Archive: archive}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("err = %v, want ErrInvalidRequest", err)
+	}
+	if store.graphNodes != nil {
+		t.Fatalf("an ambiguous container must not reach CreateGraph: %d nodes", len(store.graphNodes))
+	}
+}
+
+// The shared container extraction budget bounds the AGGREGATE decompressed bytes
+// across every bundled skill: distinct files that individually pass the per-skill
+// cap but together exceed the container budget are rejected with ErrTooLarge.
+func TestImportExpertContainerRejectsOverBudgetExpansion(t *testing.T) {
+	store := &fakeStore{plugins: map[string]*model.Plugin{}}
+	svc := containerService(store)
+	svc.SetArtifactLimits(4096) // per-file cap 4096, container budget = 5*4096 = 20480
+	// Six distinct skills, each a ~4000-byte SKILL.md (< per-file cap, but 6*4000
+	// = 24000 > the 20480 container budget). The bytes are highly compressible so
+	// the container archive itself stays tiny.
+	body := bytes.Repeat([]byte("a"), 4000)
+	bundles := map[string][]byte{}
+	refs := make([]map[string]any, 0, 6)
+	for i := 0; i < 6; i++ {
+		file := "skills/s" + strconv.Itoa(i) + ".zip"
+		bundles[file] = sizedSkillZip(t, body)
+		refs = append(refs, map[string]any{"name": "S" + strconv.Itoa(i), "file": file})
+	}
+	manifest := map[string]any{"name": "Bomb", "summary": "aggregate over budget", "instruction": "do", "skills": refs}
+	archive := containerZip(t, "expert.json", manifest, bundles)
+	if _, err := svc.ImportContainer(context.Background(), containerCaller, ContainerImportParams{Archive: archive}); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge (container budget exhausted)", err)
+	}
+	if store.graphNodes != nil {
+		t.Fatalf("an over-budget container must not reach CreateGraph: %d nodes", len(store.graphNodes))
+	}
+}
+
 // the live import stores mcp_config verbatim (no backend secret scan/blank), so
 // the value survives into the rendered mcp.json attachment. This pins the
 // deliberate divergence from the offline backfill's SanitizeConnectorJSON — the

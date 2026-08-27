@@ -90,10 +90,15 @@ func TestUpdateCategorySucceeds(t *testing.T) {
 func TestDeleteCategoryConflictWhenPluginsReference(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT category_id FROM plugin_categories WHERE category_id=\? AND deleted_at IS NULL FOR UPDATE`).
+		WithArgs("cat-1").
+		WillReturnRows(sqlmock.NewRows([]string{"category_id"}).AddRow("cat-1"))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugins WHERE category_id=\? AND status=1 AND deleted_at IS NULL`).
 		WithArgs("cat-1").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(2))
-	// No UPDATE is issued: the guard aborts before the soft delete.
+	// No UPDATE is issued: the guard aborts before the soft delete and rolls back.
+	mock.ExpectRollback()
 	err := New(db).DeleteCategory(context.Background(), "cat-1")
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("DeleteCategory error = %v, want ErrConflict", err)
@@ -106,12 +111,17 @@ func TestDeleteCategoryConflictWhenPluginsReference(t *testing.T) {
 func TestDeleteCategorySoftDeletesWhenUnused(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT category_id FROM plugin_categories WHERE category_id=\? AND deleted_at IS NULL FOR UPDATE`).
+		WithArgs("cat-1").
+		WillReturnRows(sqlmock.NewRows([]string{"category_id"}).AddRow("cat-1"))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugins WHERE category_id=\? AND status=1 AND deleted_at IS NULL`).
 		WithArgs("cat-1").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	mock.ExpectExec(`UPDATE plugin_categories SET status=0, deleted_at=\? WHERE category_id=\? AND deleted_at IS NULL`).
 		WithArgs(sqlmock.AnyArg(), "cat-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 	if err := New(db).DeleteCategory(context.Background(), "cat-1"); err != nil {
 		t.Fatalf("DeleteCategory error = %v", err)
 	}
@@ -123,12 +133,12 @@ func TestDeleteCategorySoftDeletesWhenUnused(t *testing.T) {
 func TestDeleteCategoryNotFoundWhenNoRow(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugins`).
+	mock.ExpectBegin()
+	// The FOR UPDATE lock finds no live row → ErrNotFound before any count/delete.
+	mock.ExpectQuery(`SELECT category_id FROM plugin_categories WHERE category_id=\? AND deleted_at IS NULL FOR UPDATE`).
 		WithArgs("cat-1").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
-	mock.ExpectExec(`UPDATE plugin_categories SET status=0`).
-		WithArgs(sqlmock.AnyArg(), "cat-1").
-		WillReturnResult(sqlmock.NewResult(0, 0))
+		WillReturnRows(sqlmock.NewRows([]string{"category_id"}))
+	mock.ExpectRollback()
 	if err := New(db).DeleteCategory(context.Background(), "cat-1"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("DeleteCategory error = %v, want ErrNotFound", err)
 	}

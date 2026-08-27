@@ -63,6 +63,12 @@ func (s *Service) AdminImport(ctx context.Context, caller Caller, p ImportParams
 		if old.Type != model.PluginTypeSkill {
 			return nil, ErrNotFound
 		}
+		// A bundled (embedded) skill is owned by its container graph; it may be
+		// swapped only through a container reupload, never a standalone skill
+		// reupload — reported as not found, matching ReuploadContainer/AdminUpdate.
+		if old.IsEmbedded {
+			return nil, ErrNotFound
+		}
 		oldPlugin = old
 		if old.SpaceID != nil {
 			effSpace = *old.SpaceID
@@ -148,6 +154,7 @@ func (s *Service) adminImportConsumedTask(ctx context.Context, caller Caller, ta
 		return nil, err
 	}
 	p.CreatedAt, p.CurrentVersionID = oldPlugin.CreatedAt, oldPlugin.CurrentVersionID
+	p.CurrentVersion = oldPlugin.CurrentVersion // keep the published version label, not just its id
 	p.CreatorName, p.CreatedByType = oldPlugin.CreatorName, oldPlugin.CreatedByType
 	p.CreatedByBotUID, p.CreatedByBotName = oldPlugin.CreatedByBotUID, oldPlugin.CreatedByBotName
 	p.SpaceID = oldPlugin.SpaceID   // preserve the row's existing Space
