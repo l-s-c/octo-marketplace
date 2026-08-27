@@ -9,6 +9,38 @@ import (
 	migrationsql "github.com/Mininglamp-OSS/octo-marketplace/migrations/sql"
 )
 
+// TestPerSaveVersionMigrationRelaxesUniqueVersion locks that the per-save
+// snapshot migration drops the (plugin_id, version) unique key for a plain index
+// (Up) and restores the unique key on rollback (Down).
+func TestPerSaveVersionMigrationRelaxesUniqueVersion(t *testing.T) {
+	const migration = "20260827-01-plugin-version-per-save.sql"
+	content, err := migrationsql.FS.ReadFile(migration)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error=%v", migration, err)
+	}
+	text := string(content)
+	up, down, found := strings.Cut(text, "-- +migrate Down")
+	if !found {
+		t.Fatal("migration missing Down section")
+	}
+	for _, want := range []string{
+		"DROP INDEX `uq_plugin_versions_plugin_version`",
+		"ADD INDEX `idx_plugin_versions_plugin_version` (`plugin_id`, `version`)",
+	} {
+		if !strings.Contains(up, want) {
+			t.Errorf("Up missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"DROP INDEX `idx_plugin_versions_plugin_version`",
+		"ADD UNIQUE KEY `uq_plugin_versions_plugin_version` (`plugin_id`, `version`)",
+	} {
+		if !strings.Contains(down, want) {
+			t.Errorf("Down missing %q", want)
+		}
+	}
+}
+
 func TestCurrentVersionBackfillUsesExplicitCollation(t *testing.T) {
 	const migration = "20260717-06-backfill-current-version.sql"
 

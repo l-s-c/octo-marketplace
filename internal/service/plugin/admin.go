@@ -174,6 +174,7 @@ func (s *Service) AdminCreate(ctx context.Context, caller Caller, req WriteReque
 	}
 	audit := s.audit(caller, p.ID, "create", nil, p, s.now())
 	m := mutation(*p, rels, audit)
+	m.SnapshotVersion = true
 	// Admin creates auto-attach a default visible placement so the plugin surfaces
 	// in the tenant market immediately (the market always lists the "default"
 	// placement); publish is not required. The placement copies the plugin's
@@ -238,7 +239,9 @@ func (s *Service) AdminUpdate(ctx context.Context, caller Caller, pluginID strin
 		rels[i].SourcePluginID = storageID
 	}
 	audit := s.audit(caller, storageID, "update", old, p, s.now())
-	sync, err := s.repo.Update(ctx, adminScope(caller), mutation(*p, rels, audit))
+	m := mutation(*p, rels, audit)
+	m.SnapshotVersion = true
+	sync, err := s.repo.Update(ctx, adminScope(caller), m)
 	if err != nil {
 		return nil, mapStoreError(err)
 	}

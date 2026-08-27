@@ -116,6 +116,109 @@ func TestCreateAttachesVisiblePlacementInSameTx(t *testing.T) {
 	}
 }
 
+// TestCreateSnapshotsVersionWhenFlagged locks the per-save version history: a
+// create with SnapshotVersion appends a plugin_versions row with an
+// auto-increment label (first snapshot -> "1") and advances current_version_id to
+// it, all in the create transaction.
+func TestCreateSnapshotsVersionWhenFlagged(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 27, 8, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"version-id", "audit-id"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO plugins`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugin_versions WHERE plugin_id=\?`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(`INSERT INTO plugin_versions`).
+		WithArgs("version-id", "plugin-id", "1", "{}", "{}", nil, "sha256:m", "sha256:p", "[]", nil, "caller", now).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`UPDATE plugins SET current_version_id=\?,current_version=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("version-id", "1", now, "plugin-id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	_, err := r.Create(context.Background(), Scope{CallerUID: "caller", SpaceID: "space"}, Mutation{
+		Plugin:          model.Plugin{ID: "plugin-id", Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p", Status: 1},
+		OperatorID:      "caller",
+		SnapshotVersion: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateSnapshotsIncrementingVersion locks that an edit snapshots the next
+// sequential label off the existing version count (2 prior -> "3") and advances
+// current_version_id, inside the update transaction.
+func TestUpdateSnapshotsIncrementingVersion(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"version-id", "audit-id"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("plugin-id", scope.CallerUID, scope.SpaceID).WillReturnRows(ownedPluginRow("plugin-id", scope, now))
+	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}))
+	mock.ExpectExec(`UPDATE plugins SET plugin_name=`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugin_versions WHERE plugin_id=\?`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
+	mock.ExpectExec(`INSERT INTO plugin_versions`).
+		WithArgs("version-id", "plugin-id", "3", "{}", "{}", nil, "sha256:m", "sha256:p", "[]", nil, "caller", now).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`UPDATE plugins SET current_version_id=\?,current_version=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("version-id", "3", now, "plugin-id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	_, err := r.Update(context.Background(), scope, Mutation{
+		Plugin:          model.Plugin{ID: "plugin-id", Type: model.PluginTypeExpert, Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p", Status: 1},
+		OperatorID:      "caller",
+		SnapshotVersion: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCreateSkipsSnapshotWhenNotFlagged locks that the import-driven create (which
+// defers to a following Publish) writes no plugin_versions row.
+func TestCreateSkipsSnapshotWhenNotFlagged(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	r.id = func() string { return "audit-id" }
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO plugins`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	_, err := r.Create(context.Background(), Scope{CallerUID: "caller", SpaceID: "space"}, Mutation{
+		Plugin:     model.Plugin{ID: "plugin-id", Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`)},
+		OperatorID: "caller",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLockRelationTargetsRequiresActiveTarget(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()

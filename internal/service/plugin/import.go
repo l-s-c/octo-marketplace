@@ -204,10 +204,12 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 	var detail *Detail
 	if updateID == "" {
 		// Persist under the reserved ID so the shipped SKILL.md frontmatter, the
-		// spilled object namespace, and the row all agree on one plugin_id.
-		detail, err = s.createWithID(ctx, caller, *req, pluginID)
+		// spilled object namespace, and the row all agree on one plugin_id. The
+		// content write does not snapshot a version — the Publish below records the
+		// authoritative snapshot with the manifest version.
+		detail, err = s.createWithID(ctx, caller, *req, pluginID, false)
 	} else {
-		detail, err = s.Update(ctx, caller, updateID, *req)
+		detail, err = s.update(ctx, caller, updateID, *req, false)
 	}
 	if err != nil {
 		s.deleteObjects(ctx, uploaded...)
@@ -238,7 +240,7 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 		// on an un-expanded legacy row; the runbook's expand-skills phase removes
 		// those legacy pointers before the row is served.
 		if oldPlugin != nil {
-			if _, restoreErr := s.Update(ctx, caller, updateID, restoreWriteRequest(oldPlugin, oldRels)); restoreErr == nil {
+			if _, restoreErr := s.update(ctx, caller, updateID, restoreWriteRequest(oldPlugin, oldRels), false); restoreErr == nil {
 				s.deleteObjects(ctx, uploaded...)
 			} else {
 				logging.Error("import_restore_failed",

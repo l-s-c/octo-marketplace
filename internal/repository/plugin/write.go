@@ -3,7 +3,9 @@ package plugin
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"sort"
+	"strconv"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 )
@@ -17,6 +19,13 @@ type Mutation struct {
 	OperatorName string
 	RequestID    string
 	Remark       *string
+	// SnapshotVersion, when set, appends one immutable plugin_versions row for this
+	// Plugin inside the write transaction and advances current_version_id to it, so
+	// every save (create / edit / container reupload) records a full version
+	// snapshot. Only top-level nodes set it; embedded children version with their
+	// container. Changelog is the optional note stored on that snapshot.
+	SnapshotVersion bool
+	Changelog       *string
 }
 
 // RelationSync reports the outcome of synchronizing a Plugin's one-level
@@ -65,6 +74,11 @@ func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	if err = insertPlacements(ctx, tx, r.id, now, p.ID, m.Placements); err != nil {
 		return nil, err
 	}
+	if m.SnapshotVersion {
+		if err = snapshotVersion(ctx, tx, r.id, now, p, m.Relations, m.Changelog, m.OperatorID); err != nil {
+			return nil, err
+		}
+	}
 	if err = insertAudit(ctx, tx, r.id(), now, p, "create", m, "", p.PluginHash); err != nil {
 		return nil, err
 	}
@@ -92,6 +106,39 @@ creator_name,created_by_type,created_by_bot_uid,created_by_bot_name,icon,tool_co
 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Type, p.IsEmbedded, p.CategoryID, string(p.Tags), p.Publisher, p.OwnerUID, p.SpaceID, p.Visibility, p.CreatorName, p.CreatedByType, p.CreatedByBotUID, p.CreatedByBotName, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), jsonColumn(p.AttachmentKeys), p.ManifestHash, p.PluginHash, p.CurrentVersionID, p.CurrentVersion, p.Status, now, now)
 	if err != nil {
 		return wrapped("create", err)
+	}
+	return nil
+}
+
+// snapshotVersion appends one immutable plugin_versions row capturing p's current
+// content plus the given relation set, then advances the plugin row's
+// current_version_id/current_version to it. The version label is a per-plugin
+// auto-increment sequence computed under the transaction — for Update the plugin
+// row is already FOR UPDATE-locked, and a fresh Create has no prior snapshot, so
+// the COUNT is race-free. relations is marshaled in the same shape as Publish
+// (a []model.PluginRelation), and nil becomes an empty JSON array to satisfy the
+// relations_json ARRAY check. attachment_keys_json mirrors the current row's
+// storage-attachment sidecar. Callers hold the transaction.
+func snapshotVersion(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, p model.Plugin, relations []model.PluginRelation, changelog *string, createdBy string) error {
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_versions WHERE plugin_id=?`, p.ID).Scan(&count); err != nil {
+		return wrapped("count versions", err)
+	}
+	seq := strconv.Itoa(count + 1)
+	if relations == nil {
+		relations = []model.PluginRelation{}
+	}
+	relationJSON, err := json.Marshal(relations)
+	if err != nil {
+		return err
+	}
+	versionID := newID()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO plugin_versions (version_id,plugin_id,version,manifest_json,plugin_json,attachment_keys_json,manifest_hash,plugin_hash,relations_json,changelog,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		versionID, p.ID, seq, string(p.Manifest), string(p.Package), jsonColumn(p.AttachmentKeys), p.ManifestHash, p.PluginHash, string(relationJSON), changelog, createdBy, now); err != nil {
+		return wrapped("snapshot version", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE plugins SET current_version_id=?,current_version=?,updated_at=? WHERE plugin_id=? AND deleted_at IS NULL`, versionID, seq, now, p.ID); err != nil {
+		return wrapped("advance current version", err)
 	}
 	return nil
 }
@@ -159,6 +206,15 @@ func (r *Repo) CreateGraph(ctx context.Context, scope Scope, nodes []Mutation) (
 			return nil, err
 		}
 		syncs[i] = &RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: nodes[i].Relations}
+	}
+	// Snapshot every flagged top node now that its relations exist, so a container
+	// import records the top's initial version. Embedded children are not flagged.
+	for i := range nodes {
+		if nodes[i].SnapshotVersion {
+			if err = snapshotVersion(ctx, tx, r.id, now, nodes[i].Plugin, nodes[i].Relations, nodes[i].Changelog, nodes[i].OperatorID); err != nil {
+				return nil, err
+			}
+		}
 	}
 	// Phase 3: append one create audit per plugin.
 	for i := range nodes {
@@ -323,6 +379,13 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 			return nil, err
 		}
 	}
+	// Snapshot the rebuilt top as a new version (its content was just swapped),
+	// advancing current_version_id off the preserved old pointer.
+	if top.SnapshotVersion {
+		if err = snapshotVersion(ctx, tx, r.id, now, topPlugin, top.Relations, top.Changelog, top.OperatorID); err != nil {
+			return nil, err
+		}
+	}
 	// Phase 6: append one update audit for the top plus one create audit per child.
 	if err = insertAudit(ctx, tx, r.id(), now, topPlugin, "update", top, before.PluginHash, topPlugin.PluginHash); err != nil {
 		return nil, err
@@ -433,6 +496,11 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	sync, err := syncRelations(ctx, tx, r.id, now, p.ID, m.OperatorID, m.Relations)
 	if err != nil {
 		return nil, err
+	}
+	if m.SnapshotVersion {
+		if err = snapshotVersion(ctx, tx, r.id, now, p, m.Relations, m.Changelog, m.OperatorID); err != nil {
+			return nil, err
+		}
 	}
 	if err = insertAudit(ctx, tx, r.id(), now, p, "update", m, before.PluginHash, p.PluginHash); err != nil {
 		return nil, err

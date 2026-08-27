@@ -24,6 +24,7 @@ type fakeStore struct {
 	createRels     []model.PluginRelation
 	createPlace    []model.PluginPlacement
 	createAudit    model.PluginAuditLog
+	createSnapshot bool
 	graphNodes     []pluginrepo.Mutation
 	graphScope     pluginrepo.Scope
 	graphErr       error
@@ -34,6 +35,7 @@ type fakeStore struct {
 	rebuildErr     error
 	update         *model.Plugin
 	updateRels     []model.PluginRelation
+	updateSnapshot bool
 	deleteScope    pluginrepo.Scope
 	deleteID       string
 	deleteGraphID  string
@@ -92,6 +94,7 @@ func (f *fakeStore) Create(_ context.Context, s pluginrepo.Scope, m pluginrepo.M
 	p := m.Plugin
 	f.create, f.createRels, f.createScope = &p, m.Relations, s
 	f.createPlace = m.Placements
+	f.createSnapshot = m.SnapshotVersion
 	f.createAudit = model.PluginAuditLog{OperatorID: m.OperatorID, OperatorName: m.OperatorName, RequestID: m.RequestID, Remark: m.Remark}
 	if f.err != nil {
 		return nil, f.err
@@ -109,6 +112,7 @@ func (f *fakeStore) Create(_ context.Context, s pluginrepo.Scope, m pluginrepo.M
 func (f *fakeStore) Update(_ context.Context, _ pluginrepo.Scope, m pluginrepo.Mutation) (*pluginrepo.RelationSync, error) {
 	p := m.Plugin
 	f.update, f.updateRels = &p, m.Relations
+	f.updateSnapshot = m.SnapshotVersion
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -319,6 +323,27 @@ func TestCreateValidatesAndCanonicalizes(t *testing.T) {
 	}
 	if string(f.create.Tags) != `["one","two"]` {
 		t.Fatalf("tags = %s", f.create.Tags)
+	}
+}
+
+// TestCreateAndUpdateFlagVersionSnapshot locks that the tenant save paths request
+// a per-save version snapshot from the repository.
+func TestCreateAndUpdateFlagVersionSnapshot(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{}}
+	svc := fixedService(f)
+	if _, err := svc.Create(context.Background(), testCaller, validRequest()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !f.createSnapshot {
+		t.Fatal("tenant Create did not flag SnapshotVersion")
+	}
+
+	f.plugins["plugin-1"] = &model.Plugin{ID: "plugin-1", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: &testCaller.SpaceID}
+	if _, err := svc.Update(context.Background(), testCaller, "plugin-1", validRequest()); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !f.updateSnapshot {
+		t.Fatal("tenant Update did not flag SnapshotVersion")
 	}
 }
 

@@ -244,7 +244,9 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 	}
 
 	audit := s.audit(eff, top.ID, "update", old, top, s.now())
-	sync, err := s.repo.RebuildGraph(ctx, adminScope(eff), mutation(*top, topRels, audit), childNodes)
+	topMut := mutation(*top, topRels, audit)
+	topMut.SnapshotVersion = true
+	sync, err := s.repo.RebuildGraph(ctx, adminScope(eff), topMut, childNodes)
 	if err != nil {
 		s.deleteObjects(ctx, uploaded...)
 		return nil, mapStoreError(err)
@@ -272,6 +274,7 @@ func (s *Service) importExpertContainer(ctx context.Context, eff Caller, parsed 
 	// wired via relations, not listed on their own, so they carry no placement.
 	expertNode := s.graphMutation(eff, top, topRels)
 	expertNode.Placements = []model.PluginPlacement{defaultMarketPlacement(top.CategoryID)}
+	expertNode.SnapshotVersion = true
 	nodes := append(childNodes, expertNode)
 
 	syncs, err := s.repo.CreateGraph(ctx, adminScope(eff), nodes)
@@ -346,6 +349,7 @@ func (s *Service) importSquadContainer(ctx context.Context, eff Caller, parsed *
 	// not listed on their own, so they carry no placement.
 	teamNode := s.graphMutation(eff, top, topRels)
 	teamNode.Placements = []model.PluginPlacement{defaultMarketPlacement(top.CategoryID)}
+	teamNode.SnapshotVersion = true
 	nodes := append(childNodes, teamNode)
 
 	syncs, err := s.repo.CreateGraph(ctx, adminScope(eff), nodes)

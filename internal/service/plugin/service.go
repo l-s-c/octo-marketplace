@@ -377,15 +377,19 @@ func (s *Service) Detail(ctx context.Context, caller Caller, pluginID string, in
 }
 
 func (s *Service) Create(ctx context.Context, caller Caller, req WriteRequest) (*Detail, error) {
-	return s.createWithID(ctx, caller, req, "")
+	return s.createWithID(ctx, caller, req, "", true)
 }
 
 // createWithID is Create with an optional caller-reserved plugin ID. Import
 // reserves the ID up front — it is baked into the SKILL.md frontmatter and used
 // to namespace the spilled attachment object keys — so the persisted row must
 // carry that same ID rather than minting a second one, or the shipped id, the
-// object namespace, and the row would all disagree.
-func (s *Service) createWithID(ctx context.Context, caller Caller, req WriteRequest, reservedID string) (*Detail, error) {
+// object namespace, and the row would all disagree. snapshot controls whether this
+// write records a plugin_versions snapshot: the tenant Create sets it, but the
+// skill-import path passes false because the Publish that immediately follows
+// records the authoritative snapshot (with the manifest version), so the create
+// must not also append a redundant one.
+func (s *Service) createWithID(ctx context.Context, caller Caller, req WriteRequest, reservedID string, snapshot bool) (*Detail, error) {
 	if err := validateCaller(caller); err != nil {
 		return nil, err
 	}
@@ -402,7 +406,9 @@ func (s *Service) createWithID(ctx context.Context, caller Caller, req WriteRequ
 		rels[i].SourcePluginID = p.ID
 	}
 	audit := s.audit(caller, p.ID, "create", nil, p, now)
-	sync, err := s.repo.Create(ctx, scope(caller), mutation(*p, rels, audit))
+	m := mutation(*p, rels, audit)
+	m.SnapshotVersion = snapshot
+	sync, err := s.repo.Create(ctx, scope(caller), m)
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
@@ -413,6 +419,14 @@ func (s *Service) createWithID(ctx context.Context, caller Caller, req WriteRequ
 }
 
 func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, req WriteRequest) (*Detail, error) {
+	return s.update(ctx, caller, pluginID, req, true)
+}
+
+// update is Update with explicit control over version snapshotting. The tenant
+// Update records a snapshot; the skill-import path (its content write and its
+// failure-restore) passes false because the Publish that follows records the
+// authoritative snapshot, so the content write must not append a redundant one.
+func (s *Service) update(ctx context.Context, caller Caller, pluginID string, req WriteRequest, snapshot bool) (*Detail, error) {
 	if err := validateCaller(caller); err != nil {
 		return nil, err
 	}
@@ -437,6 +451,11 @@ func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, re
 		return nil, ErrInvalidRequest
 	}
 	now := s.now()
+	// A fetch-edit-save client echoes back the GET package, whose storage
+	// attachments no longer carry an inline key (it lives in the host sidecar).
+	// Re-inject the stored key for unchanged storage content so the round-trip is
+	// not rejected by splitStorageKeys.
+	req.Package = reinjectUpdateStorageKeys(req.Package, old.Package, old.AttachmentKeys)
 	p, rels, err := s.buildWrite(ctx, caller, storageID, req, now, false)
 	if err != nil {
 		return nil, err
@@ -449,7 +468,9 @@ func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, re
 		rels[i].SourcePluginID = storageID
 	}
 	audit := s.audit(caller, storageID, "update", old, p, now)
-	sync, err := s.repo.Update(ctx, scope(caller), mutation(*p, rels, audit))
+	m := mutation(*p, rels, audit)
+	m.SnapshotVersion = snapshot
+	sync, err := s.repo.Update(ctx, scope(caller), m)
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
