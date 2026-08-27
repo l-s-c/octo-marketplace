@@ -231,7 +231,7 @@ func TestExpandSkillPackageFromLegacyZip(t *testing.T) {
 	blobs := &importStorage{objects: map[string][]byte{"experts/x/skill.zip": zipData}}
 	svc := New(&fakeStore{}, blobs)
 
-	out, _, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-1", pkg)
+	out, _, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-1", pkg, nil)
 	if err != nil || !changed {
 		t.Fatalf("expand err=%v changed=%v", err, changed)
 	}
@@ -246,8 +246,53 @@ func TestExpandSkillPackageFromLegacyZip(t *testing.T) {
 		t.Fatalf("supporting file missing: %#v", tree)
 	}
 	// Idempotent: expanding the result again is a no-op.
-	if _, _, changed2, err := svc.ExpandSkillPackage(context.Background(), space, "plug-1", out); err != nil || changed2 {
+	if _, _, changed2, err := svc.ExpandSkillPackage(context.Background(), space, "plug-1", out, nil); err != nil || changed2 {
 		t.Fatalf("second expand changed=%v err=%v", changed2, err)
+	}
+}
+
+// TestExpandResolvesManagedZipFromSidecar is the empirical probe for the
+// repackage->expand ordering blocker: repackage strips the skill/package.zip
+// storage_uri into the sidecar, so by the time expand-skills runs the inline URI
+// is gone. Without the sidecar threaded in, migrationZipKey finds nothing and the
+// archive is rebuilt as a SKILL.md-only stub (data loss); with it, the real
+// archive is expanded.
+func TestExpandResolvesManagedZipFromSidecar(t *testing.T) {
+	space := "space-a"
+	zipKey := "plugins/space-a/attachments/skill-plug-1-managed.zip"
+	zipData := zipWith(t, map[string][]byte{
+		"SKILL.md":           []byte("# Real Doc\nbody"),
+		"references/note.md": []byte("note text"),
+	})
+	// The package as repackage leaves it: a skill/package.zip STORAGE attachment
+	// with the storage_uri already split out (only the sidecar has the key).
+	pkg := json.RawMessage(`{"$schema":"` + packageSchema + `","attachments":[` +
+		`{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# stub"},` +
+		`{"path":"skill/package.zip","content_type":"storage","mime_type":"application/zip","content_size":10,"content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}` +
+		`]}`)
+	keys := json.RawMessage(`{"skill/package.zip":"` + zipKey + `"}`)
+	blobs := &importStorage{objects: map[string][]byte{zipKey: zipData}}
+	svc := New(&fakeStore{}, blobs)
+
+	// Reproduce the bug: without the sidecar, the zip key is unresolvable, so the
+	// expansion collapses to the stub and loses references/note.md.
+	stub, _, _, _ := svc.ExpandSkillPackage(context.Background(), space, "plug-1", pkg, nil)
+	stubTree := decodeTree(t, mapsFromPackage(t, stub))
+	if _, ok := stubTree["references/note.md"]; ok {
+		t.Fatal("probe precondition failed: expected the sidecar-less expansion to drop the archive")
+	}
+
+	// The fix: with the sidecar, migrationZipKey resolves and the real archive expands.
+	out, _, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-1", pkg, keys)
+	if err != nil || !changed {
+		t.Fatalf("expand err=%v changed=%v", err, changed)
+	}
+	tree := decodeTree(t, mapsFromPackage(t, out))
+	if tree["SKILL.md"].RawContent != "# Real Doc\nbody" {
+		t.Fatalf("SKILL.md not from the managed zip: %#v", tree["SKILL.md"])
+	}
+	if tree["references/note.md"].RawContent != "note text" {
+		t.Fatalf("archive file dropped despite sidecar: %s", out)
 	}
 }
 
@@ -269,7 +314,7 @@ func TestExpandSkillPackageSplitsStorageKeys(t *testing.T) {
 	blobs := &importStorage{objects: map[string][]byte{"experts/x/skill.zip": zipData}}
 	svc := New(&fakeStore{}, blobs)
 
-	out, keys, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-1", pkg)
+	out, keys, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-1", pkg, nil)
 	if err != nil || !changed {
 		t.Fatalf("expand err=%v changed=%v", err, changed)
 	}
@@ -297,7 +342,7 @@ func TestExpandSkillPackageEmptyRefKeepsInlineDoc(t *testing.T) {
 		`{"path":"skill/ref.json","content_type":"raw","mime_type":"application/json","raw_content":"{}"}` +
 		`]}`)
 	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
-	out, _, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-2", pkg)
+	out, _, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-2", pkg, nil)
 	if err != nil || !changed {
 		t.Fatalf("expand err=%v changed=%v", err, changed)
 	}
@@ -319,7 +364,7 @@ func TestExpandSkillPackagePrefersRefObjectOverStub(t *testing.T) {
 	blobs := &importStorage{objects: map[string][]byte{"skills/x/SKILL.md": []byte("# Real Doc\nfull body")}}
 	svc := New(&fakeStore{}, blobs)
 
-	out, _, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-q1", pkg)
+	out, _, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-q1", pkg, nil)
 	if err != nil || !changed {
 		t.Fatalf("expand err=%v changed=%v", err, changed)
 	}
@@ -336,7 +381,7 @@ func TestExpandSkillPackageTreeUnchanged(t *testing.T) {
 		`{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# doc"}` +
 		`]}`)
 	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
-	out, _, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-3", pkg)
+	out, _, changed, err := svc.ExpandSkillPackage(context.Background(), space, "plug-3", pkg, nil)
 	if err != nil || changed {
 		t.Fatalf("tree should be unchanged: changed=%v err=%v", changed, err)
 	}

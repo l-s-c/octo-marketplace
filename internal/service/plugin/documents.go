@@ -257,6 +257,102 @@ func injectStorageKeys(pkg, keysJSON json.RawMessage) json.RawMessage {
 	return injected
 }
 
+// storageContentHashes maps each storage attachment's path to its content_hash
+// in a package document, used to bind a re-injected key to unchanged content.
+func storageContentHashes(pkg json.RawMessage) map[string]string {
+	var doc struct {
+		Attachments []struct {
+			Path        string `json:"path"`
+			ContentType string `json:"content_type"`
+			ContentHash string `json:"content_hash"`
+		} `json:"attachments"`
+	}
+	if json.Unmarshal(pkg, &doc) != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, a := range doc.Attachments {
+		if a.ContentType == "storage" {
+			out[a.Path] = a.ContentHash
+		}
+	}
+	return out
+}
+
+// reinjectUpdateStorageKeys re-embeds storage object keys into an incoming update
+// package for storage attachments that arrive without an inline storage_uri —
+// the shape a client gets from GET, since the 2.0 read path strips the key into
+// the host sidecar and never returns it. Without this, a fetch-edit-save
+// round-trip on a storage-backed plugin is rejected by splitStorageKeys. A key is
+// re-injected only when the incoming attachment's path AND content_hash match the
+// stored row's attachment (so a client cannot bind a stale key to changed
+// content) and the old sidecar holds a key for that path. A genuinely new storage
+// attachment (different content) is left keyless and correctly rejected — clients
+// cannot mint storage content through a raw upsert.
+func reinjectUpdateStorageKeys(reqPkg, oldPkg, oldKeys json.RawMessage) json.RawMessage {
+	keys := attachmentKeyMap(oldKeys)
+	if len(keys) == 0 {
+		return reqPkg
+	}
+	oldHashes := storageContentHashes(oldPkg)
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(reqPkg, &doc) != nil {
+		return reqPkg
+	}
+	rawAttachments, ok := doc["attachments"]
+	if !ok {
+		return reqPkg
+	}
+	var attachments []map[string]json.RawMessage
+	if json.Unmarshal(rawAttachments, &attachments) != nil {
+		return reqPkg
+	}
+	changed := false
+	for _, attachment := range attachments {
+		var contentType string
+		if raw, ok := attachment["content_type"]; ok {
+			_ = json.Unmarshal(raw, &contentType)
+		}
+		if contentType != "storage" {
+			continue
+		}
+		if _, has := attachment["storage_uri"]; has {
+			continue
+		}
+		var path, hash string
+		_ = json.Unmarshal(attachment["path"], &path)
+		_ = json.Unmarshal(attachment["content_hash"], &hash)
+		key, ok := keys[path]
+		if !ok || key == "" {
+			continue
+		}
+		// Bind only to unchanged content: the incoming content_hash must match the
+		// stored row's attachment at the same path.
+		if prev, ok := oldHashes[path]; !ok || prev == "" || prev != hash {
+			continue
+		}
+		encoded, err := json.Marshal(key)
+		if err != nil {
+			continue
+		}
+		attachment["storage_uri"] = encoded
+		changed = true
+	}
+	if !changed {
+		return reqPkg
+	}
+	reencoded, err := json.Marshal(attachments)
+	if err != nil {
+		return reqPkg
+	}
+	doc["attachments"] = reencoded
+	merged, err := json.Marshal(doc)
+	if err != nil {
+		return reqPkg
+	}
+	return merged
+}
+
 // skillRefKeysScoped reports whether a package's legacy skill/ref.json pointer
 // (if any) references only this Space's own managed prefix. A package without a
 // skill/ref.json passes trivially. Every object key the pointer can resolve to

@@ -181,29 +181,42 @@ func (r *Runner) repackagePlugins(ctx context.Context, p *repackagePlan) error {
 				continue
 			}
 		}
-		newHash, err := libplugin.ComputePluginHash(manifest, newPkg)
+		newManifest, mChanged, err := transformManifest(manifest)
 		if err != nil {
 			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugins", id, err.Error()})
 			continue
 		}
-		if !changed && newHash == oldHash {
+		newHash, err := libplugin.ComputePluginHash(newManifest, newPkg)
+		if err != nil {
+			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugins", id, err.Error()})
 			continue
 		}
-		// Only touch attachment_keys_json when this pass actually split storage
-		// keys out of the package (an un-migrated row): rows already migrated by
-		// the expand phase carry no inline storage_uri, so newKeys is nil and their
+		if !changed && !mChanged && newHash == oldHash {
+			continue
+		}
+		// Build the SET list dynamically: manifest_json/manifest_hash only when the
+		// manifest $schema was bumped, and attachment_keys_json only when this pass
+		// split storage keys out (an un-migrated row) — a row already migrated by the
+		// expand phase carries no inline storage_uri, so newKeys is nil and its
 		// existing sidecar must be preserved rather than overwritten with NULL.
-		action := repackageAction{
-			count: func(c *RepackageCounts) *int { return &c.Plugins },
-			query: `UPDATE plugins SET plugin_json=?, plugin_hash=? WHERE plugin_id=? AND plugin_hash=?`,
-			args:  []any{string(newPkg), newHash, id, oldHash},
-			guard: true,
+		cols := []string{"plugin_json=?"}
+		args := []any{string(newPkg)}
+		if mChanged {
+			cols = append(cols, "manifest_json=?", "manifest_hash=?")
+			args = append(args, string(newManifest), hashJSON(newManifest))
 		}
 		if newKeys != nil {
-			action.query = `UPDATE plugins SET plugin_json=?, attachment_keys_json=?, plugin_hash=? WHERE plugin_id=? AND plugin_hash=?`
-			action.args = []any{string(newPkg), string(newKeys), newHash, id, oldHash}
+			cols = append(cols, "attachment_keys_json=?")
+			args = append(args, string(newKeys))
 		}
-		p.actions = append(p.actions, action)
+		cols = append(cols, "plugin_hash=?")
+		args = append(args, newHash, id, oldHash)
+		p.actions = append(p.actions, repackageAction{
+			count: func(c *RepackageCounts) *int { return &c.Plugins },
+			query: `UPDATE plugins SET ` + strings.Join(cols, ", ") + ` WHERE plugin_id=? AND plugin_hash=?`,
+			args:  args,
+			guard: true,
+		})
 	}
 	return rows.Err()
 }
@@ -241,27 +254,39 @@ func (r *Runner) repackageVersions(ctx context.Context, types map[string]string,
 			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_versions", id, err.Error()})
 			continue
 		}
-		newHash, err := libplugin.ComputePluginHash(manifest, newPkg)
+		newManifest, mChanged, err := transformManifest(manifest)
 		if err != nil {
 			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_versions", id, err.Error()})
 			continue
 		}
-		if !changed && !relationsChanged && newHash == oldHash {
+		newHash, err := libplugin.ComputePluginHash(newManifest, newPkg)
+		if err != nil {
+			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_versions", id, err.Error()})
 			continue
 		}
-		// See repackagePlugins: only set attachment_keys_json when this pass split
-		// storage keys out (un-migrated snapshot); otherwise leave it untouched.
-		action := repackageAction{
-			count: func(c *RepackageCounts) *int { return &c.Versions },
-			query: `UPDATE plugin_versions SET plugin_json=?, relations_json=?, plugin_hash=? WHERE version_id=? AND plugin_hash=?`,
-			args:  []any{string(newPkg), string(newRelations), newHash, id, oldHash},
-			guard: true,
+		if !changed && !relationsChanged && !mChanged && newHash == oldHash {
+			continue
+		}
+		// See repackagePlugins: manifest_json/manifest_hash only when the manifest
+		// $schema was bumped; attachment_keys_json only when storage keys were split.
+		cols := []string{"plugin_json=?", "relations_json=?"}
+		args := []any{string(newPkg), string(newRelations)}
+		if mChanged {
+			cols = append(cols, "manifest_json=?", "manifest_hash=?")
+			args = append(args, string(newManifest), hashJSON(newManifest))
 		}
 		if newKeys != nil {
-			action.query = `UPDATE plugin_versions SET plugin_json=?, attachment_keys_json=?, relations_json=?, plugin_hash=? WHERE version_id=? AND plugin_hash=?`
-			action.args = []any{string(newPkg), string(newKeys), string(newRelations), newHash, id, oldHash}
+			cols = append(cols, "attachment_keys_json=?")
+			args = append(args, string(newKeys))
 		}
-		p.actions = append(p.actions, action)
+		cols = append(cols, "plugin_hash=?")
+		args = append(args, newHash, id, oldHash)
+		p.actions = append(p.actions, repackageAction{
+			count: func(c *RepackageCounts) *int { return &c.Versions },
+			query: `UPDATE plugin_versions SET ` + strings.Join(cols, ", ") + ` WHERE version_id=? AND plugin_hash=?`,
+			args:  args,
+			guard: true,
+		})
 	}
 	return rows.Err()
 }
@@ -295,16 +320,20 @@ func (r *Runner) repackageAudits(ctx context.Context, types map[string]string, p
 		if afterHash != nil {
 			oldAfter = *afterHash
 		}
-		newPkg, changed := pkg, false
+		newPkg, pkgChanged := pkg, false
 		if len(pkg) > 0 {
+			// The split storage keys are intentionally discarded here: an audit
+			// snapshot is an immutable historical record that is never dereferenced
+			// for object bytes, so its storage_uri is stripped for 2.0 validity but
+			// no sidecar is kept (audit rows have no attachment_keys_json column).
 			transformed, _, didChange, err := transformPackage(pkg, typ, manifest)
 			if err != nil {
 				p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_audit_logs", id, err.Error()})
 				lastHash[pluginID] = oldAfter
 				continue
 			}
-			newPkg, changed = transformed, didChange
-			if changed {
+			newPkg, pkgChanged = transformed, didChange
+			if pkgChanged {
 				if err := decodablePackage(newPkg, typ); err != nil {
 					p.issues = append(p.issues, Issue{"skip", "repackage_invalid_package", "plugin_audit_logs", id, err.Error()})
 					lastHash[pluginID] = oldAfter
@@ -312,9 +341,20 @@ func (r *Runner) repackageAudits(ctx context.Context, types map[string]string, p
 				}
 			}
 		}
+		newManifest, mChanged := manifest, false
+		if len(manifest) > 0 {
+			tm, mc, err := transformManifest(manifest)
+			if err != nil {
+				p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_audit_logs", id, err.Error()})
+				lastHash[pluginID] = oldAfter
+				continue
+			}
+			newManifest, mChanged = tm, mc
+		}
+		changed := pkgChanged || mChanged
 		snapshotHash := ""
-		if len(newPkg) > 0 && len(manifest) > 0 {
-			computed, err := libplugin.ComputePluginHash(manifest, newPkg)
+		if len(newPkg) > 0 && len(newManifest) > 0 {
+			computed, err := libplugin.ComputePluginHash(newManifest, newPkg)
 			if err != nil {
 				p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_audit_logs", id, err.Error()})
 				lastHash[pluginID] = oldAfter
@@ -341,10 +381,18 @@ func (r *Runner) repackageAudits(ctx context.Context, types map[string]string, p
 		if !changed && newBefore == oldBefore && newAfter == oldAfter {
 			continue
 		}
+		cols := []string{"plugin_snapshot_json=?"}
+		args := []any{nullableJSON(newPkg)}
+		if mChanged {
+			cols = append(cols, "manifest_snapshot_json=?")
+			args = append(args, nullableJSON(newManifest))
+		}
+		cols = append(cols, "before_hash=?", "after_hash=?")
+		args = append(args, hashColumn(newBefore, beforeWasNull), hashColumn(newAfter, afterWasNull), id)
 		p.actions = append(p.actions, repackageAction{
 			count: func(c *RepackageCounts) *int { return &c.Audits },
-			query: `UPDATE plugin_audit_logs SET plugin_snapshot_json=?, before_hash=?, after_hash=? WHERE audit_log_id=?`,
-			args:  []any{nullableJSON(newPkg), hashColumn(newBefore, beforeWasNull), hashColumn(newAfter, afterWasNull), id},
+			query: `UPDATE plugin_audit_logs SET ` + strings.Join(cols, ", ") + ` WHERE audit_log_id=?`,
+			args:  args,
 		})
 	}
 	return rows.Err()
@@ -480,6 +528,37 @@ func decodablePackage(pkg []byte, pluginType string) error {
 	}
 	_, err := libplugin.DecodePackage(libplugin.Type(pluginType), pkg)
 	return err
+}
+
+// transformManifest normalizes a stored manifest document to the 2.0 contract:
+// it advances the $schema id to cowork-plugin-manifest-2.0.json — the lib's
+// DecodeManifest hard-asserts it, so a manifest left at 1.0 is rejected on every
+// read/validate — and re-canonicalizes. Returns the canonical manifest, whether
+// it changed, and any error. An empty or already-2.0 manifest is returned
+// unchanged so re-runs are no-ops.
+func transformManifest(raw []byte) ([]byte, bool, error) {
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return raw, false, nil
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.UseNumber()
+	var doc map[string]any
+	if err := dec.Decode(&doc); err != nil {
+		return nil, false, fmt.Errorf("invalid manifest JSON: %w", err)
+	}
+	if s, _ := doc["$schema"].(string); s == "" || s == "cowork-plugin-manifest-2.0.json" {
+		return raw, false, nil
+	}
+	doc["$schema"] = "cowork-plugin-manifest-2.0.json"
+	marshaled, err := json.Marshal(doc)
+	if err != nil {
+		return nil, false, err
+	}
+	out, err := libplugin.CanonicalJSON(marshaled)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
 }
 
 func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, []byte, bool, error) {

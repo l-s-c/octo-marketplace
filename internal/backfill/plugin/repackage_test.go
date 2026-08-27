@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	libplugin "github.com/Mininglamp-OSS/octo-plugin-lib/plugin"
@@ -147,6 +148,45 @@ func TestTransformPackageSplitsStorageURI(t *testing.T) {
 	_, keys2, _, err := transformPackage(out, "skill", manifest)
 	if err != nil || keys2 != nil {
 		t.Fatalf("second pass keys=%s err=%v", keys2, err)
+	}
+}
+
+// TestTransformManifestMigratesSchemaSoLibAccepts is the empirical probe for the
+// manifest-migration blocker: a stored 1.0 manifest is rejected by the 2.0 lib,
+// and transformManifest bumps it so the pair validates. Mirrors the reviewer's
+// DecodeManifest probe rather than trusting inspection.
+func TestTransformManifestMigratesSchemaSoLibAccepts(t *testing.T) {
+	const id = "00000000-0000-4000-8000-000000000001"
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	manifest := []byte(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"S","plugin_type":"skill","name":"s","description":"d","labels":[],"examples":[]}`)
+	pkg := []byte(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# doc"}]}`)
+
+	validate := func(m []byte) error {
+		cm, _ := libplugin.CanonicalJSON(m)
+		cp, _ := libplugin.CanonicalJSON(pkg)
+		ph, _ := libplugin.ComputePluginHash(m, pkg)
+		return libplugin.ValidatePlugin(libplugin.Plugin{
+			PluginID: id, PluginName: "S", PluginType: libplugin.TypeSkill,
+			ManifestJSON: cm, PluginJSON: cp, PluginHash: ph,
+			Status: libplugin.StatusActive, CreatedAt: ts, UpdatedAt: ts,
+		})
+	}
+
+	// Reproduce the bug: the un-migrated 1.0 manifest is rejected.
+	if err := validate(manifest); err == nil {
+		t.Fatal("expected the 1.0 manifest to be rejected by the 2.0 lib")
+	}
+	// The fix: transformManifest bumps the schema and the pair now validates.
+	newManifest, changed, err := transformManifest(manifest)
+	if err != nil || !changed {
+		t.Fatalf("transformManifest changed=%v err=%v", changed, err)
+	}
+	if err := validate(newManifest); err != nil {
+		t.Fatalf("migrated manifest still rejected: %v", err)
+	}
+	// Idempotent: a 2.0 manifest is left untouched.
+	if _, again, err := transformManifest(newManifest); err != nil || again {
+		t.Fatalf("second pass changed=%v err=%v", again, err)
 	}
 }
 

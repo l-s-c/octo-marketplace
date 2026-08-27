@@ -164,6 +164,45 @@ func TestInjectStorageKeysRoundTripsWithSplit(t *testing.T) {
 	}
 }
 
+// TestUpdateRoundTripReinjectsStorageKeys is the empirical probe for the
+// read-modify-write blocker: the stored 2.0 package returned by GET carries no
+// inline storage_uri, so echoing it back into the write path is rejected by
+// splitStorageKeys; reinjectUpdateStorageKeys restores the key for unchanged
+// content so the round-trip succeeds, while a changed content_hash is not allowed
+// to inherit the stored key.
+func TestUpdateRoundTripReinjectsStorageKeys(t *testing.T) {
+	space := "space-a"
+	key := "plugins/space-a/attachments/skill-x-abc123.bin"
+	hash := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	stored := json.RawMessage(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
+		`{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# doc"},` +
+		`{"path":"data/big.bin","content_type":"storage","mime_type":"application/octet-stream","content_size":10,"content_hash":"` + hash + `"}]}`)
+	keys := json.RawMessage(`{"data/big.bin":"` + key + `"}`)
+
+	// Reproduce the 400: the stored (keyless) package is rejected by the write path.
+	if _, _, err := splitStorageKeys(stored, space); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected keyless storage attachment to be rejected, got %v", err)
+	}
+	// The fix: re-injecting from the sidecar (path + content_hash match) makes the
+	// round-trip succeed and recovers the identical sidecar.
+	merged := reinjectUpdateStorageKeys(stored, stored, keys)
+	_, gotKeys, err := splitStorageKeys(merged, space)
+	if err != nil {
+		t.Fatalf("round-trip rejected after re-inject: %v", err)
+	}
+	if string(gotKeys) != string(keys) {
+		t.Fatalf("recovered sidecar = %s want %s", gotKeys, keys)
+	}
+	// Content-hash guard: an attachment whose content changed must NOT inherit the
+	// stored key (it stays keyless and is correctly rejected).
+	changedHash := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	changed := json.RawMessage(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
+		`{"path":"data/big.bin","content_type":"storage","mime_type":"application/octet-stream","content_size":10,"content_hash":"` + changedHash + `"}]}`)
+	if _, _, err := splitStorageKeys(reinjectUpdateStorageKeys(changed, stored, keys), space); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("changed content must not inherit the stored key, got %v", err)
+	}
+}
+
 func quoted(value string) string {
 	encoded, _ := json.Marshal(value)
 	return string(encoded)

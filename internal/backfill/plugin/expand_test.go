@@ -11,7 +11,7 @@ import (
 
 type stubExpander struct{ out, keys string }
 
-func (s stubExpander) ExpandSkillPackage(_ context.Context, _, _ string, pkg json.RawMessage) (json.RawMessage, json.RawMessage, bool, error) {
+func (s stubExpander) ExpandSkillPackage(_ context.Context, _, _ string, pkg, _ json.RawMessage) (json.RawMessage, json.RawMessage, bool, error) {
 	// A tree package (no legacy pointer) passes straight through unchanged; a
 	// legacy one expands to the stub tree.
 	if !hasLegacyPointer(pkg) {
@@ -51,9 +51,9 @@ func TestExpandPluginsGuardsUpdateWithOldHash(t *testing.T) {
 	tree := `{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
 		attachmentJSON("SKILL.md", "text/markdown", "# real doc") + `]}`
 
-	mock.ExpectQuery(`SELECT plugin_id, manifest_json, plugin_json, plugin_hash FROM plugins WHERE plugin_type='skill'`).
-		WillReturnRows(sqlmock.NewRows([]string{"plugin_id", "manifest_json", "plugin_json", "plugin_hash"}).
-			AddRow("s1", manifest, legacySkillPkg(), "sha256:old"))
+	mock.ExpectQuery(`SELECT plugin_id, manifest_json, plugin_json, attachment_keys_json, plugin_hash FROM plugins WHERE plugin_type='skill'`).
+		WillReturnRows(sqlmock.NewRows([]string{"plugin_id", "manifest_json", "plugin_json", "attachment_keys_json", "plugin_hash"}).
+			AddRow("s1", manifest, legacySkillPkg(), nil, "sha256:old"))
 
 	var p expandPlan
 	if err := r.expandPlugins(context.Background(), stubExpander{out: tree}, true, map[string]string{"s1": "space-a"}, &p); err != nil {
@@ -87,9 +87,9 @@ func TestExpandPluginsSkipsTreeRows(t *testing.T) {
 	r := New(db)
 	tree := `{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
 		attachmentJSON("SKILL.md", "text/markdown", "# d") + `]}`
-	mock.ExpectQuery(`SELECT plugin_id, manifest_json, plugin_json, plugin_hash FROM plugins WHERE plugin_type='skill'`).
-		WillReturnRows(sqlmock.NewRows([]string{"plugin_id", "manifest_json", "plugin_json", "plugin_hash"}).
-			AddRow("s1", `{"plugin_name":"x","name":"x","description":"d"}`, tree, "sha256:cur"))
+	mock.ExpectQuery(`SELECT plugin_id, manifest_json, plugin_json, attachment_keys_json, plugin_hash FROM plugins WHERE plugin_type='skill'`).
+		WillReturnRows(sqlmock.NewRows([]string{"plugin_id", "manifest_json", "plugin_json", "attachment_keys_json", "plugin_hash"}).
+			AddRow("s1", `{"plugin_name":"x","name":"x","description":"d"}`, tree, nil, "sha256:cur"))
 	var p expandPlan
 	if err := r.expandPlugins(context.Background(), stubExpander{}, true, map[string]string{"s1": "space-a"}, &p); err != nil {
 		t.Fatal(err)

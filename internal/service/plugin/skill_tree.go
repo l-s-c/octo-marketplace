@@ -251,7 +251,7 @@ func attachmentMIME(p string, isText bool) string {
 // the host-private path->object-key sidecar for any spilled storage attachments
 // (nil when all-inline), whether anything changed, and an error. The caller
 // persists both the package and the sidecar (attachment_keys_json).
-func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID string, pkg json.RawMessage) (json.RawMessage, json.RawMessage, bool, error) {
+func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID string, pkg, keys json.RawMessage) (json.RawMessage, json.RawMessage, bool, error) {
 	attachments := decodePackageAttachments(pkg)
 	legacy := false
 	for _, a := range attachments {
@@ -263,7 +263,11 @@ func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID stri
 	if !legacy {
 		return pkg, nil, false, nil
 	}
-	p := &model.Plugin{Name: pluginID, SpaceID: &spaceID, Package: pkg}
+	// The repackage phase strips inline storage_uri into the sidecar, so a legacy
+	// skill/package.zip key is resolved from `keys` (attachment_keys_json), not the
+	// package. Thread it onto the working plugin or migrationZipKey finds nothing
+	// and the archive gets rebuilt as a SKILL.md-only stub.
+	p := &model.Plugin{Name: pluginID, SpaceID: &spaceID, Package: pkg, AttachmentKeys: keys}
 	ref := s.skillRef(p)
 
 	var newAtts []map[string]any

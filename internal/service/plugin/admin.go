@@ -220,6 +220,9 @@ func (s *Service) AdminUpdate(ctx context.Context, caller Caller, pluginID strin
 	if old.SpaceID != nil {
 		effSpace = *old.SpaceID
 	}
+	// Fetch-edit-save: re-inject stored keys for unchanged storage attachments the
+	// GET response returned keyless, so the round-trip is not rejected on write.
+	req.Package = reinjectUpdateStorageKeys(req.Package, old.Package, old.AttachmentKeys)
 	p, rels, err := s.adminEffectiveWrite(ctx, caller, storageID, req, old.Visibility, effSpace)
 	if err != nil {
 		return nil, err
