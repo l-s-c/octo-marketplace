@@ -781,8 +781,9 @@ func TestImportExpertContainerDedupesRepeatedSkillFile(t *testing.T) {
 
 // The same nested file referenced under two DIFFERENT names is a per-parent copy
 // under each display name — both refs import successfully as distinct embedded
-// skill nodes (their own id/name), and the shared archive is expanded/charged
-// once (P2-3). An exact (file,name) repeat still collapses onto one node.
+// skill nodes (their own id/name), each materialized and charged against the
+// container budget (P2-3/P2-1). An exact (file,name) repeat still collapses onto
+// one cached node and is not re-charged.
 func TestImportExpertContainerAllowsSameFileDifferentNames(t *testing.T) {
 	store := &fakeStore{plugins: map[string]*model.Plugin{}}
 	svc := containerService(store)
@@ -815,16 +816,18 @@ func TestImportExpertContainerAllowsSameFileDifferentNames(t *testing.T) {
 
 // TestImportSquadContainerSharesFileAcrossMembersUnderDifferentNames is the P2-3
 // squad regression: two members each bundle skills/common.zip under a different
-// display name. Both import successfully as distinct embedded skill nodes, and the
-// shared archive is expanded/charged only once — proven by a container budget that
-// admits a single expansion but not two (a second charge would exceed it).
+// display name. Both import successfully as distinct embedded skill nodes. Each
+// distinct (file,name) is a separate materialization, so EACH is charged against
+// the shared container budget (a re-expansion under a new name decompresses the
+// same bytes again); here the budget is generous enough that both charges fit.
+// TestImportExpertContainerChargesEverySameFileExpansion pins the charge-per-
+// expansion accounting by driving N such refs over the budget.
 func TestImportSquadContainerSharesFileAcrossMembersUnderDifferentNames(t *testing.T) {
 	store := &fakeStore{plugins: map[string]*model.Plugin{}}
 	svc := containerService(store)
-	// Per-file cap 4096; container budget = 5*4096 = 20480. One ~4000-byte SKILL.md
-	// fits; charging it twice (8000) still fits, so to prove "charged once" tightly
-	// we instead rely on distinct-node identity below. The budget here simply keeps
-	// the expansion bounded and non-trivial.
+	// Per-file cap 4096; container budget = 5*4096 = 20480. The shared SKILL.md is
+	// ~4000 bytes, so charging it once per distinct name (2 names = ~8000) fits well
+	// under the budget — this test proves the distinct-node identity, not rejection.
 	svc.SetArtifactLimits(4096)
 	body := bytes.Repeat([]byte("a"), 4000)
 	manifest := map[string]any{
@@ -849,9 +852,38 @@ func TestImportSquadContainerSharesFileAcrossMembersUnderDifferentNames(t *testi
 		}
 	}
 	// Two distinct skill nodes, one per member's chosen name — the shared file was
-	// expanded once (budget charged once) yet minted the right per-name node.
+	// materialized (and charged) once per distinct name, yet minted the right
+	// per-name node.
 	if skills != 2 || skillNames["Common-A"] != 1 || skillNames["Common-B"] != 1 {
 		t.Fatalf("squad skill nodes = %d names=%#v, want distinct Common-A/Common-B", skills, skillNames)
+	}
+}
+
+// TestImportExpertContainerChargesEverySameFileExpansion pins the P2-1 fix: every
+// distinct (file,name) expansion is charged against the shared container budget,
+// even when the refs point at the SAME nested archive under different display
+// names. Six refs to one 4000-byte skill under six names = 24000 charged bytes >
+// the 20480 container budget, so the import is rejected — whereas charging the
+// shared file only once (the pre-fix behavior) would have let it through. An exact
+// (file,name) repeat still collapses onto one cached node and is NOT re-charged
+// (covered by TestImportExpertContainerDedupesRepeatedSkillFile).
+func TestImportExpertContainerChargesEverySameFileExpansion(t *testing.T) {
+	store := &fakeStore{plugins: map[string]*model.Plugin{}}
+	svc := containerService(store)
+	svc.SetArtifactLimits(4096) // per-file cap 4096, container budget = 5*4096 = 20480
+	body := bytes.Repeat([]byte("a"), 4000)
+	refs := make([]map[string]any, 0, 6)
+	for i := 0; i < 6; i++ {
+		// Same file, six DIFFERENT names: each is its own materialization/charge.
+		refs = append(refs, map[string]any{"name": "Name" + strconv.Itoa(i), "file": "skills/common.zip"})
+	}
+	manifest := map[string]any{"name": "Bomb", "summary": "same file, many names", "instruction": "do", "skills": refs}
+	archive := containerZip(t, "expert.json", manifest, map[string][]byte{"skills/common.zip": sizedSkillZip(t, body)})
+	if _, err := svc.ImportContainer(context.Background(), containerCaller, ContainerImportParams{Archive: archive}); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge (every same-file/different-name expansion must charge the container budget)", err)
+	}
+	if store.graphNodes != nil {
+		t.Fatalf("an over-budget container must not reach CreateGraph: %d nodes", len(store.graphNodes))
 	}
 }
 

@@ -120,7 +120,7 @@ func (s *Service) ImportContainer(ctx context.Context, caller Caller, p Containe
 	if err != nil {
 		return nil, err
 	}
-	// Admin identity: public visibility in the empty global Space, matching the
+	// Admin identity: system visibility in the empty global Space, matching the
 	// AdminCreate convention for expert/skill/expert_team.
 	eff := caller
 	eff.IsSystemAdmin = true
@@ -158,7 +158,7 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 		return nil, err
 	}
 	// Resolve the reupload target cross-Space (adminScope), matching SkillReupload.
-	old, oldRels, err := s.repo.GetWithRelations(ctx, adminScope(caller), topID)
+	old, _, err := s.repo.GetWithRelations(ctx, adminScope(caller), topID)
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
@@ -182,11 +182,11 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 		return nil, ErrInvalidContainer
 	}
 	// The old embedded children (bundled skills for an expert; members + their
-	// skills for a squad) must be soft-deleted so they stop surfacing anywhere.
-	oldChildIDs, err := s.collectContainerChildren(ctx, adminScope(caller), old, oldRels)
-	if err != nil {
-		return nil, err
-	}
+	// skills for a squad) are soft-deleted by RebuildGraph so they stop surfacing
+	// anywhere. Their IDs are derived INSIDE the rebuild transaction, after the top
+	// is FOR UPDATE-locked, not from this unlocked pre-parse read — a multi-second
+	// parse window otherwise lets a concurrent reupload/delete commit a swap that a
+	// stale snapshot would orphan.
 
 	// Admin identity for building the replacement graph, matching ImportContainer.
 	// The object namespace / canonicalization Space must be the ROW's real Space
@@ -215,7 +215,8 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 	// visibility, Space, owner, publisher, creator provenance, or created_at. The
 	// container carries no icon/publisher, so keep the existing ones rather than
 	// clearing them (RebuildGraph re-derives visibility/Space/owner from the locked
-	// row; publisher/icon/category keep this unlocked read — content, not identity).
+	// row — normalizing a preserved legacy `public` to `system` there — while
+	// publisher/icon/category keep this unlocked read — content, not identity).
 	top.Visibility = old.Visibility
 	top.SpaceID = old.SpaceID
 	top.OwnerUID = old.OwnerUID
@@ -245,7 +246,7 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 	}
 
 	audit := s.audit(eff, top.ID, "update", old, top, s.now())
-	sync, err := s.repo.RebuildGraph(ctx, adminScope(eff), mutation(*top, topRels, audit), childNodes, oldChildIDs)
+	sync, err := s.repo.RebuildGraph(ctx, adminScope(eff), mutation(*top, topRels, audit), childNodes)
 	if err != nil {
 		s.deleteObjects(ctx, uploaded...)
 		return nil, mapStoreError(err)
@@ -253,65 +254,11 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 	return s.topLevelDetail(ctx, top, sync), nil
 }
 
-// collectContainerChildren gathers the storage IDs of the top plugin's current
-// embedded descendants so a rebuild or delete can tear them down: an expert's
-// bundled skills (its expert_skill targets); a squad's member experts plus each
-// member's own bundled skills (the member's expert_skill targets). The passed
-// scope resolves the descendants — adminScope for the cross-Space admin surface,
-// the tenant scope for an owner-scoped delete, so embedded children (hidden from
-// tenant listings) stay visible without granting cross-Space reach.
-func (s *Service) collectContainerChildren(ctx context.Context, sc pluginrepo.Scope, top *model.Plugin, topRels []model.PluginRelation) ([]string, error) {
-	var ids []string
-	// A rebuild may only tear down the container's OWN embedded children — the
-	// per-parent skill/member copies (is_embedded=1). A relation target that is a
-	// standalone catalog row (is_embedded=0) is something a tenant graph merely
-	// references (buildRelations validates only type, not ownership), and must
-	// never be soft-deleted out from under every other graph that shares it.
-	addIfEmbedded := func(id string) error {
-		child, _, err := s.repo.GetWithRelations(ctx, sc, id)
-		if err != nil {
-			return mapStoreError(err)
-		}
-		if child.IsEmbedded {
-			ids = append(ids, id)
-		}
-		return nil
-	}
-	switch top.Type {
-	case model.PluginTypeExpert:
-		for _, r := range topRels {
-			if r.Type == "expert_skill" {
-				if err := addIfEmbedded(r.TargetPluginID); err != nil {
-					return nil, err
-				}
-			}
-		}
-	case model.PluginTypeExpertTeam:
-		for _, r := range topRels {
-			if r.Type != "expert_team_expert" {
-				continue
-			}
-			member, memberRels, err := s.repo.GetWithRelations(ctx, sc, r.TargetPluginID)
-			if err != nil {
-				return nil, mapStoreError(err)
-			}
-			// A team member that is a standalone expert (referenced, not embedded)
-			// is left intact along with its own skills.
-			if !member.IsEmbedded {
-				continue
-			}
-			ids = append(ids, r.TargetPluginID)
-			for _, mr := range memberRels {
-				if mr.Type == "expert_skill" {
-					if err := addIfEmbedded(mr.TargetPluginID); err != nil {
-						return nil, err
-					}
-				}
-			}
-		}
-	}
-	return ids, nil
-}
+// collectContainerChildren was removed: the embedded child set is now derived
+// inside the RebuildGraph / DeleteGraph transaction, under the top's FOR UPDATE
+// lock, by the repository (collectEmbeddedChildren). Deriving it here from an
+// unlocked pre-parse read let a concurrent reupload/delete orphan a swapped-in
+// child; see the round-5 concurrency fix and the repo helper's doc comment.
 
 // importExpertContainer builds the skill plugins + the expert plugin and stores
 // the graph. Object uploads (binary skill files) are rolled back if the DB
@@ -501,20 +448,20 @@ type graphNode struct {
 // AND its display name to the skill node already built for that pair, so two
 // refs to the same file under DIFFERENT names each mint their own node (a member
 // may bundle a shared archive under its own skill name) while an exact
-// (file,name) repeat collapses onto one node. expanded records which files have
-// already been charged against the budget so a second ref to the same file (any
-// name) re-reads the bytes without re-charging — the dedupe stays a pure
-// resource optimization. budget is the shared remaining-decompressed-bytes
-// allowance passed to buildSkillAttachmentTree so the aggregate expansion is
-// bounded.
+// (file,name) repeat collapses onto one node. budget is the shared
+// remaining-decompressed-bytes allowance passed to buildSkillAttachmentTree so
+// the AGGREGATE expansion is bounded: EVERY expansion (each distinct (file,name)
+// that misses the cache) is charged, so a shared archive re-materialized under N
+// names costs N expansions against the container budget — the same bytes an
+// attacker forces the server to decompress N times. An exact (file,name) repeat
+// resolves from the cache without re-expanding, so it is never charged.
 type skillBuildState struct {
-	cache    map[string]*graphNode
-	expanded map[string]struct{}
-	budget   int64
+	cache  map[string]*graphNode
+	budget int64
 }
 
 func (s *Service) newSkillBuildState() *skillBuildState {
-	return &skillBuildState{cache: map[string]*graphNode{}, expanded: map[string]struct{}{}, budget: s.maxArchiveBytes}
+	return &skillBuildState{cache: map[string]*graphNode{}, budget: s.maxArchiveBytes}
 }
 
 // buildSkillNode parses one bundled skill package into a skill plugin exactly
@@ -523,10 +470,10 @@ func (s *Service) newSkillBuildState() *skillBuildState {
 // the node is newly built (isNew) — an exact (file,name) repeat resolves from the
 // shared cache instead of re-expanding, so the caller adds the node to the graph
 // only on the first occurrence. Two refs sharing a file under different display
-// names each mint a distinct skill node (their own id/name/object namespace); the
-// second such ref re-reads the already-validated bytes but is NOT re-charged
-// against the container budget, so a shared archive is charged once per distinct
-// file.
+// names each mint a distinct skill node (their own id/name/object namespace) and
+// each re-materializes the archive, so each is charged against the container
+// budget: the aggregate cap bounds the total bytes the server decompresses, not
+// just the count of distinct files.
 func (s *Service) buildSkillNode(ctx context.Context, eff Caller, parsed *parsedContainer, ref parsedSkillRef, state *skillBuildState) (node *graphNode, uploaded []string, isNew bool, err error) {
 	if ref.file == "" {
 		return nil, nil, false, ErrInvalidContainer
@@ -540,19 +487,14 @@ func (s *Service) buildSkillNode(ctx context.Context, eff Caller, parsed *parsed
 		return nil, nil, false, ErrInvalidContainer
 	}
 	skillID := s.id()
-	// Charge the decompression budget once per distinct file: the first ref to a
-	// file pays for its expansion; a later ref to the SAME file (under any name)
-	// re-reads the already-validated bytes with a nil budget so it cannot be gamed
-	// to double-spend the aggregate cap.
-	budget := &state.budget
-	if _, charged := state.expanded[ref.file]; charged {
-		budget = nil
-	}
-	attachments, uploaded, _, err := s.buildSkillAttachmentTree(ctx, eff.SpaceID, skillID, zipData, nil, budget)
+	// Charge every expansion against the shared container budget: a re-materialized
+	// (file,name) miss decompresses the same bytes again, so it must draw down the
+	// aggregate allowance too. Only an exact (file,name) cache hit (handled above)
+	// skips the charge, because it does not re-expand.
+	attachments, uploaded, _, err := s.buildSkillAttachmentTree(ctx, eff.SpaceID, skillID, zipData, nil, &state.budget)
 	if err != nil {
 		return nil, uploaded, false, err
 	}
-	state.expanded[ref.file] = struct{}{}
 	manifest, err := skillManifest(ref.name)
 	if err != nil {
 		return nil, uploaded, false, err

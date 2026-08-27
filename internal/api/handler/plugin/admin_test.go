@@ -20,21 +20,22 @@ import (
 )
 
 type fakeAdminService struct {
-	caller       pluginsvc.Caller
-	listType     model.PluginType
-	listVis      model.PluginVisibility
-	listParams   pluginsvc.ListParams
-	list         []model.Plugin
-	detail       *pluginsvc.Detail
-	write        pluginsvc.WriteRequest
-	importParams pluginsvc.ContainerImportParams
-	reuploadID   string
-	skillParams  pluginsvc.ImportParams
-	deletedID    string
-	skillMD      string
-	download     *pluginsvc.SkillPackageStream
-	artifactID   string
-	err          error
+	caller          pluginsvc.Caller
+	listType        model.PluginType
+	listVis         model.PluginVisibility
+	listParams      pluginsvc.ListParams
+	list            []model.Plugin
+	detail          *pluginsvc.Detail
+	write           pluginsvc.WriteRequest
+	importParams    pluginsvc.ContainerImportParams
+	reuploadID      string
+	skillParams     pluginsvc.ImportParams
+	deletedID       string
+	skillMD         string
+	download        *pluginsvc.SkillPackageStream
+	artifactID      string
+	maxArchiveBytes int64
+	err             error
 }
 
 func (f *fakeAdminService) AdminList(_ context.Context, c pluginsvc.Caller, typ model.PluginType, vis model.PluginVisibility, p pluginsvc.ListParams) ([]model.Plugin, int64, error) {
@@ -79,6 +80,15 @@ func (f *fakeAdminService) AdminOpenSkillPackage(_ context.Context, c pluginsvc.
 		return nil, f.err
 	}
 	return f.download, nil
+}
+
+// MaxArchiveBytes returns the container upload ceiling the handler threads into
+// readContainerParams; the default keeps the small test archives well under it.
+func (f *fakeAdminService) MaxArchiveBytes() int64 {
+	if f.maxArchiveBytes > 0 {
+		return f.maxArchiveBytes
+	}
+	return 64 << 20
 }
 
 type fakeAdminCategories struct {

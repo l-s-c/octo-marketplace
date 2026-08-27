@@ -616,10 +616,20 @@ func TestRebuildGraphSwapsChildrenPreservesTopAndSoftDeletesOld(t *testing.T) {
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("expert-9").
 		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-9", "E", model.PluginTypeExpert, 0, nil, []byte(`["ops"]`), "", "owner-1", "", model.PluginVisibilityPublic, "Orig", "human", nil, nil, "icons/e.png", 0, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:pold", nil, nil, 1, now, now, nil))
+	// In-tx child derivation: AFTER the top FOR UPDATE lock, the previous embedded
+	// child set is read from the committed graph (an expert's is_embedded expert_skill
+	// targets) — never a caller-supplied stale list. The DB's is_embedded=1 join is
+	// what returns skill-old here; a standalone target would be filtered out. This
+	// ordering proves the resolution runs under the lock, closing the concurrent-
+	// reupload / delete-vs-reupload orphan race.
+	mock.ExpectQuery(`SELECT r.target_plugin_id FROM plugin_relations r\s+JOIN plugins p ON p.plugin_id=r.target_plugin_id\s+WHERE r.source_plugin_id=\? AND r.relation_type=\? AND r.deleted_at IS NULL\s+AND p.is_embedded=1 AND p.status=1 AND p.deleted_at IS NULL\s+ORDER BY r.sort_order,r.relation_id`).
+		WithArgs("expert-9", "expert_skill").
+		WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}).AddRow("skill-old"))
 	// Phase 1: insert the new embedded child row. Its visibility/owner are
-	// re-stamped from the locked top (`before`: public, owner-1), not the caller's
-	// pre-parse System/admin stamping — the P2-1 locked-snapshot guard.
-	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-new", "S2", model.PluginTypeSkill, true, nil, "[]", "", "owner-1", "", model.PluginVisibilityPublic, "Root", "human", nil, nil, "", 0, "{}", "{}", "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	// re-stamped from the locked top (`before`: owner-1), not the caller's pre-parse
+	// System/admin stamping — the P2-1 locked-snapshot guard. A legacy `public`
+	// locked visibility is normalized to `system` (NormalizeLegacyVisibility).
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-new", "S2", model.PluginTypeSkill, true, nil, "[]", "", "owner-1", "", model.PluginVisibilitySystem, "Root", "human", nil, nil, "", 0, "{}", "{}", "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	// Phase 3: update the top row in place (id/owner/space/created_at untouched).
 	mock.ExpectExec(`UPDATE plugins SET plugin_name=.*WHERE plugin_id=\? AND deleted_at IS NULL`).WillReturnResult(sqlmock.NewResult(0, 1))
 	// Phase 4: resync the top's relations to the new child.
@@ -644,8 +654,7 @@ func TestRebuildGraphSwapsChildrenPreservesTopAndSoftDeletesOld(t *testing.T) {
 
 	sync, err := r.RebuildGraph(context.Background(), scope,
 		Mutation{Plugin: top, Relations: []model.PluginRelation{{TargetPluginID: "skill-new", Type: "expert_skill", Status: 1}}, OperatorID: "admin", OperatorName: "Root", RequestID: "req"},
-		[]Mutation{{Plugin: newSkill, OperatorID: "admin", OperatorName: "Root", RequestID: "req"}},
-		[]string{"skill-old"})
+		[]Mutation{{Plugin: newSkill, OperatorID: "admin", OperatorName: "Root", RequestID: "req"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -670,7 +679,7 @@ func TestRebuildGraphMissingTopIsNotFound(t *testing.T) {
 		WithArgs("ghost").WillReturnRows(sqlmock.NewRows(pluginTestColumns()))
 	mock.ExpectRollback()
 	top := model.Plugin{ID: "ghost", Name: "E", Type: model.PluginTypeExpert, Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), Status: 1}
-	_, err := r.RebuildGraph(context.Background(), Scope{CallerUID: "admin", Admin: true}, Mutation{Plugin: top}, nil, nil)
+	_, err := r.RebuildGraph(context.Background(), Scope{CallerUID: "admin", Admin: true}, Mutation{Plugin: top}, nil)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
@@ -748,6 +757,14 @@ func TestDeleteGraphSoftDeletesTopAndEmbeddedChildren(t *testing.T) {
 	// No live incoming relation to the top.
 	mock.ExpectQuery(`SELECT r.relation_id FROM plugin_relations r.*r.target_plugin_id=\?.*FOR UPDATE`).
 		WithArgs("expert-9").WillReturnRows(sqlmock.NewRows([]string{"relation_id"}))
+	// In-tx child derivation: AFTER the top lock + incoming-relation guard, the
+	// embedded child set is read from the committed graph (the expert's is_embedded
+	// expert_skill targets) rather than supplied by the caller — the query order
+	// proves it runs under the lock, so a delete racing a concurrent reupload tears
+	// down the children the prior op actually committed.
+	mock.ExpectQuery(`SELECT r.target_plugin_id FROM plugin_relations r\s+JOIN plugins p ON p.plugin_id=r.target_plugin_id\s+WHERE r.source_plugin_id=\? AND r.relation_type=\? AND r.deleted_at IS NULL\s+AND p.is_embedded=1 AND p.status=1 AND p.deleted_at IS NULL\s+ORDER BY r.sort_order,r.relation_id`).
+		WithArgs("expert-9", "expert_skill").
+		WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}).AddRow("skill-emb"))
 	// Soft-delete the top + its outgoing relations, then the top delete audit.
 	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "expert-9").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "expert-9").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -761,7 +778,7 @@ func TestDeleteGraphSoftDeletesTopAndEmbeddedChildren(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-child", "skill-emb", "delete", "admin", "Root", "req", "sha256:pemb", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
-	if err := r.DeleteGraph(context.Background(), scope, "expert-9", []string{"skill-emb"}, "admin", "Root", "req", nil); err != nil {
+	if err := r.DeleteGraph(context.Background(), scope, "expert-9", "admin", "Root", "req", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -786,8 +803,130 @@ func TestDeleteGraphRejectsLiveIncomingRelationToTop(t *testing.T) {
 	mock.ExpectQuery(`SELECT r.relation_id FROM plugin_relations r.*r.target_plugin_id=\?.*FOR UPDATE`).
 		WithArgs("expert-9").WillReturnRows(sqlmock.NewRows([]string{"relation_id"}).AddRow("incoming"))
 	mock.ExpectRollback()
-	if err := r.DeleteGraph(context.Background(), scope, "expert-9", []string{"skill-emb"}, "admin", "Root", "req", nil); !errors.Is(err, ErrConflict) {
+	if err := r.DeleteGraph(context.Background(), scope, "expert-9", "admin", "Root", "req", nil); !errors.Is(err, ErrConflict) {
 		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRebuildGraphSoftDeletesCurrentChildFromCommittedGraph is the round-5
+// concurrency regression: RebuildGraph must NOT act on a caller-supplied,
+// pre-parse child list — it derives the embedded child set from the CURRENT
+// committed graph AFTER taking the top's FOR UPDATE lock. Here the DB reports
+// "skill-current" (the child a prior committed reupload R1 swapped in), so THAT
+// row — not any stale "skill-stale" a racing op R2 read before the lock — is the
+// one soft-deleted in phase 5. This closes the concurrent-reupload /
+// delete-vs-reupload race where a stale snapshot severed the top→child edge but
+// no-op'd on the already-gone old child, orphaning the swapped-in one.
+func TestRebuildGraphSoftDeletesCurrentChildFromCommittedGraph(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 26, 8, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"rel-new", "audit-del", "audit-top", "audit-child"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	scope := Scope{CallerUID: "admin", Admin: true}
+	space := ""
+	newSkill := model.Plugin{ID: "skill-new", Name: "S2", Type: model.PluginTypeSkill, IsEmbedded: true, Tags: []byte(`[]`), OwnerUID: "admin", SpaceID: &space, Visibility: model.PluginVisibilitySystem, CreatorName: "Root", CreatedByType: "human", Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:sm", PluginHash: "sha256:sp", Status: 1}
+	top := model.Plugin{ID: "expert-9", Name: "E2", Type: model.PluginTypeExpert, Tags: []byte(`["ops"]`), Visibility: model.PluginVisibilityPublic, Manifest: []byte(`{"m":2}`), Package: []byte(`{"p":2}`), ManifestHash: "sha256:m2", PluginHash: "sha256:p2", Status: 1}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("expert-9").
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-9", "E", model.PluginTypeExpert, 0, nil, []byte(`["ops"]`), "", "owner-1", "", model.PluginVisibilityPublic, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:pold", nil, nil, 1, now, now, nil))
+	// The DB — not the caller — decides the child set: it reports skill-current.
+	mock.ExpectQuery(`SELECT r.target_plugin_id FROM plugin_relations r\s+JOIN plugins p ON p.plugin_id=r.target_plugin_id\s+WHERE r.source_plugin_id=\? AND r.relation_type=\? AND r.deleted_at IS NULL\s+AND p.is_embedded=1 AND p.status=1 AND p.deleted_at IS NULL\s+ORDER BY r.sort_order,r.relation_id`).
+		WithArgs("expert-9", "expert_skill").
+		WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}).AddRow("skill-current"))
+	// The child inherits the locked top's owner; its legacy `public` visibility is
+	// normalized to `system` (NormalizeLegacyVisibility) on re-stamp.
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-new", "S2", model.PluginTypeSkill, true, nil, "[]", "", "owner-1", "", model.PluginVisibilitySystem, "Root", "human", nil, nil, "", 0, "{}", "{}", "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`UPDATE plugins SET plugin_name=.*WHERE plugin_id=\? AND deleted_at IS NULL`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT p.plugin_type,p.is_embedded FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL AND 1=1 FOR UPDATE`).WithArgs("skill-new").WillReturnRows(sqlmock.NewRows([]string{"plugin_type", "is_embedded"}).AddRow(model.PluginTypeSkill, false))
+	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations\s+WHERE source_plugin_id=\? AND deleted_at IS NULL ORDER BY relation_id FOR UPDATE`).
+		WithArgs("expert-9").
+		WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}).AddRow("rel-old", "skill-current", "expert_skill", 0, nil, 1))
+	mock.ExpectExec(`INSERT INTO plugin_relations`).WithArgs("rel-new", "expert-9", "skill-new", "expert_skill", 0, nil, 1, "admin", now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=`).WithArgs(now, now, "rel-old", "expert-9").WillReturnResult(sqlmock.NewResult(0, 1))
+	// Phase 5 tears down skill-current (the DB-derived child), never a stale id.
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("skill-current").
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("skill-current", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "admin", "", model.PluginVisibilitySystem, "Root", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:som", "sha256:sop", nil, nil, 1, now, now, nil))
+	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-current").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-current").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-del", "skill-current", "delete", "admin", "Root", "req", "sha256:sop", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-top", "expert-9", "update", "admin", "Root", "req", "sha256:pold", "sha256:p2", `{"m":2}`, `{"p":2}`, nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-child", "skill-new", "create", "admin", "Root", "req", nil, "sha256:sp", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	if _, err := r.RebuildGraph(context.Background(), scope,
+		Mutation{Plugin: top, Relations: []model.PluginRelation{{TargetPluginID: "skill-new", Type: "expert_skill", Status: 1}}, OperatorID: "admin", OperatorName: "Root", RequestID: "req"},
+		[]Mutation{{Plugin: newSkill, OperatorID: "admin", OperatorName: "Root", RequestID: "req"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDeleteGraphDerivesEmbeddedSquadChildrenUnderLock exercises the expert_team
+// branch of the in-tx child derivation: after the team top is locked, the member
+// experts are read from the committed graph (its embedded expert_team_expert
+// targets) and then each member's own embedded expert_skill targets — the two-
+// level teardown a caller list used to carry. Deriving it under the lock is what
+// keeps a delete racing a concurrent squad reupload from orphaning a swapped-in
+// member or member-skill.
+func TestDeleteGraphDerivesEmbeddedSquadChildrenUnderLock(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 26, 8, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"audit-top", "audit-member", "audit-mskill"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	scope := Scope{CallerUID: "admin", Admin: true}
+
+	mock.ExpectBegin()
+	// Lock + prove the team top exists.
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("team-1").
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("team-1", "T", model.PluginTypeExpertTeam, 0, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilityPublic, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:ptop", nil, nil, 1, now, now, nil))
+	// No live incoming relation to the top.
+	mock.ExpectQuery(`SELECT r.relation_id FROM plugin_relations r.*r.target_plugin_id=\?.*FOR UPDATE`).
+		WithArgs("team-1").WillReturnRows(sqlmock.NewRows([]string{"relation_id"}))
+	// In-tx derivation, level 1: the team's embedded member experts.
+	mock.ExpectQuery(`SELECT r.target_plugin_id FROM plugin_relations r\s+JOIN plugins p ON p.plugin_id=r.target_plugin_id\s+WHERE r.source_plugin_id=\? AND r.relation_type=\? AND r.deleted_at IS NULL\s+AND p.is_embedded=1 AND p.status=1 AND p.deleted_at IS NULL\s+ORDER BY r.sort_order,r.relation_id`).
+		WithArgs("team-1", "expert_team_expert").
+		WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}).AddRow("member-1"))
+	// Level 2: that member's own embedded bundled skills.
+	mock.ExpectQuery(`SELECT r.target_plugin_id FROM plugin_relations r\s+JOIN plugins p ON p.plugin_id=r.target_plugin_id\s+WHERE r.source_plugin_id=\? AND r.relation_type=\? AND r.deleted_at IS NULL\s+AND p.is_embedded=1 AND p.status=1 AND p.deleted_at IS NULL\s+ORDER BY r.sort_order,r.relation_id`).
+		WithArgs("member-1", "expert_skill").
+		WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}).AddRow("mskill-1"))
+	// Soft-delete the top + its outgoing relations, top delete audit.
+	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "team-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "team-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-top", "team-1", "delete", "admin", "Root", "req", "sha256:ptop", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	// Child member: lock, soft-delete + relations, delete audit.
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("member-1").
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("member-1", "M", model.PluginTypeExpert, 1, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilitySystem, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:mm", "sha256:pmem", nil, nil, 1, now, now, nil))
+	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "member-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "member-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-member", "member-1", "delete", "admin", "Root", "req", "sha256:pmem", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	// Child member-skill: lock, soft-delete + relations, delete audit.
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("mskill-1").
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("mskill-1", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilitySystem, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:sm", "sha256:pms", nil, nil, 1, now, now, nil))
+	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "mskill-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "mskill-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-mskill", "mskill-1", "delete", "admin", "Root", "req", "sha256:pms", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	if err := r.DeleteGraph(context.Background(), scope, "team-1", "admin", "Root", "req", nil); err != nil {
+		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

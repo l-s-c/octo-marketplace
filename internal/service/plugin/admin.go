@@ -125,13 +125,10 @@ func (s *Service) adminEffectiveWrite(ctx context.Context, caller Caller, plugin
 	eff := caller
 	eff.IsSystemAdmin = true // admins may mint/preserve system visibility
 	eff.SpaceID = effectiveSpace
-	// `public` is retired on the write path; a preserved legacy public visibility is
-	// normalized to the unified `system` global value so the write revalidates and
-	// the row stops carrying the retired value (validVisibility rejects public).
-	if visibility == model.PluginVisibilityPublic {
-		visibility = model.PluginVisibilitySystem
-	}
-	req.Visibility = visibility
+	// A preserved legacy `public` visibility is normalized to the unified `system`
+	// global value so the write revalidates and the row stops carrying the retired
+	// value (validVisibility rejects `public`).
+	req.Visibility = model.NormalizeLegacyVisibility(visibility)
 	p, rels, err := s.buildWrite(ctx, eff, pluginID, req, s.now(), true)
 	if err != nil {
 		return nil, nil, err
@@ -269,25 +266,23 @@ func (s *Service) AdminReuploadContainer(ctx context.Context, caller Caller, plu
 // expert/expert_team top owns embedded children (an expert's bundled skills; a
 // squad's member experts and their skills), so it is torn down through DeleteGraph
 // — top plus every embedded descendant in one transaction — otherwise the children
-// would be orphaned (live, is_embedded=1, unreachable). A standalone catalog skill
-// merely referenced by the top (is_embedded=0) is not collected and survives.
-// Connectors and skills carry no embedded children and take the single-row Delete.
+// would be orphaned (live, is_embedded=1, unreachable). DeleteGraph derives the
+// embedded child set under the top's lock, so a delete racing a concurrent reupload
+// cannot orphan a child; a standalone catalog skill merely referenced by the top
+// (is_embedded=0) is not collected and survives. Connectors and skills carry no
+// embedded children and take the single-row Delete.
 func (s *Service) AdminDelete(ctx context.Context, caller Caller, pluginID string) error {
 	storageID, err := parseStorageID(pluginID)
 	if err != nil {
 		return err
 	}
-	old, rels, err := s.repo.GetWithRelations(ctx, adminScope(caller), storageID)
+	old, _, err := s.repo.GetWithRelations(ctx, adminScope(caller), storageID)
 	if err != nil {
 		return mapStoreError(err)
 	}
 	audit := s.audit(caller, storageID, "delete", old, nil, s.now())
 	if old.Type == model.PluginTypeExpert || old.Type == model.PluginTypeExpertTeam {
-		childIDs, err := s.collectContainerChildren(ctx, adminScope(caller), old, rels)
-		if err != nil {
-			return err
-		}
-		return mapStoreError(s.repo.DeleteGraph(ctx, adminScope(caller), storageID, childIDs, audit.OperatorID, audit.OperatorName, audit.RequestID, audit.Remark))
+		return mapStoreError(s.repo.DeleteGraph(ctx, adminScope(caller), storageID, audit.OperatorID, audit.OperatorName, audit.RequestID, audit.Remark))
 	}
 	return mapStoreError(s.repo.Delete(ctx, adminScope(caller), storageID, audit.OperatorID, audit.OperatorName, audit.RequestID, audit.Remark))
 }

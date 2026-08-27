@@ -50,10 +50,10 @@ type Store interface {
 	GetWithRelations(context.Context, pluginrepo.Scope, string) (*model.Plugin, []model.PluginRelation, error)
 	Create(context.Context, pluginrepo.Scope, pluginrepo.Mutation) (*pluginrepo.RelationSync, error)
 	CreateGraph(context.Context, pluginrepo.Scope, []pluginrepo.Mutation) ([]*pluginrepo.RelationSync, error)
-	RebuildGraph(context.Context, pluginrepo.Scope, pluginrepo.Mutation, []pluginrepo.Mutation, []string) (*pluginrepo.RelationSync, error)
+	RebuildGraph(context.Context, pluginrepo.Scope, pluginrepo.Mutation, []pluginrepo.Mutation) (*pluginrepo.RelationSync, error)
 	Update(context.Context, pluginrepo.Scope, pluginrepo.Mutation) (*pluginrepo.RelationSync, error)
 	Delete(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
-	DeleteGraph(context.Context, pluginrepo.Scope, string, []string, string, string, string, *string) error
+	DeleteGraph(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
 	ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, int64, error)
 	VersionExists(context.Context, pluginrepo.Scope, string, string) (bool, error)
 	Publish(context.Context, pluginrepo.Scope, pluginrepo.PublishParams) (*model.PluginVersion, error)
@@ -98,6 +98,13 @@ func (s *Service) SetArtifactLimits(maxAttachmentBytes int64) {
 		s.maxArchiveBytes = maxAttachmentBytes * 5
 	}
 }
+
+// MaxArchiveBytes is the hard ceiling on an uploaded archive's raw bytes: the
+// top-level container import/reupload size check enforces it, and the HTTP
+// handler caps the multipart body at the SAME value so the transport limit and
+// the service limit are one number driven by MAX_UPLOAD_MB (not two independent
+// constants).
+func (s *Service) MaxArchiveBytes() int64 { return s.maxArchiveBytes }
 
 // WithRuntime is intended for deterministic tests and process wiring that uses
 // a shared ID generator or clock.
@@ -477,7 +484,7 @@ func (s *Service) Delete(ctx context.Context, caller Caller, pluginID string) er
 	if err != nil {
 		return err
 	}
-	old, rels, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
+	old, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
 	if err != nil {
 		return mapStoreError(err)
 	}
@@ -489,16 +496,14 @@ func (s *Service) Delete(ctx context.Context, caller Caller, pluginID string) er
 	// a squad's member experts and their skills) — the population backfilled tenant
 	// containers actually carry. Tearing it down through DeleteGraph removes the
 	// whole subtree in one transaction so those rows are never orphaned (live,
-	// is_embedded=1, unreachable). A standalone catalog skill merely referenced by
-	// the top (is_embedded=0) is not collected and survives; DeleteGraph re-checks
-	// tenant ownership on the top and each child under the same scope. Connectors
-	// and skills carry no embedded children and take the single-row Delete.
+	// is_embedded=1, unreachable). DeleteGraph derives the embedded child set under
+	// the top's lock (never a pre-parse snapshot) so a concurrent reupload cannot
+	// orphan a child; a standalone catalog skill merely referenced by the top
+	// (is_embedded=0) is not collected and survives; it re-checks tenant ownership
+	// on the top and each child under the same scope. Connectors and skills carry no
+	// embedded children and take the single-row Delete.
 	if old.Type == model.PluginTypeExpert || old.Type == model.PluginTypeExpertTeam {
-		childIDs, err := s.collectContainerChildren(ctx, scope(caller), old, rels)
-		if err != nil {
-			return err
-		}
-		return mapStoreError(s.repo.DeleteGraph(ctx, scope(caller), storageID, childIDs, audit.OperatorID, audit.OperatorName, audit.RequestID, audit.Remark))
+		return mapStoreError(s.repo.DeleteGraph(ctx, scope(caller), storageID, audit.OperatorID, audit.OperatorName, audit.RequestID, audit.Remark))
 	}
 	return mapStoreError(s.repo.Delete(ctx, scope(caller), storageID, audit.OperatorID, audit.OperatorName, audit.RequestID, audit.Remark))
 }

@@ -152,11 +152,19 @@ func (f *fakeStore) Delete(_ context.Context, s pluginrepo.Scope, id, _, _, _ st
 	f.deleteScope, f.deleteID = s, id
 	return f.err
 }
-func (f *fakeStore) DeleteGraph(_ context.Context, s pluginrepo.Scope, topID string, childIDs []string, _, _, _ string, _ *string) error {
-	f.deleteScope, f.deleteGraphID, f.deleteChildIDs = s, topID, childIDs
+func (f *fakeStore) DeleteGraph(_ context.Context, s pluginrepo.Scope, topID string, _, _, _ string, _ *string) error {
+	// Emulate the repo's in-tx derivation: the embedded child set is resolved from
+	// the committed graph here, NOT supplied by the caller, so these fakes exercise
+	// the same derivation the real DeleteGraph performs under the top's lock.
+	f.deleteScope, f.deleteGraphID, f.deleteChildIDs = s, topID, f.collectEmbeddedChildren(topID)
 	return f.err
 }
-func (f *fakeStore) RebuildGraph(_ context.Context, s pluginrepo.Scope, top pluginrepo.Mutation, children []pluginrepo.Mutation, oldChildIDs []string) (*pluginrepo.RelationSync, error) {
+func (f *fakeStore) RebuildGraph(_ context.Context, s pluginrepo.Scope, top pluginrepo.Mutation, children []pluginrepo.Mutation) (*pluginrepo.RelationSync, error) {
+	// Emulate the repo's in-tx derivation: derive the previous embedded child set
+	// from the committed graph BEFORE the new children overwrite it, mirroring the
+	// real RebuildGraph which resolves it under the top's FOR UPDATE lock instead of
+	// trusting a caller-supplied pre-parse snapshot.
+	oldChildIDs := f.collectEmbeddedChildren(top.Plugin.ID)
 	f.rebuildTop, f.rebuildChild, f.rebuildOldIDs, f.rebuildScope = &top, children, oldChildIDs, s
 	if f.rebuildErr != nil {
 		return nil, f.rebuildErr
@@ -195,6 +203,44 @@ func (f *fakeStore) RebuildGraph(_ context.Context, s pluginrepo.Scope, top plug
 	f.relations[tp.ID] = append([]model.PluginRelation(nil), rels...)
 	return &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: rels}, nil
 }
+
+// collectEmbeddedChildren mirrors the repository's in-tx collectEmbeddedChildren:
+// it resolves the top's embedded descendants from the fake's committed graph
+// (plugins + relations), collecting only is_embedded targets so a standalone
+// catalog row the top merely references is never torn down. RebuildGraph and
+// DeleteGraph call it so the service tests exercise derivation-from-committed-
+// state instead of a caller-supplied child list.
+func (f *fakeStore) collectEmbeddedChildren(topID string) []string {
+	top := f.plugins[topID]
+	if top == nil {
+		return nil
+	}
+	embeddedTargets := func(source, relType string) []string {
+		var out []string
+		for _, r := range f.relations[source] {
+			if r.Type != relType {
+				continue
+			}
+			if t := f.plugins[r.TargetPluginID]; t != nil && t.IsEmbedded {
+				out = append(out, r.TargetPluginID)
+			}
+		}
+		return out
+	}
+	switch top.Type {
+	case model.PluginTypeExpert:
+		return embeddedTargets(topID, "expert_skill")
+	case model.PluginTypeExpertTeam:
+		var ids []string
+		for _, member := range embeddedTargets(topID, "expert_team_expert") {
+			ids = append(ids, member)
+			ids = append(ids, embeddedTargets(member, "expert_skill")...)
+		}
+		return ids
+	}
+	return nil
+}
+
 func (f *fakeStore) ListVersions(_ context.Context, _ pluginrepo.Scope, id string, _, _ int) ([]model.PluginVersion, int64, error) {
 	f.versionID = id
 	return f.versions, f.versionTotal, f.err
@@ -630,6 +676,24 @@ func TestUpdateForwardsOwnEmbeddedChildEdge(t *testing.T) {
 	}
 	if len(f.updateRels) != 1 || f.updateRels[0].TargetPluginID != "skill-emb" {
 		t.Fatalf("embedded-child edge not forwarded to repo: %#v", f.updateRels)
+	}
+}
+
+// TestUpdateRejectsEmbeddedChildOutOfBand is the tenant-side embedded-guard
+// regression (service.go): a bundled skill / squad member (is_embedded=1) is
+// owned by its container graph and may be content-swapped only through a
+// container reupload. Even the OWNER hitting the standalone /plugins upsert path
+// on an embedded child gets ErrNotFound — the row is invisible to out-of-band
+// edits — and the write never reaches the repo. Mirrors AdminUpdate's guard.
+func TestUpdateRejectsEmbeddedChildOutOfBand(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{
+		"skill-emb": {ID: "skill-emb", Name: "Bundled", Type: model.PluginTypeSkill, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), Visibility: model.PluginVisibilitySpace, IsEmbedded: true, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)},
+	}}
+	if _, err := fixedService(f).Update(context.Background(), testCaller, "skill-emb", validRequest()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound for an embedded child", err)
+	}
+	if f.update != nil {
+		t.Fatalf("an embedded-child update must not reach the repo: %#v", f.update)
 	}
 }
 

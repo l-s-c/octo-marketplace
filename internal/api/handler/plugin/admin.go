@@ -31,6 +31,10 @@ type AdminService interface {
 	AdminDelete(context.Context, pluginsvc.Caller, string) error
 	AdminSkillMarkdown(context.Context, pluginsvc.Caller, string) (string, error)
 	AdminOpenSkillPackage(context.Context, pluginsvc.Caller, string) (*pluginsvc.SkillPackageStream, error)
+	// MaxArchiveBytes is the hard ceiling the service enforces on an uploaded
+	// container archive; the handler caps the multipart body at the same value so
+	// the transport and service limits are one number (MAX_UPLOAD_MB-driven).
+	MaxArchiveBytes() int64
 }
 
 // AdminCategoryService is the handler-facing boundary over the admin taxonomy
@@ -297,11 +301,6 @@ func (h *AdminHandler) Create(c *gin.Context) {
 	apiresponse.OK(c, detailDTO(v))
 }
 
-// maxContainerBytes caps the uploaded expert/expert_team container archive. The
-// browser rejects containers past ~512 MiB before upload; the server keeps a
-// smaller hard ceiling so a single import cannot buffer an unbounded body.
-const maxContainerBytes = 64 << 20
-
 // ImportContainer godoc
 // @Summary Import expert/expert_team container (admin)
 // @Description Ingest an uploaded expert or expert_team container archive (multipart file field "file") and store it as the unified plugin graph in one transaction: the expert/team plugin, its bundled skills as separate skill plugins, its squad members as separate expert plugins, and the relations wiring them. Admin only.
@@ -327,7 +326,7 @@ func (h *AdminHandler) ImportContainer(c *gin.Context) {
 		unauthorized(c)
 		return
 	}
-	params, ok := readContainerParams(c)
+	params, ok := readContainerParams(c, h.svc.MaxArchiveBytes())
 	if !ok {
 		return
 	}
@@ -341,23 +340,25 @@ func (h *AdminHandler) ImportContainer(c *gin.Context) {
 
 // readContainerParams reads the shared expert/expert_team container upload:
 // the multipart "file" field (the container zip) and the optional "category_id"
-// form field. It caps the body and reports PAYLOAD_TOO_LARGE / VALIDATION_ERROR
-// itself, returning ok=false once a response has been written. The import and
-// container-reupload routes share it so both enforce the same limits and shape.
-func readContainerParams(c *gin.Context) (pluginsvc.ContainerImportParams, bool) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxContainerBytes)
+// form field. It caps the body at maxBytes (the service's MaxArchiveBytes, so the
+// transport and service limits are one number) and reports PAYLOAD_TOO_LARGE /
+// VALIDATION_ERROR itself, returning ok=false once a response has been written.
+// The import and container-reupload routes share it so both enforce the same
+// limits and shape.
+func readContainerParams(c *gin.Context, maxBytes int64) (pluginsvc.ContainerImportParams, bool) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			apiresponse.Fail(c, http.StatusRequestEntityTooLarge, errcode.FileTooLarge, "container archive is too large", map[string]any{"max_bytes": maxContainerBytes}, "Reduce the archive size and try again.")
+			apiresponse.Fail(c, http.StatusRequestEntityTooLarge, errcode.FileTooLarge, "container archive is too large", map[string]any{"max_bytes": maxBytes}, "Reduce the archive size and try again.")
 			return pluginsvc.ContainerImportParams{}, false
 		}
 		validation(c, "file")
 		return pluginsvc.ContainerImportParams{}, false
 	}
-	if fileHeader.Size > maxContainerBytes {
-		apiresponse.Fail(c, http.StatusRequestEntityTooLarge, errcode.FileTooLarge, "container archive is too large", map[string]any{"max_bytes": maxContainerBytes}, "Reduce the archive size and try again.")
+	if fileHeader.Size > maxBytes {
+		apiresponse.Fail(c, http.StatusRequestEntityTooLarge, errcode.FileTooLarge, "container archive is too large", map[string]any{"max_bytes": maxBytes}, "Reduce the archive size and try again.")
 		return pluginsvc.ContainerImportParams{}, false
 	}
 	f, err := fileHeader.Open()
@@ -366,9 +367,9 @@ func readContainerParams(c *gin.Context) (pluginsvc.ContainerImportParams, bool)
 		return pluginsvc.ContainerImportParams{}, false
 	}
 	defer f.Close()
-	archive, err := io.ReadAll(io.LimitReader(f, maxContainerBytes+1))
-	if err != nil || int64(len(archive)) > maxContainerBytes {
-		apiresponse.Fail(c, http.StatusRequestEntityTooLarge, errcode.FileTooLarge, "container archive is too large", map[string]any{"max_bytes": maxContainerBytes}, "Reduce the archive size and try again.")
+	archive, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil || int64(len(archive)) > maxBytes {
+		apiresponse.Fail(c, http.StatusRequestEntityTooLarge, errcode.FileTooLarge, "container archive is too large", map[string]any{"max_bytes": maxBytes}, "Reduce the archive size and try again.")
 		return pluginsvc.ContainerImportParams{}, false
 	}
 	params := pluginsvc.ContainerImportParams{Archive: archive}
@@ -404,7 +405,7 @@ func (h *AdminHandler) ReuploadContainer(c *gin.Context) {
 		unauthorized(c)
 		return
 	}
-	params, ok := readContainerParams(c)
+	params, ok := readContainerParams(c, h.svc.MaxArchiveBytes())
 	if !ok {
 		return
 	}

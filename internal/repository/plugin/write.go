@@ -177,7 +177,15 @@ func (r *Repo) CreateGraph(ctx context.Context, scope Scope, nodes []Mutation) (
 // failure at any step rolls the whole rebuild back, so a partial expert/squad
 // never commits and the old graph survives intact. It returns the top plugin's
 // relation sync (the new child edges) for the caller's Detail.
-func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newChildren []Mutation, oldChildIDs []string) (*RelationSync, error) {
+//
+// The previous embedded child set is derived INSIDE this transaction from the
+// committed graph AFTER the top is FOR UPDATE-locked (phase 0), never from a
+// caller-supplied pre-parse snapshot: two concurrent container ops on the same
+// top serialize on that lock, so each derives the child set from the state the
+// prior op committed. This closes the concurrent-reupload / delete-vs-reupload
+// race where a stale snapshot severed the top→child edge but soft-deleted the
+// already-gone old child, leaving the swapped-in child live and unreachable.
+func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newChildren []Mutation) (*RelationSync, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -195,21 +203,33 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 	if topPlugin.Type != before.Type {
 		return nil, ErrInvalidRelation
 	}
+	// Derive the previous embedded child set from the CURRENT committed graph now
+	// that the top is locked and before phase 4 severs the top→child edges. Only
+	// genuine is_embedded descendants are returned, so a standalone catalog target
+	// the top merely references is never torn down (see collectEmbeddedChildren).
+	oldChildIDs, err := collectEmbeddedChildren(ctx, tx, topPlugin.ID, before.Type)
+	if err != nil {
+		return nil, err
+	}
 	// P2-1: the service stamped the top's preserved identity and each child's
 	// visibility/Space/owner from an UNLOCKED pre-parse read. Re-derive the
 	// race-sensitive fields from the row locked here (`before`) so a concurrent
 	// visibility/Space/owner change during the multi-second parse cannot be
 	// silently reverted or promoted. The top's owner_uid/space_id are preserved by
 	// omission from its UPDATE, but visibility IS written, so re-stamp it; every
-	// new child is freshly inserted below, so re-stamp all three. Residual: the
-	// top's icon and category still come from the service's unlocked read (they are
-	// content, not identity), so a concurrent icon/category edit can still lose to
-	// this rebuild — acceptable, as the security-sensitive fields are re-derived.
-	topPlugin.Visibility = before.Visibility
+	// new child is freshly inserted below, so re-stamp all three. A preserved legacy
+	// `public` visibility on the locked row is normalized to `system` here (the
+	// single NormalizeLegacyVisibility helper) so a reupload stops persisting the
+	// retired value. Residual: the top's icon and category still come from the
+	// service's unlocked read (they are content, not identity), so a concurrent
+	// icon/category edit can still lose to this rebuild — acceptable, as the
+	// security-sensitive fields are re-derived.
+	lockedVisibility := model.NormalizeLegacyVisibility(before.Visibility)
+	topPlugin.Visibility = lockedVisibility
 	topPlugin.SpaceID = before.SpaceID
 	topPlugin.OwnerUID = before.OwnerUID
 	for i := range newChildren {
-		newChildren[i].Plugin.Visibility = before.Visibility
+		newChildren[i].Plugin.Visibility = lockedVisibility
 		newChildren[i].Plugin.SpaceID = before.SpaceID
 		newChildren[i].Plugin.OwnerUID = before.OwnerUID
 	}
@@ -457,14 +477,18 @@ WHERE source_plugin_id=? AND deleted_at IS NULL`, now, now, pluginID)
 // its embedded children (an expert's bundled skills; a squad's member experts and
 // their skills) in ONE transaction, so deleting the top never orphans a live,
 // unreachable is_embedded row. The top is locked and proved under scope, refused
-// if a live plugin still holds an incoming relation to it (matching Delete), then
-// soft-deleted with its outgoing edges and a delete audit; each child (whose IDs
-// the service resolved via collectContainerChildren, so only genuine is_embedded
-// descendants are here — a standalone catalog skill merely referenced by the top
-// is not) is soft-deleted through softDeleteRebuiltChild, which is idempotent and
-// carries the same operator identity. A failure at any step rolls the whole
-// delete back. Connector/skill deletes stay on the single-row Delete.
-func (r *Repo) DeleteGraph(ctx context.Context, scope Scope, topID string, childIDs []string, operatorID, operatorName, requestID string, remark *string) error {
+// if a live plugin still holds an incoming relation to it (matching Delete); the
+// embedded child set is then derived INSIDE the transaction from the committed
+// graph (collectEmbeddedChildren) — never a caller-supplied pre-parse snapshot —
+// so a delete racing a concurrent reupload of the same top serializes on the
+// top's FOR UPDATE lock and tears down the children the prior op actually left.
+// Only genuine is_embedded descendants are collected — a standalone catalog skill
+// merely referenced by the top is not — then the top is soft-deleted with its
+// outgoing edges and a delete audit, and each child is soft-deleted through
+// softDeleteRebuiltChild, which is idempotent and carries the same operator
+// identity. A failure at any step rolls the whole delete back. Connector/skill
+// deletes stay on the single-row Delete.
+func (r *Repo) DeleteGraph(ctx context.Context, scope Scope, topID string, operatorID, operatorName, requestID string, remark *string) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -475,6 +499,13 @@ func (r *Repo) DeleteGraph(ctx context.Context, scope Scope, topID string, child
 		return err
 	}
 	if err = rejectLiveIncomingRelations(ctx, tx, topID); err != nil {
+		return err
+	}
+	// Derive the embedded child set under the top's lock, before the top's own
+	// outgoing edges are soft-deleted below, so the expert_skill / expert_team_expert
+	// relations are still live for the resolution query.
+	childIDs, err := collectEmbeddedChildren(ctx, tx, topID, before.Type)
+	if err != nil {
 		return err
 	}
 	now := r.now()
@@ -506,6 +537,76 @@ WHERE source_plugin_id=? AND deleted_at IS NULL`, now, now, topID); err != nil {
 		}
 	}
 	return tx.Commit()
+}
+
+// collectEmbeddedChildren derives, under the open transaction, the set of a
+// locked container top's embedded child plugin IDs from the CURRENT committed
+// graph. Callers invoke it AFTER getOwnedForUpdate has taken the top's FOR UPDATE
+// lock, so concurrent container ops on the same top serialize on that lock and
+// each resolves the child set from the state the prior op committed — never a
+// pre-parse snapshot. This is what closes the concurrent-reupload /
+// delete-vs-reupload orphan race.
+//
+// It mirrors the (now removed) service-layer collectContainerChildren semantics
+// exactly:
+//   - expert: the targets of the top's live expert_skill relations whose target
+//     row is is_embedded=1 (a per-parent bundled skill).
+//   - expert_team: the targets of the top's live expert_team_expert relations
+//     whose member row is is_embedded=1, plus each such member's own live
+//     expert_skill targets that are is_embedded=1.
+//
+// A standalone (is_embedded=0) relation target is never collected, so a shared
+// catalog skill the top merely references is never soft-deleted out from under
+// every other graph that shares it.
+func collectEmbeddedChildren(ctx context.Context, tx *sql.Tx, topID string, topType model.PluginType) ([]string, error) {
+	switch topType {
+	case model.PluginTypeExpert:
+		return embeddedRelationTargets(ctx, tx, topID, "expert_skill")
+	case model.PluginTypeExpertTeam:
+		members, err := embeddedRelationTargets(ctx, tx, topID, "expert_team_expert")
+		if err != nil {
+			return nil, err
+		}
+		var ids []string
+		for _, member := range members {
+			ids = append(ids, member)
+			skills, err := embeddedRelationTargets(ctx, tx, member, "expert_skill")
+			if err != nil {
+				return nil, err
+			}
+			ids = append(ids, skills...)
+		}
+		return ids, nil
+	default:
+		return nil, nil
+	}
+}
+
+// embeddedRelationTargets returns the target plugin IDs of source's live
+// relations of the given type whose target row is a live, embedded plugin. The
+// is_embedded=1 predicate on the joined target row is what excludes standalone
+// catalog targets from teardown; deleted_at IS NULL on the relation and
+// status=1/deleted_at IS NULL on the target match the committed-graph semantics
+// getOwnedForUpdate reads under.
+func embeddedRelationTargets(ctx context.Context, tx *sql.Tx, source, relationType string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT r.target_plugin_id FROM plugin_relations r
+JOIN plugins p ON p.plugin_id=r.target_plugin_id
+WHERE r.source_plugin_id=? AND r.relation_type=? AND r.deleted_at IS NULL
+AND p.is_embedded=1 AND p.status=1 AND p.deleted_at IS NULL
+ORDER BY r.sort_order,r.relation_id`, source, relationType)
+	if err != nil {
+		return nil, wrapped("collect embedded children", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // liveRelationTargetSet returns the set of target plugin IDs the source

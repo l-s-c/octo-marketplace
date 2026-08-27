@@ -76,7 +76,7 @@ func (s *Service) AdminImport(ctx context.Context, caller Caller, p ImportParams
 	}
 
 	// Resolve import fields as system admin; the row visibility is decided by the
-	// admin conventions below (public on create, preserved on reupload), never by
+	// admin conventions below (system on create, preserved on reupload), never by
 	// a caller-supplied visibility.
 	p.Visibility = ""
 	fields, err := resolveImportFields(p, task, true)
@@ -122,7 +122,7 @@ func (s *Service) adminImportConsumedTask(ctx context.Context, caller Caller, ta
 	}
 	now := s.now()
 	if updateID == "" {
-		// CREATE: mint under the admin conventions (public, empty global Space)
+		// CREATE: mint under the admin conventions (system, empty global Space)
 		// and reserve the package's baked-in ID as the row ID.
 		p, rels, err := s.adminEffectiveWrite(ctx, caller, "", *req, model.PluginVisibilitySystem, adminGlobalSpace)
 		if err != nil {
