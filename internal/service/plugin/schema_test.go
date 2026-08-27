@@ -148,7 +148,8 @@ func TestInjectStorageKeysRoundTripsWithSplit(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Feeding the STORED (stripped) package straight back through the write path
-	// must fail — this is the bug restoreWriteRequest works around.
+	// must fail — this is the read-modify-write blocker reinjectUpdateStorageKeys
+	// works around on the update path.
 	if _, _, err := splitStorageKeys(stripped, space); err == nil {
 		t.Fatalf("re-splitting a stripped package should reject the keyless storage attachment")
 	}

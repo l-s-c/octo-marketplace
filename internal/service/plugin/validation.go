@@ -24,7 +24,6 @@ const (
 	maxTags       = 100
 	maxTagBytes   = 128
 	maxRelations  = 200
-	maxPlacements = 100
 	maxListLimit  = 100
 	maxListTags   = 20 // bound on AND-combined tag filters per list query
 	maxIconBytes  = 512
@@ -32,7 +31,6 @@ const (
 
 var (
 	versionPattern    = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$`)
-	placementPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,127}$`)
 	relationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 	// iconKeyPattern identifies storage-object-key shaped icons that the read
 	// path resolves to presigned URLs (legacy skill icons are object keys).
@@ -102,9 +100,8 @@ func validName(v string) bool {
 	return v != "" && utf8.ValidString(v) && len(v) <= maxNameBytes && !strings.ContainsRune(v, '\x00')
 }
 
-func validVersion(v string) bool       { return versionPattern.MatchString(strings.TrimSpace(v)) }
-func validPlacementCode(v string) bool { return placementPattern.MatchString(v) }
-func validRelationID(v string) bool    { return relationIDPattern.MatchString(v) }
+func validVersion(v string) bool    { return versionPattern.MatchString(strings.TrimSpace(v)) }
+func validRelationID(v string) bool { return relationIDPattern.MatchString(v) }
 
 // relationEndpointProbe* are fixed well-formed identities so the octo-plugin-
 // lib endpoint validator (which also checks the source/target IDs and

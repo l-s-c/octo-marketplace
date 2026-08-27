@@ -170,11 +170,6 @@ components:
         data:
           $ref: '#/components/schemas/internal_api_handler_plugin.skillMarkdownResponse'
       type: object
-    github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_versionResponse:
-      properties:
-        data:
-          $ref: '#/components/schemas/internal_api_handler_plugin.versionResponse'
-      type: object
     github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_skill_SkillMDResponse:
       properties:
         data:
@@ -1594,17 +1589,6 @@ components:
         visibility:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginVisibility'
       type: object
-    internal_api_handler_plugin.placementRequest:
-      properties:
-        category_id:
-          type: string
-        is_visible:
-          type: boolean
-        placement_code:
-          type: string
-        sort_order:
-          type: integer
-      type: object
     internal_api_handler_plugin.pluginResponse:
       properties:
         category_id:
@@ -1699,20 +1683,6 @@ components:
           uniqueItems: false
         visibility:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginVisibility'
-      type: object
-    internal_api_handler_plugin.publishRequest:
-      properties:
-        changelog:
-          type: string
-        placements:
-          items:
-            $ref: '#/components/schemas/internal_api_handler_plugin.placementRequest'
-          type: array
-          uniqueItems: false
-        plugin_id:
-          type: string
-        version:
-          type: string
       type: object
     internal_api_handler_plugin.relationRequest:
       properties:
@@ -5487,76 +5457,6 @@ paths:
       security:
       - Bearer: []
       summary: Install plugin to a Loop workspace/runtime
-      tags:
-      - plugin
-  /plugins/publish:
-    post:
-      description: Create an immutable Plugin snapshot and atomically replace its
-        marketplace placements.
-      operationId: plugin.publish
-      requestBody:
-        content:
-          application/json:
-            schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/internal_api_handler_plugin.publishRequest'
-                description: Plugin ID, version, and placements
-                summary: body
-        description: Plugin ID, version, and placements
-        required: true
-      responses:
-        '201':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_versionResponse'
-          description: Created
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: AUTH_REQUIRED
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: FORBIDDEN
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: NOT_FOUND
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: CONFLICT
-        '413':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: PAYLOAD_TOO_LARGE
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: INTERNAL_ERROR
-      security:
-      - Bearer: []
-      summary: Publish plugin version
       tags:
       - plugin
   /plugins/skill_md:

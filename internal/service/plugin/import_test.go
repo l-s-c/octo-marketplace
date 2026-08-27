@@ -141,7 +141,7 @@ func sequenceIDs(ids ...string) func() string {
 	}
 }
 
-func TestImportCreatesSkillPluginAndPublishesDefaultPlacement(t *testing.T) {
+func TestImportCreatesSkillPluginAndAttachesDefaultPlacement(t *testing.T) {
 	store, blobs, tasks, svc := importFixtures(t)
 	detail, err := svc.Import(context.Background(), testCaller, ImportParams{ParseTaskID: "task-1", Icon: "icons/s.png"})
 	if err != nil {
@@ -174,8 +174,14 @@ func TestImportCreatesSkillPluginAndPublishesDefaultPlacement(t *testing.T) {
 	if strings.Contains(pkg, "skill/ref.json") || strings.Contains(pkg, "skill/package.zip") {
 		t.Fatalf("legacy ref.json/package.zip must be gone: %s", pkg)
 	}
-	if store.publishParams.Version != "2.0.0" || len(store.publishParams.Placements) != 1 || store.publishParams.Placements[0].PlacementCode != "default" {
-		t.Fatalf("publish = %#v", store.publishParams)
+	// The create attaches the default placement itself (no separate publish): the
+	// import carries no category, so the placement carries a nil category.
+	if len(store.createPlace) != 1 {
+		t.Fatalf("placements = %#v, want exactly one default placement", store.createPlace)
+	}
+	pl := store.createPlace[0]
+	if pl.PlacementCode != "default" || !pl.Visible || pl.CategoryID != nil {
+		t.Fatalf("placement = %#v, want default+visible with nil category", pl)
 	}
 	uploaded := 0
 	for key := range blobs.objects {
@@ -204,32 +210,6 @@ func TestImportCreatesSkillPluginAndPublishesDefaultPlacement(t *testing.T) {
 	}
 	if !namespaced {
 		t.Fatalf("spilled object not namespaced under persisted id: %#v", blobs.objects)
-	}
-}
-
-// TestImportReuploadVersionConflictLeavesDocumentUnchanged is the atomicity
-// regression: re-importing an existing version string must fail without applying
-// the new document, so the live plugin never drifts under a stale version
-// pointer (pre-flighted before any mutation).
-func TestImportReuploadVersionConflictLeavesDocumentUnchanged(t *testing.T) {
-	store, _, tasks, svc := importFixtures(t)
-	// An existing skill row with version 2.0.0 already published.
-	space := "space-a"
-	existing := &model.Plugin{ID: "skill-1", Name: "Existing", Type: model.PluginTypeSkill, OwnerUID: "user-1", SpaceID: &space, Visibility: model.PluginVisibilitySpace, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{"attachments":[]}`)}
-	store.plugins["skill-1"] = existing
-	store.versions = []model.PluginVersion{{ID: "v-2", Version: "2.0.0"}}
-
-	_, err := svc.Import(context.Background(), testCaller, ImportParams{ParseTaskID: "task-1", PluginID: "skill-1", Version: "2.0.0"})
-	if !errors.Is(err, ErrConflict) {
-		t.Fatalf("err = %v, want ErrConflict", err)
-	}
-	// Pre-flight fires before mutation: the document was never updated and the
-	// parse task was never consumed (still retryable).
-	if store.update != nil {
-		t.Fatalf("document mutated on version conflict: %#v", store.update)
-	}
-	if len(tasks.consumed) != 0 {
-		t.Fatalf("parse task consumed on pre-flight conflict: %#v", tasks.consumed)
 	}
 }
 
@@ -457,22 +437,31 @@ func TestResolveIconOnlyPresignsIconNamespaces(t *testing.T) {
 	}
 }
 
-func TestImportUpdatePublishFailureKeepsCommittedObjects(t *testing.T) {
+// TestImportUpdateFailureDeletesNewObjects is the update-path rollback
+// regression: when the repo `update` call fails, the freshly-uploaded package
+// objects are cleaned up (no orphaned blobs) and the parse task is released so
+// the upload stays retryable. The old publish-failure path no longer exists — a
+// re-import is a single transactional save revision, so any failure rolls the
+// new objects back rather than leaving them committed.
+func TestImportUpdateFailureDeletesNewObjects(t *testing.T) {
 	store, blobs, tasks, svc := importFixtures(t)
 	space := "space-a"
 	store.plugins["existing-1"] = &model.Plugin{ID: "existing-1", Name: "Old", Type: model.PluginTypeSkill, OwnerUID: "user-1", SpaceID: &space, Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{"attachments":[]}`)}
-	store.publishErr = errors.New("version conflict")
+	store.updateErr = errors.New("update failed")
 
 	_, err := svc.Import(context.Background(), testCaller, ImportParams{ParseTaskID: "task-1", PluginID: "existing-1", Version: "9.9.9"})
 	if err == nil {
-		t.Fatal("expected publish failure")
+		t.Fatal("expected update failure")
 	}
-	// The document update committed and references the fresh objects — they
-	// must survive the failed publish.
+	// The newly-uploaded binary spill is rolled back with the failed update.
+	deleted := 0
 	for _, key := range blobs.deletes {
 		if strings.HasPrefix(key, "plugins/space-a/attachments/") {
-			t.Fatalf("committed object deleted: %q", key)
+			deleted++
 		}
+	}
+	if deleted != 1 {
+		t.Fatalf("deletes = %#v, want the one spilled object cleaned up", blobs.deletes)
 	}
 	if len(tasks.released) != 1 {
 		t.Fatalf("task released = %#v", tasks.released)

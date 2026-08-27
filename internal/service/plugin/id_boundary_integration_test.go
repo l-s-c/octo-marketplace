@@ -43,10 +43,6 @@ func TestAllRowIDMethodsRejectMalformedIDsBeforeRepository(t *testing.T) {
 		{"update", func() error { _, err := svc.Update(ctx, testCaller, badID, validRequest()); return err }},
 		{"delete", func() error { return svc.Delete(ctx, testCaller, badID) }},
 		{"versions", func() error { _, _, err := svc.ListVersions(ctx, testCaller, badID, 20, 0); return err }},
-		{"publish", func() error {
-			_, err := svc.Publish(ctx, testCaller, badID, PublishRequest{Version: "1.0.0"})
-			return err
-		}},
 	}
 	for _, check := range checks {
 		t.Run(check.name, func(t *testing.T) {
@@ -55,7 +51,7 @@ func TestAllRowIDMethodsRejectMalformedIDsBeforeRepository(t *testing.T) {
 			}
 		})
 	}
-	if len(store.getIDs) != 0 || store.deleteID != "" || store.versionID != "" || store.publishParams.PluginID != "" {
+	if len(store.getIDs) != 0 || store.deleteID != "" || store.versionID != "" {
 		t.Fatalf("malformed ID reached repository: %#v", store)
 	}
 }
@@ -91,11 +87,8 @@ func TestActionEndpointsPassOpaqueStorageIDs(t *testing.T) {
 	if _, _, err := svc.ListVersions(ctx, testCaller, "opaque-1", 20, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Publish(ctx, testCaller, "opaque-1", PublishRequest{Version: "1.0.0"}); err != nil {
-		t.Fatal(err)
-	}
-	if store.deleteID != "opaque-1" || store.versionID != "opaque-1" || store.publishParams.PluginID != "opaque-1" {
-		t.Fatalf("storage IDs: delete=%q version=%q publish=%q", store.deleteID, store.versionID, store.publishParams.PluginID)
+	if store.deleteID != "opaque-1" || store.versionID != "opaque-1" {
+		t.Fatalf("storage IDs: delete=%q version=%q", store.deleteID, store.versionID)
 	}
 }
 

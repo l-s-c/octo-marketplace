@@ -55,8 +55,6 @@ type Store interface {
 	Delete(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
 	DeleteGraph(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
 	ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, int64, error)
-	VersionExists(context.Context, pluginrepo.Scope, string, string) (bool, error)
-	Publish(context.Context, pluginrepo.Scope, pluginrepo.PublishParams) (*model.PluginVersion, error)
 	CountMemberRelations(context.Context, []string) (map[string]int, error)
 	CountDeclaredRelations(context.Context, string) (int, error)
 	ListTags(context.Context, pluginrepo.Scope, pluginrepo.TagListFilter) ([]model.TagFilter, error)
@@ -159,6 +157,10 @@ type WriteRequest struct {
 	Manifest   json.RawMessage
 	Package    json.RawMessage
 	Relations  []RelationRequest
+	// Changelog is the optional note recorded on the version snapshot this write
+	// appends. The tenant upsert path leaves it nil; skill import carries the
+	// uploaded changelog through to the snapshot.
+	Changelog *string
 }
 
 type RelationRequest struct {
@@ -171,19 +173,6 @@ type RelationRequest struct {
 	Type           string
 	SortOrder      int
 	Data           json.RawMessage
-}
-
-type PublishRequest struct {
-	Version    string
-	Changelog  *string
-	Placements []PlacementRequest
-}
-
-type PlacementRequest struct {
-	PlacementCode string
-	CategoryID    *string
-	Visible       bool
-	SortOrder     int
 }
 
 func scope(c Caller) pluginrepo.Scope { return pluginrepo.Scope{CallerUID: c.UID, SpaceID: c.SpaceID} }
@@ -408,6 +397,12 @@ func (s *Service) createWithID(ctx context.Context, caller Caller, req WriteRequ
 	audit := s.audit(caller, p.ID, "create", nil, p, now)
 	m := mutation(*p, rels, audit)
 	m.SnapshotVersion = snapshot
+	m.Changelog = req.Changelog
+	// Every create auto-attaches the default visible placement so the new plugin
+	// surfaces in scene-scoped market lists (including "mine") without a separate
+	// publish call — the same auto-placement AdminCreate uses. This is what lets
+	// the publish endpoint go away: create is now self-sufficient for visibility.
+	m.Placements = []model.PluginPlacement{defaultMarketPlacement(p.CategoryID)}
 	sync, err := s.repo.Create(ctx, scope(caller), m)
 	if err != nil {
 		return nil, mapStoreError(err)
@@ -470,6 +465,7 @@ func (s *Service) update(ctx context.Context, caller Caller, pluginID string, re
 	audit := s.audit(caller, storageID, "update", old, p, now)
 	m := mutation(*p, rels, audit)
 	m.SnapshotVersion = snapshot
+	m.Changelog = req.Changelog
 	sync, err := s.repo.Update(ctx, scope(caller), m)
 	if err != nil {
 		return nil, mapStoreError(err)
@@ -548,35 +544,6 @@ func (s *Service) ListVersions(ctx context.Context, caller Caller, pluginID stri
 	return items, total, mapStoreError(err)
 }
 
-func (s *Service) Publish(ctx context.Context, caller Caller, pluginID string, req PublishRequest) (*model.PluginVersion, error) {
-	if validateCaller(caller) != nil || !validVersion(req.Version) {
-		return nil, ErrInvalidRequest
-	}
-	storageID, err := parseStorageID(pluginID)
-	if err != nil {
-		return nil, err
-	}
-	now := s.now()
-	placements, err := s.buildPlacements(storageID, req.Placements, now)
-	if err != nil {
-		return nil, err
-	}
-	params := pluginrepo.PublishParams{
-		PluginID:     storageID,
-		Version:      strings.TrimSpace(req.Version),
-		CreatedBy:    caller.UID,
-		OperatorName: caller.Name,
-		RequestID:    caller.RequestID,
-		Changelog:    trimOptional(req.Changelog),
-		Placements:   placements,
-	}
-	version, err := s.repo.Publish(ctx, scope(caller), params)
-	if err != nil {
-		return nil, mapStoreError(err)
-	}
-	return version, nil
-}
-
 func (s *Service) buildWrite(ctx context.Context, c Caller, pluginID string, req WriteRequest, now time.Time, admin bool) (*model.Plugin, []model.PluginRelation, error) {
 	name := strings.TrimSpace(req.Name)
 	if !validName(name) || !validPluginType(req.Type) || !validVisibility(req.Visibility, c.IsSystemAdmin) {
@@ -648,31 +615,6 @@ func (s *Service) buildRelations(ctx context.Context, c Caller, admin bool, sour
 			return nil, err
 		}
 		out = append(out, model.PluginRelation{ID: relationID, SourcePluginID: source.ID, SourcePluginType: source.Type, TargetPluginID: targetID, TargetPluginType: target.Type, Type: typ, SortOrder: r.SortOrder, Data: data, Status: 1, CreatedBy: c.UID, CreatedAt: now, UpdatedAt: now})
-	}
-	return out, nil
-}
-
-func (s *Service) buildPlacements(pluginID string, in []PlacementRequest, now time.Time) ([]model.PluginPlacement, error) {
-	if len(in) > maxPlacements {
-		return nil, ErrInvalidRequest
-	}
-	out := make([]model.PluginPlacement, 0, len(in))
-	seen := map[string]struct{}{}
-	for _, x := range in {
-		code := strings.TrimSpace(x.PlacementCode)
-		if !validPlacementCode(code) {
-			return nil, ErrInvalidRequest
-		}
-		category := trimOptional(x.CategoryID)
-		key := code + "\x00"
-		if category != nil {
-			key += *category
-		}
-		if _, ok := seen[key]; ok {
-			return nil, ErrInvalidRequest
-		}
-		seen[key] = struct{}{}
-		out = append(out, model.PluginPlacement{ID: s.id(), PlacementCode: code, PluginID: pluginID, CategoryID: category, Visible: x.Visible, SortOrder: x.SortOrder, CreatedAt: now, UpdatedAt: now})
 	}
 	return out, nil
 }

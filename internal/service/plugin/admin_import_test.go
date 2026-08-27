@@ -112,10 +112,6 @@ func TestAdminImportCreatesPublicGlobalSkillWithPlacement(t *testing.T) {
 	if !strings.Contains(string(created.Package), "# Admin Skill") {
 		t.Fatalf("package missing inline SKILL.md body: %s", created.Package)
 	}
-	// Create must not publish a version.
-	if store.publishParams.PluginID != "" {
-		t.Fatalf("admin create must not publish: %#v", store.publishParams)
-	}
 }
 
 // TestAdminImportReuploadPreservesVisibilitySpaceOwner locks the admin reupload
@@ -156,10 +152,6 @@ func TestAdminImportReuploadPreservesVisibilitySpaceOwner(t *testing.T) {
 	}
 	if detail.Plugin.ID != "skill-9" {
 		t.Fatalf("persisted id = %q, want skill-9", detail.Plugin.ID)
-	}
-	// Reupload must not publish a version.
-	if store.publishParams.PluginID != "" {
-		t.Fatalf("admin reupload must not publish: %#v", store.publishParams)
 	}
 	if len(tasks.consumed) != 1 || tasks.consumed[0] != "task-admin|admin-1||" {
 		t.Fatalf("consumed = %#v", tasks.consumed)

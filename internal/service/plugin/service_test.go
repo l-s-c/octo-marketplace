@@ -36,14 +36,13 @@ type fakeStore struct {
 	update         *model.Plugin
 	updateRels     []model.PluginRelation
 	updateSnapshot bool
+	updateErr      error
 	deleteScope    pluginrepo.Scope
 	deleteID       string
 	deleteGraphID  string
 	deleteChildIDs []string
 	versionID      string
-	publishParams  pluginrepo.PublishParams
 	versions       []model.PluginVersion
-	versionExists  bool
 	scopeAware     bool
 	versionTotal   int64
 	list           []model.Plugin
@@ -55,7 +54,6 @@ type fakeStore struct {
 	declaredCounts map[string]int
 	tags           []model.TagFilter
 	tagFilter      pluginrepo.TagListFilter
-	publishErr     error
 	err            error
 }
 
@@ -113,6 +111,9 @@ func (f *fakeStore) Update(_ context.Context, _ pluginrepo.Scope, m pluginrepo.M
 	p := m.Plugin
 	f.update, f.updateRels = &p, m.Relations
 	f.updateSnapshot = m.SnapshotVersion
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -249,24 +250,6 @@ func (f *fakeStore) ListVersions(_ context.Context, _ pluginrepo.Scope, id strin
 	f.versionID = id
 	return f.versions, f.versionTotal, f.err
 }
-func (f *fakeStore) VersionExists(_ context.Context, _ pluginrepo.Scope, _, version string) (bool, error) {
-	if f.err != nil {
-		return false, f.err
-	}
-	for _, v := range f.versions {
-		if v.Version == version {
-			return true, nil
-		}
-	}
-	return f.versionExists, nil
-}
-func (f *fakeStore) Publish(_ context.Context, _ pluginrepo.Scope, p pluginrepo.PublishParams) (*model.PluginVersion, error) {
-	f.publishParams = p
-	if f.publishErr != nil {
-		return nil, f.publishErr
-	}
-	return &model.PluginVersion{ID: "version-new", PluginID: p.PluginID, Version: p.Version, Manifest: json.RawMessage(`{"stored":true}`), Relations: json.RawMessage(`[]`), CreatedBy: p.CreatedBy}, f.err
-}
 func (f *fakeStore) CountMemberRelations(_ context.Context, teamIDs []string) (map[string]int, error) {
 	f.memberCountIDs = teamIDs
 	if f.memberCounts == nil {
@@ -344,6 +327,27 @@ func TestCreateAndUpdateFlagVersionSnapshot(t *testing.T) {
 	}
 	if !f.updateSnapshot {
 		t.Fatal("tenant Update did not flag SnapshotVersion")
+	}
+}
+
+// TestCreateAttachesDefaultPlacement locks that a tenant Create is
+// self-sufficient for market visibility: it hands the store exactly one visible
+// "default" placement carrying the plugin's own category, so the plugin surfaces
+// in scene-scoped lists without a separate publish call.
+func TestCreateAttachesDefaultPlacement(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{}}
+	category := "cat-1"
+	req := validRequest()
+	req.CategoryID = &category
+	if _, err := fixedService(f).Create(context.Background(), testCaller, req); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(f.createPlace) != 1 {
+		t.Fatalf("placements = %#v, want exactly one default placement", f.createPlace)
+	}
+	pl := f.createPlace[0]
+	if pl.PlacementCode != "default" || !pl.Visible || pl.CategoryID == nil || *pl.CategoryID != category {
+		t.Fatalf("placement = %#v, want default+visible carrying the plugin category", pl)
 	}
 }
 
@@ -572,30 +576,13 @@ func TestVersionListPropagatesExactTotalsAndNotFound(t *testing.T) {
 	}
 }
 
-func TestPublishUsesRepositoryContractAndReturnedVersionID(t *testing.T) {
-	f := &fakeStore{plugins: map[string]*model.Plugin{
-		"plugin-1": {ID: "plugin-1", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p"},
-	}}
-	version, err := fixedService(f).Publish(context.Background(), testCaller, "plugin-1", PublishRequest{Version: "1.0.0", Placements: []PlacementRequest{{PlacementCode: "home", Visible: true}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if version.ID != "version-new" || string(version.Manifest) != `{"stored":true}` || f.publishParams.PluginID != "plugin-1" || f.publishParams.CreatedBy != testCaller.UID || len(f.publishParams.Placements) != 1 {
-		t.Fatalf("version=%#v params=%#v", version, f.publishParams)
-	}
-}
-
-func TestRepositoryConflictsAndInvalidPlacementsMapToServiceErrors(t *testing.T) {
+func TestDeleteConflictMapsToServiceError(t *testing.T) {
 	f := &fakeStore{plugins: map[string]*model.Plugin{
 		"plugin-1": {ID: "plugin-1", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},
 	}}
 	f.err = pluginrepo.ErrConflict
 	if err := fixedService(f).Delete(context.Background(), testCaller, "plugin-1"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("Delete conflict = %v, want ErrConflict", err)
-	}
-	f.err = pluginrepo.ErrInvalidPlacement
-	if _, err := fixedService(f).Publish(context.Background(), testCaller, "plugin-1", PublishRequest{Version: "1.0.0"}); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("Publish invalid placement = %v, want ErrInvalidRequest", err)
 	}
 }
 
