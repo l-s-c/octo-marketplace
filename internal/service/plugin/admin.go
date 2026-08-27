@@ -10,6 +10,7 @@ package plugin
 
 import (
 	"context"
+	"strings"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 	pluginrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/plugin"
@@ -124,6 +125,12 @@ func (s *Service) adminEffectiveWrite(ctx context.Context, caller Caller, plugin
 	eff := caller
 	eff.IsSystemAdmin = true // admins may mint/preserve system visibility
 	eff.SpaceID = effectiveSpace
+	// `public` is retired on the write path; a preserved legacy public visibility is
+	// normalized to the unified `system` global value so the write revalidates and
+	// the row stops carrying the retired value (validVisibility rejects public).
+	if visibility == model.PluginVisibilityPublic {
+		visibility = model.PluginVisibilitySystem
+	}
 	req.Visibility = visibility
 	p, rels, err := s.buildWrite(ctx, eff, pluginID, req, s.now(), true)
 	if err != nil {
@@ -225,6 +232,11 @@ func (s *Service) AdminUpdate(ctx context.Context, caller Caller, pluginID strin
 	p.CreatedByBotUID, p.CreatedByBotName = old.CreatedByBotUID, old.CreatedByBotName
 	p.SpaceID = old.SpaceID   // preserve the row's existing Space on update
 	p.OwnerUID = old.OwnerUID // owner provenance is immutable (Q7')
+	// Publisher is display provenance; a metadata edit that omits it must not blank
+	// a backfilled row's publisher, so fall back to the existing value.
+	if strings.TrimSpace(req.Publisher) == "" {
+		p.Publisher = old.Publisher
+	}
 	for i := range rels {
 		rels[i].SourcePluginID = storageID
 	}
@@ -271,7 +283,7 @@ func (s *Service) AdminDelete(ctx context.Context, caller Caller, pluginID strin
 	}
 	audit := s.audit(caller, storageID, "delete", old, nil, s.now())
 	if old.Type == model.PluginTypeExpert || old.Type == model.PluginTypeExpertTeam {
-		childIDs, err := s.collectContainerChildren(ctx, caller, old, rels)
+		childIDs, err := s.collectContainerChildren(ctx, adminScope(caller), old, rels)
 		if err != nil {
 			return err
 		}

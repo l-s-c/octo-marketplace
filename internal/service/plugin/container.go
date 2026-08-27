@@ -183,7 +183,7 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 	}
 	// The old embedded children (bundled skills for an expert; members + their
 	// skills for a squad) must be soft-deleted so they stop surfacing anywhere.
-	oldChildIDs, err := s.collectContainerChildren(ctx, caller, old, oldRels)
+	oldChildIDs, err := s.collectContainerChildren(ctx, adminScope(caller), old, oldRels)
 	if err != nil {
 		return nil, err
 	}
@@ -212,11 +212,14 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 		return nil, err
 	}
 	// Preserve the row's identity: a rebuild replaces content, never the plugin_id,
-	// visibility, Space, owner, creator provenance, or created_at. The container
-	// carries no icon, so keep the existing one rather than clearing it.
+	// visibility, Space, owner, publisher, creator provenance, or created_at. The
+	// container carries no icon/publisher, so keep the existing ones rather than
+	// clearing them (RebuildGraph re-derives visibility/Space/owner from the locked
+	// row; publisher/icon/category keep this unlocked read — content, not identity).
 	top.Visibility = old.Visibility
 	top.SpaceID = old.SpaceID
 	top.OwnerUID = old.OwnerUID
+	top.Publisher = old.Publisher
 	top.CreatedAt = old.CreatedAt
 	top.CurrentVersionID = old.CurrentVersionID
 	top.CurrentVersion = old.CurrentVersion
@@ -251,11 +254,13 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 }
 
 // collectContainerChildren gathers the storage IDs of the top plugin's current
-// embedded descendants so a rebuild can soft-delete them: an expert's bundled
-// skills (its expert_skill targets); a squad's member experts plus each member's
-// own bundled skills (the member's expert_skill targets). It resolves under the
-// admin scope so embedded children (hidden from tenant listings) stay visible.
-func (s *Service) collectContainerChildren(ctx context.Context, caller Caller, top *model.Plugin, topRels []model.PluginRelation) ([]string, error) {
+// embedded descendants so a rebuild or delete can tear them down: an expert's
+// bundled skills (its expert_skill targets); a squad's member experts plus each
+// member's own bundled skills (the member's expert_skill targets). The passed
+// scope resolves the descendants — adminScope for the cross-Space admin surface,
+// the tenant scope for an owner-scoped delete, so embedded children (hidden from
+// tenant listings) stay visible without granting cross-Space reach.
+func (s *Service) collectContainerChildren(ctx context.Context, sc pluginrepo.Scope, top *model.Plugin, topRels []model.PluginRelation) ([]string, error) {
 	var ids []string
 	// A rebuild may only tear down the container's OWN embedded children — the
 	// per-parent skill/member copies (is_embedded=1). A relation target that is a
@@ -263,7 +268,7 @@ func (s *Service) collectContainerChildren(ctx context.Context, caller Caller, t
 	// references (buildRelations validates only type, not ownership), and must
 	// never be soft-deleted out from under every other graph that shares it.
 	addIfEmbedded := func(id string) error {
-		child, _, err := s.repo.GetWithRelations(ctx, adminScope(caller), id)
+		child, _, err := s.repo.GetWithRelations(ctx, sc, id)
 		if err != nil {
 			return mapStoreError(err)
 		}
@@ -286,7 +291,7 @@ func (s *Service) collectContainerChildren(ctx context.Context, caller Caller, t
 			if r.Type != "expert_team_expert" {
 				continue
 			}
-			member, memberRels, err := s.repo.GetWithRelations(ctx, adminScope(caller), r.TargetPluginID)
+			member, memberRels, err := s.repo.GetWithRelations(ctx, sc, r.TargetPluginID)
 			if err != nil {
 				return nil, mapStoreError(err)
 			}
@@ -492,35 +497,42 @@ type graphNode struct {
 
 // skillBuildState is the per-container shared state threaded through every
 // bundled-skill build so a nested archive referenced by many skill refs is
-// parsed and expanded exactly once. cache maps a container-relative skill file
-// to the skill node already built from it (container-wide dedupe by file); budget
-// is the shared remaining-decompressed-bytes allowance passed to
-// buildSkillAttachmentTree so the aggregate expansion is bounded.
+// expanded within one shared budget. cache maps a container-relative skill file
+// AND its display name to the skill node already built for that pair, so two
+// refs to the same file under DIFFERENT names each mint their own node (a member
+// may bundle a shared archive under its own skill name) while an exact
+// (file,name) repeat collapses onto one node. expanded records which files have
+// already been charged against the budget so a second ref to the same file (any
+// name) re-reads the bytes without re-charging — the dedupe stays a pure
+// resource optimization. budget is the shared remaining-decompressed-bytes
+// allowance passed to buildSkillAttachmentTree so the aggregate expansion is
+// bounded.
 type skillBuildState struct {
-	cache  map[string]*graphNode
-	budget int64
+	cache    map[string]*graphNode
+	expanded map[string]struct{}
+	budget   int64
 }
 
 func (s *Service) newSkillBuildState() *skillBuildState {
-	return &skillBuildState{cache: map[string]*graphNode{}, budget: s.maxArchiveBytes}
+	return &skillBuildState{cache: map[string]*graphNode{}, expanded: map[string]struct{}{}, budget: s.maxArchiveBytes}
 }
 
 // buildSkillNode parses one bundled skill package into a skill plugin exactly
 // like a normal skill import (canonical flat attachment tree). It returns the
 // node, the object keys uploaded for binary files (for rollback), and whether
-// the node is newly built (isNew) — a repeated file resolves from the shared
-// cache instead of re-expanding the archive, so the caller adds the node to the
-// graph only on the first occurrence. A cache hit whose ref name differs from the
-// first build is ambiguous (two skills would collapse onto one node under
-// different names) and is rejected.
+// the node is newly built (isNew) — an exact (file,name) repeat resolves from the
+// shared cache instead of re-expanding, so the caller adds the node to the graph
+// only on the first occurrence. Two refs sharing a file under different display
+// names each mint a distinct skill node (their own id/name/object namespace); the
+// second such ref re-reads the already-validated bytes but is NOT re-charged
+// against the container budget, so a shared archive is charged once per distinct
+// file.
 func (s *Service) buildSkillNode(ctx context.Context, eff Caller, parsed *parsedContainer, ref parsedSkillRef, state *skillBuildState) (node *graphNode, uploaded []string, isNew bool, err error) {
 	if ref.file == "" {
 		return nil, nil, false, ErrInvalidContainer
 	}
-	if cached, ok := state.cache[ref.file]; ok {
-		if cached.plugin.Name != ref.name {
-			return nil, nil, false, ErrInvalidContainer
-		}
+	cacheKey := ref.file + "\x00" + ref.name
+	if cached, ok := state.cache[cacheKey]; ok {
 		return cached, nil, false, nil
 	}
 	zipData, ok := parsed.skillZs[ref.file]
@@ -528,10 +540,19 @@ func (s *Service) buildSkillNode(ctx context.Context, eff Caller, parsed *parsed
 		return nil, nil, false, ErrInvalidContainer
 	}
 	skillID := s.id()
-	attachments, uploaded, _, err := s.buildSkillAttachmentTree(ctx, eff.SpaceID, skillID, zipData, nil, &state.budget)
+	// Charge the decompression budget once per distinct file: the first ref to a
+	// file pays for its expansion; a later ref to the SAME file (under any name)
+	// re-reads the already-validated bytes with a nil budget so it cannot be gamed
+	// to double-spend the aggregate cap.
+	budget := &state.budget
+	if _, charged := state.expanded[ref.file]; charged {
+		budget = nil
+	}
+	attachments, uploaded, _, err := s.buildSkillAttachmentTree(ctx, eff.SpaceID, skillID, zipData, nil, budget)
 	if err != nil {
 		return nil, uploaded, false, err
 	}
+	state.expanded[ref.file] = struct{}{}
 	manifest, err := skillManifest(ref.name)
 	if err != nil {
 		return nil, uploaded, false, err
@@ -551,7 +572,7 @@ func (s *Service) buildSkillNode(ctx context.Context, eff Caller, parsed *parsed
 	// but excluded from the skill list (matching the backfill's embedded skills).
 	plugin.IsEmbedded = true
 	built := &graphNode{plugin: plugin, mutation: s.graphMutation(eff, plugin, nil)}
-	state.cache[ref.file] = built
+	state.cache[cacheKey] = built
 	return built, uploaded, true, nil
 }
 

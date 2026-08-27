@@ -61,9 +61,11 @@ func TestCreateCategoryInsertsWithActiveStatus(t *testing.T) {
 func TestUpdateCategoryNotFoundWhenNoRow(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
-	mock.ExpectExec(`UPDATE plugin_categories SET name=\?,icon_key=\?,plugin_types_json=\?,sort_order=\?,updated_at=\? WHERE category_id=\? AND deleted_at IS NULL`).
-		WithArgs("Ops", "k", `["expert"]`, 2, sqlmock.AnyArg(), "cat-1").
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT plugin_types_json FROM plugin_categories WHERE category_id=\? AND deleted_at IS NULL FOR UPDATE`).
+		WithArgs("cat-1").
+		WillReturnRows(sqlmock.NewRows([]string{"plugin_types_json"}))
+	mock.ExpectRollback()
 	err := New(db).UpdateCategory(context.Background(), model.PluginCategory{ID: "cat-1", Name: "Ops", IconKey: "k", PluginTypes: []byte(`["expert"]`), SortOrder: 2})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("UpdateCategory error = %v, want ErrNotFound", err)
@@ -76,10 +78,66 @@ func TestUpdateCategoryNotFoundWhenNoRow(t *testing.T) {
 func TestUpdateCategorySucceeds(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
+	mock.ExpectBegin()
+	// Current types already include the requested type, so nothing is narrowed and
+	// no reference count runs before the update.
+	mock.ExpectQuery(`SELECT plugin_types_json FROM plugin_categories WHERE category_id=\? AND deleted_at IS NULL FOR UPDATE`).
+		WithArgs("cat-1").
+		WillReturnRows(sqlmock.NewRows([]string{"plugin_types_json"}).AddRow([]byte(`["expert"]`)))
 	mock.ExpectExec(`UPDATE plugin_categories SET name=\?`).
 		WithArgs("Ops", "k", `["expert"]`, 2, sqlmock.AnyArg(), "cat-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 	if err := New(db).UpdateCategory(context.Background(), model.PluginCategory{ID: "cat-1", Name: "Ops", IconKey: "k", PluginTypes: []byte(`["expert"]`), SortOrder: 2}); err != nil {
+		t.Fatalf("UpdateCategory error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateCategoryConflictWhenNarrowingStrandsLivePlugins is the P2-4 guard: a
+// type-narrowing update (dropping "expert") is refused with ErrConflict while a
+// live expert still references the category under the dropped type, so those rows
+// are never stranded. The update is not issued and the transaction rolls back.
+func TestUpdateCategoryConflictWhenNarrowingStrandsLivePlugins(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT plugin_types_json FROM plugin_categories WHERE category_id=\? AND deleted_at IS NULL FOR UPDATE`).
+		WithArgs("cat-1").
+		WillReturnRows(sqlmock.NewRows([]string{"plugin_types_json"}).AddRow([]byte(`["expert","skill"]`)))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugins WHERE category_id=\? AND plugin_type=\? AND status=1 AND deleted_at IS NULL`).
+		WithArgs("cat-1", model.PluginTypeExpert).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(3))
+	mock.ExpectRollback()
+	err := New(db).UpdateCategory(context.Background(), model.PluginCategory{ID: "cat-1", Name: "Ops", IconKey: "k", PluginTypes: []byte(`["skill"]`), SortOrder: 2})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("UpdateCategory error = %v, want ErrConflict", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateCategoryNarrowsWhenNoLivePluginUsesDroppedType proves the narrowing
+// guard is not over-eager: dropping "expert" is allowed when no live expert
+// references the category under it, and the update commits.
+func TestUpdateCategoryNarrowsWhenNoLivePluginUsesDroppedType(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT plugin_types_json FROM plugin_categories WHERE category_id=\? AND deleted_at IS NULL FOR UPDATE`).
+		WithArgs("cat-1").
+		WillReturnRows(sqlmock.NewRows([]string{"plugin_types_json"}).AddRow([]byte(`["expert","skill"]`)))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugins WHERE category_id=\? AND plugin_type=\? AND status=1 AND deleted_at IS NULL`).
+		WithArgs("cat-1", model.PluginTypeExpert).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec(`UPDATE plugin_categories SET name=\?`).
+		WithArgs("Ops", "k", `["skill"]`, 2, sqlmock.AnyArg(), "cat-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	if err := New(db).UpdateCategory(context.Background(), model.PluginCategory{ID: "cat-1", Name: "Ops", IconKey: "k", PluginTypes: []byte(`["skill"]`), SortOrder: 2}); err != nil {
 		t.Fatalf("UpdateCategory error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

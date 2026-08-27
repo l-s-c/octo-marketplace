@@ -420,6 +420,12 @@ func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, re
 	if old.OwnerUID != caller.UID || (old.SpaceID != nil && *old.SpaceID != caller.SpaceID) {
 		return nil, ErrNotFound
 	}
+	// An embedded child (a bundled skill / squad member) is owned by its container
+	// graph and may be content-swapped only through a container reupload — a
+	// standalone update must not edit it out of band, matching AdminUpdate.
+	if old.IsEmbedded {
+		return nil, ErrNotFound
+	}
 	if req.Type != old.Type {
 		return nil, ErrInvalidRequest
 	}
@@ -471,7 +477,7 @@ func (s *Service) Delete(ctx context.Context, caller Caller, pluginID string) er
 	if err != nil {
 		return err
 	}
-	old, _, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
+	old, rels, err := s.repo.GetWithRelations(ctx, scope(caller), storageID)
 	if err != nil {
 		return mapStoreError(err)
 	}
@@ -479,6 +485,21 @@ func (s *Service) Delete(ctx context.Context, caller Caller, pluginID string) er
 		return ErrNotFound
 	}
 	audit := s.audit(caller, storageID, "delete", old, nil, s.now())
+	// An expert/expert_team top owns embedded children (an expert's bundled skills;
+	// a squad's member experts and their skills) — the population backfilled tenant
+	// containers actually carry. Tearing it down through DeleteGraph removes the
+	// whole subtree in one transaction so those rows are never orphaned (live,
+	// is_embedded=1, unreachable). A standalone catalog skill merely referenced by
+	// the top (is_embedded=0) is not collected and survives; DeleteGraph re-checks
+	// tenant ownership on the top and each child under the same scope. Connectors
+	// and skills carry no embedded children and take the single-row Delete.
+	if old.Type == model.PluginTypeExpert || old.Type == model.PluginTypeExpertTeam {
+		childIDs, err := s.collectContainerChildren(ctx, scope(caller), old, rels)
+		if err != nil {
+			return err
+		}
+		return mapStoreError(s.repo.DeleteGraph(ctx, scope(caller), storageID, childIDs, audit.OperatorID, audit.OperatorName, audit.RequestID, audit.Remark))
+	}
 	return mapStoreError(s.repo.Delete(ctx, scope(caller), storageID, audit.OperatorID, audit.OperatorName, audit.RequestID, audit.Remark))
 }
 

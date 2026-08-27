@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 )
@@ -49,9 +50,42 @@ VALUES (?,?,?,?,?,1,?,?)`, c.ID, c.Name, c.IconKey, string(c.PluginTypes), c.Sor
 }
 
 // UpdateCategory mutates the editable fields of a live category, returning
-// ErrNotFound when no live row carries the id.
+// ErrNotFound when no live row carries the id. A type-NARROWING update (dropping
+// a plugin type the category currently serves) is refused with ErrConflict while
+// a live, non-deleted plugin still references this category under a dropped type:
+// otherwise those rows would be stranded (lockPluginCategory then fails every
+// future write for them, matching DeleteCategory's refusal). The row lock, the
+// per-dropped-type reference count, and the update run in one transaction (the
+// category row is locked FOR UPDATE first) so a plugin cannot adopt the category
+// under a dropped type between the count and the update.
 func (r *Repo) UpdateCategory(ctx context.Context, c model.PluginCategory) error {
-	res, err := r.db.ExecContext(ctx, `UPDATE plugin_categories SET name=?,icon_key=?,plugin_types_json=?,sort_order=?,updated_at=?
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var currentTypes []byte
+	err = tx.QueryRowContext(ctx, `SELECT plugin_types_json FROM plugin_categories WHERE category_id=? AND deleted_at IS NULL FOR UPDATE`, c.ID).Scan(&currentTypes)
+	if err == sql.ErrNoRows {
+		return ErrNotFound
+	}
+	if err != nil {
+		return wrapped("lock category", err)
+	}
+	dropped, err := droppedPluginTypes(currentTypes, c.PluginTypes)
+	if err != nil {
+		return err
+	}
+	for _, typ := range dropped {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugins WHERE category_id=? AND plugin_type=? AND status=1 AND deleted_at IS NULL`, c.ID, typ).Scan(&count); err != nil {
+			return wrapped("count category plugins", err)
+		}
+		if count > 0 {
+			return ErrConflict
+		}
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE plugin_categories SET name=?,icon_key=?,plugin_types_json=?,sort_order=?,updated_at=?
 WHERE category_id=? AND deleted_at IS NULL`, c.Name, c.IconKey, string(c.PluginTypes), c.SortOrder, r.now(), c.ID)
 	if err != nil {
 		return wrapped("update category", err)
@@ -63,7 +97,31 @@ WHERE category_id=? AND deleted_at IS NULL`, c.Name, c.IconKey, string(c.PluginT
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
+}
+
+// droppedPluginTypes returns the plugin types present in the category's current
+// type set but absent from the requested one — the narrowing an in-use category
+// may not apply.
+func droppedPluginTypes(current, next json.RawMessage) ([]model.PluginType, error) {
+	var cur, nxt []model.PluginType
+	if err := json.Unmarshal(current, &cur); err != nil {
+		return nil, wrapped("decode category types", err)
+	}
+	if err := json.Unmarshal(next, &nxt); err != nil {
+		return nil, wrapped("decode category types", err)
+	}
+	keep := make(map[model.PluginType]struct{}, len(nxt))
+	for _, t := range nxt {
+		keep[t] = struct{}{}
+	}
+	var dropped []model.PluginType
+	for _, t := range cur {
+		if _, ok := keep[t]; !ok {
+			dropped = append(dropped, t)
+		}
+	}
+	return dropped, nil
 }
 
 // DeleteCategory soft-deletes a live category (status=0, deleted_at stamped). It

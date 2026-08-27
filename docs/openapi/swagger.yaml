@@ -7460,6 +7460,3 @@ tags:
   name: expert
 - description: Expert squad catalog — expert teams (专家团)
   name: expert_squad
-- description: Administrative Expert catalog — system experts, squads, categories,
-    tags
-  name: admin_expert

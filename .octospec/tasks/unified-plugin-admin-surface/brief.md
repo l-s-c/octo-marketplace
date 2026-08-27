@@ -47,6 +47,27 @@ onto `main` once #67 merges.
     the unified import path (new skills land in `plugins`, not the old skills
     table)
   - `_probe` is a stateless network probe — no data source, unchanged
+
+> **Decision A amended (2026-08, 3rd review round): legacy skill supporting
+> endpoints are FROZEN, not swapped — the unified replacements are NEW paths.**
+> The brief above overstated the swap. The code (and this record) reconcile as:
+> - The retained legacy admin skill helper `/api/v1/admin/skills/{id}/skill_md`
+>   (and the tenant-side skill download helper) are **frozen against the legacy
+>   `skills` table**: they serve legacy rows only and are not repointed at
+>   `plugins`. They exist purely so pre-unification skill IDs keep resolving.
+> - The unified replacement is the **NEW** `/api/v1/admin/plugins/{id}/skill_md`
+>   and `/api/v1/admin/plugins/{id}/download`, served by the plugin admin handler
+>   from `plugins.plugin_json` (the flat attachment tree). octo-admin points at
+>   these for unified rows. Router-admission tests now cover both new routes.
+> - Category writes / tag listing / icon-upload / the skill import pipeline ARE on
+>   `plugins`/`plugin_*` as stated above — only the two skill read helpers are
+>   frozen-legacy rather than swapped.
+> - Container import/reupload dedupe (P2-3): a bundled skill referenced by several
+>   refs under the SAME (file,name) collapses onto one embedded node; the SAME file
+>   under DIFFERENT display names mints a distinct per-parent-copy node per name
+>   (each with its own id/name/object namespace), and the shared archive's
+>   decompression budget is charged once per distinct file. The dedupe is a pure
+>   resource optimization, never a cross-parent shared node.
 - Decision B — the legacy per-type admin CRUD routes (`/admin/mcps`,
   `/admin/experts`, `/admin/squads`, `/admin/skills`) are **retained this round**
   (not deleted). octo-admin stops calling their CRUD; they read the old tables

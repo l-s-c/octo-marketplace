@@ -89,7 +89,10 @@ func (s *Service) Import(ctx context.Context, caller Caller, p ImportParams) (*D
 		if err != nil {
 			return nil, mapStoreError(err)
 		}
-		if old.OwnerUID != caller.UID || old.Type != model.PluginTypeSkill {
+		// A bundled skill / squad member (is_embedded=1) is owned by its container
+		// graph and must be swapped only through a container reupload — a standalone
+		// skill re-import must not content-edit it out of band, matching AdminUpdate.
+		if old.OwnerUID != caller.UID || old.Type != model.PluginTypeSkill || old.IsEmbedded {
 			return nil, ErrNotFound
 		}
 		oldPlugin, oldRels = old, rels

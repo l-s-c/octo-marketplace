@@ -121,6 +121,37 @@ func TestAdminCreateNullCategoryStillPlaces(t *testing.T) {
 	}
 }
 
+// TestAdminUpdatePreservesPublisherWhenOmitted confirms an admin metadata edit
+// that carries no publisher falls back to the row's existing one rather than
+// blanking a backfilled skill's publisher (Octo-Q P1).
+func TestAdminUpdatePreservesPublisherWhenOmitted(t *testing.T) {
+	space := adminGlobalSpace
+	existing := &model.Plugin{ID: "skill-1", Name: "Ops Skill", Type: model.PluginTypeSkill, SpaceID: &space, Visibility: model.PluginVisibilitySystem, Publisher: "Mininglamp", Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	f := &fakeStore{plugins: map[string]*model.Plugin{"skill-1": existing}}
+	req := adminSkillRequest() // carries no publisher
+	if _, err := fixedService(f).AdminUpdate(context.Background(), adminCaller, "skill-1", req); err != nil {
+		t.Fatalf("AdminUpdate: %v", err)
+	}
+	if f.update == nil || f.update.Publisher != "Mininglamp" {
+		t.Fatalf("publisher not preserved: %#v", f.update)
+	}
+}
+
+// TestAdminUpdateNormalizesLegacyPublicToSystem confirms an admin edit of a
+// legacy public row does not fail validVisibility (which now rejects public) but
+// normalizes the preserved visibility to the unified `system` value.
+func TestAdminUpdateNormalizesLegacyPublicToSystem(t *testing.T) {
+	space := adminGlobalSpace
+	existing := &model.Plugin{ID: "skill-1", Name: "Ops Skill", Type: model.PluginTypeSkill, SpaceID: &space, Visibility: model.PluginVisibilityPublic, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	f := &fakeStore{plugins: map[string]*model.Plugin{"skill-1": existing}}
+	if _, err := fixedService(f).AdminUpdate(context.Background(), adminCaller, "skill-1", adminSkillRequest()); err != nil {
+		t.Fatalf("AdminUpdate of a legacy public row failed: %v", err)
+	}
+	if f.update == nil || f.update.Visibility != model.PluginVisibilitySystem {
+		t.Fatalf("legacy public not normalized to system: %#v", f.update)
+	}
+}
+
 // TestAdminUpdateRejectsTypeChange guards against reclassifying a plugin's type
 // through the admin update path.
 func TestAdminUpdateRejectsTypeChange(t *testing.T) {

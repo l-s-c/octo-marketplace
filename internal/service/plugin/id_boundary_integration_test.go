@@ -75,7 +75,10 @@ func TestDetailRejectsMalformedIDsBeforeRepository(t *testing.T) {
 func TestActionEndpointsPassOpaqueStorageIDs(t *testing.T) {
 	store := &fakeStore{
 		plugins: map[string]*model.Plugin{
-			"opaque-1": {ID: "opaque-1", Name: "Original", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},
+			// A skill takes the single-row Delete path (connectors/skills carry no
+			// embedded children); expert/expert_team route through DeleteGraph, which
+			// is covered separately.
+			"opaque-1": {ID: "opaque-1", Name: "Original", Type: model.PluginTypeSkill, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},
 		},
 		versions: []model.PluginVersion{{PluginID: "opaque-1"}},
 	}

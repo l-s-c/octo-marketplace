@@ -159,6 +159,11 @@ func (s *Service) adminImportConsumedTask(ctx context.Context, caller Caller, ta
 	p.CreatedByBotUID, p.CreatedByBotName = oldPlugin.CreatedByBotUID, oldPlugin.CreatedByBotName
 	p.SpaceID = oldPlugin.SpaceID   // preserve the row's existing Space
 	p.OwnerUID = oldPlugin.OwnerUID // owner provenance is immutable
+	// The import WriteRequest carries no publisher, so preserve the existing one
+	// rather than blanking a backfilled row's publisher on a package-only reupload.
+	if strings.TrimSpace(req.Publisher) == "" {
+		p.Publisher = oldPlugin.Publisher
+	}
 	for i := range rels {
 		rels[i].SourcePluginID = updateID
 	}

@@ -417,8 +417,8 @@ func TestCreateRejectsInvalidFieldsAndJSONShapes(t *testing.T) {
 
 func TestCreateRejectsPublicVisibilityForNonAdmin(t *testing.T) {
 	// A tenant caller (IsSystemAdmin=false) may not self-publish a globally
-	// visible plugin; public/system are admin-only. Mirrors the import rule
-	// (TestImportRejectsPublicVisibility) and the legacy skill service.
+	// visible plugin; public/system are admin-only on the tenant path. Mirrors the
+	// import rule (TestImportRejectsPublicVisibility) and the legacy skill service.
 	for _, vis := range []model.PluginVisibility{model.PluginVisibilityPublic, model.PluginVisibilitySystem} {
 		req := validRequest()
 		req.Visibility = vis
@@ -426,13 +426,19 @@ func TestCreateRejectsPublicVisibilityForNonAdmin(t *testing.T) {
 			t.Fatalf("visibility=%s non-admin create err = %v, want ErrInvalidRequest", vis, err)
 		}
 	}
-	// An admin caller (IsSystemAdmin=true) may set public.
+	// An admin caller (IsSystemAdmin=true) may set the unified `system` global
+	// value, but NOT `public` — public is retired on the write path (validVisibility
+	// rejects it for everyone), so even a systemAdmin upsert cannot mint one.
 	admin := testCaller
 	admin.IsSystemAdmin = true
 	req := validRequest()
+	req.Visibility = model.PluginVisibilitySystem
+	if _, err := fixedService(&fakeStore{plugins: map[string]*model.Plugin{}}).Create(context.Background(), admin, req); err != nil {
+		t.Fatalf("admin system create err = %v", err)
+	}
 	req.Visibility = model.PluginVisibilityPublic
-	if _, err := fixedService(&fakeStore{}).Create(context.Background(), admin, req); err != nil {
-		t.Fatalf("admin public create err = %v", err)
+	if _, err := fixedService(&fakeStore{}).Create(context.Background(), admin, req); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("admin public create err = %v, want ErrInvalidRequest (public retired on write)", err)
 	}
 }
 
@@ -575,6 +581,55 @@ func TestCreateReturnsRelationResultWithGeneratedIDs(t *testing.T) {
 	}
 	if len(v.Relations) != 1 || v.Relations[0].ID != "relation-created" {
 		t.Fatalf("relations = %#v", v.Relations)
+	}
+}
+
+// TestDeleteExpertRemovesEmbeddedChildrenNotStandalone is the P1-1 tenant
+// regression: a tenant deleting their own expert routes through DeleteGraph under
+// the TENANT scope and tears down its embedded bundled skills, while a standalone
+// catalog skill (is_embedded=0) merely referenced by the same expert survives.
+func TestDeleteExpertRemovesEmbeddedChildrenNotStandalone(t *testing.T) {
+	expert := &model.Plugin{ID: "expert-1", Name: "E", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), Visibility: model.PluginVisibilitySpace, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	embedded := &model.Plugin{ID: "skill-emb", Name: "Bundled", Type: model.PluginTypeSkill, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), Visibility: model.PluginVisibilitySpace, IsEmbedded: true, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	standalone := &model.Plugin{ID: "skill-std", Name: "Shared", Type: model.PluginTypeSkill, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), Visibility: model.PluginVisibilitySystem, IsEmbedded: false, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	f := &fakeStore{
+		plugins: map[string]*model.Plugin{"expert-1": expert, "skill-emb": embedded, "skill-std": standalone},
+		relations: map[string][]model.PluginRelation{"expert-1": {
+			{ID: "r1", SourcePluginID: "expert-1", TargetPluginID: "skill-emb", TargetPluginType: model.PluginTypeSkill, Type: "expert_skill", Status: 1},
+			{ID: "r2", SourcePluginID: "expert-1", TargetPluginID: "skill-std", TargetPluginType: model.PluginTypeSkill, Type: "expert_skill", Status: 1},
+		}},
+	}
+	if err := fixedService(f).Delete(context.Background(), testCaller, "expert-1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if f.deleteGraphID != "expert-1" {
+		t.Fatalf("tenant expert must delete through DeleteGraph, got graph id %q (deleteID=%q)", f.deleteGraphID, f.deleteID)
+	}
+	if f.deleteScope.Admin {
+		t.Fatal("tenant delete must run under the tenant scope, not admin")
+	}
+	if len(f.deleteChildIDs) != 1 || f.deleteChildIDs[0] != "skill-emb" {
+		t.Fatalf("child ids = %#v, want only the embedded [skill-emb]", f.deleteChildIDs)
+	}
+}
+
+// TestUpdateForwardsOwnEmbeddedChildEdge is the P0-1 service-level regression: the
+// service must not itself block resubmitting an edge to an embedded child on an
+// Update — it forwards the edge to the repo, which enforces the ALREADY-owns
+// exemption. (A NEW edge to a foreign embedded child is rejected at the repo
+// boundary; see the repo-level tests.)
+func TestUpdateForwardsOwnEmbeddedChildEdge(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{
+		"expert-1":  {ID: "expert-1", Name: "Example Plugin", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},
+		"skill-emb": {ID: "skill-emb", Type: model.PluginTypeSkill, IsEmbedded: true},
+	}}
+	req := validRequest()
+	req.Relations = []RelationRequest{{ID: "rel-1", SourcePluginID: "expert-1", TargetPluginID: "skill-emb", Type: "expert_skill"}}
+	if _, err := fixedService(f).Update(context.Background(), testCaller, "expert-1", req); err != nil {
+		t.Fatalf("service Update blocked its own embedded-child edge: %v", err)
+	}
+	if len(f.updateRels) != 1 || f.updateRels[0].TargetPluginID != "skill-emb" {
+		t.Fatalf("embedded-child edge not forwarded to repo: %#v", f.updateRels)
 	}
 }
 

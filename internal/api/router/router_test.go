@@ -600,6 +600,8 @@ var adminPluginRoutes = []struct {
 	{http.MethodGet, "/api/v1/admin/plugins/p-1"},
 	{http.MethodPatch, "/api/v1/admin/plugins/p-1"},
 	{http.MethodDelete, "/api/v1/admin/plugins/p-1"},
+	{http.MethodGet, "/api/v1/admin/plugins/p-1/skill_md"},
+	{http.MethodGet, "/api/v1/admin/plugins/p-1/download"},
 	{http.MethodPost, "/api/v1/admin/plugins/import"},
 	{http.MethodPost, "/api/v1/admin/plugins/skill_import"},
 	{http.MethodPost, "/api/v1/admin/plugins/skill_reupload/p-1"},

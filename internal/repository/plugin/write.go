@@ -195,6 +195,24 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 	if topPlugin.Type != before.Type {
 		return nil, ErrInvalidRelation
 	}
+	// P2-1: the service stamped the top's preserved identity and each child's
+	// visibility/Space/owner from an UNLOCKED pre-parse read. Re-derive the
+	// race-sensitive fields from the row locked here (`before`) so a concurrent
+	// visibility/Space/owner change during the multi-second parse cannot be
+	// silently reverted or promoted. The top's owner_uid/space_id are preserved by
+	// omission from its UPDATE, but visibility IS written, so re-stamp it; every
+	// new child is freshly inserted below, so re-stamp all three. Residual: the
+	// top's icon and category still come from the service's unlocked read (they are
+	// content, not identity), so a concurrent icon/category edit can still lose to
+	// this rebuild — acceptable, as the security-sensitive fields are re-derived.
+	topPlugin.Visibility = before.Visibility
+	topPlugin.SpaceID = before.SpaceID
+	topPlugin.OwnerUID = before.OwnerUID
+	for i := range newChildren {
+		newChildren[i].Plugin.Visibility = before.Visibility
+		newChildren[i].Plugin.SpaceID = before.SpaceID
+		newChildren[i].Plugin.OwnerUID = before.OwnerUID
+	}
 	// Phase 1: insert every new child row so later relation-target locks resolve.
 	seen := make(map[string]struct{}, len(newChildren)+1)
 	seen[topPlugin.ID] = struct{}{}
@@ -345,8 +363,18 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	if err = lockPluginCategory(ctx, tx, p.CategoryID, p.Type); err != nil {
 		return nil, err
 	}
-	// A single Update is not a container graph, so no embedded target is exempt.
-	if err = lockRelationTargets(ctx, tx, scope, p.Type, m.Relations, nil); err != nil {
+	// An Update is not a fresh container graph, but a container top (an
+	// expert/team, itself is_embedded=0) legitimately owns edges to its OWN
+	// embedded children (an expert's bundled skills; a squad's member experts).
+	// Resubmitting those live edges on an Update must not trip the embedded-target
+	// adoption guard, so exempt the targets this source ALREADY owns. Adopting a
+	// FOREIGN graph's embedded child (a target not already ours) stays rejected —
+	// a later container reupload would soft-delete it out from under the adopter.
+	owned, err := liveRelationTargetSet(ctx, tx, p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err = lockRelationTargets(ctx, tx, scope, p.Type, m.Relations, owned); err != nil {
 		return nil, err
 	}
 	// getOwnedForUpdate already proved existence under lock; RowsAffected reports
@@ -478,6 +506,27 @@ WHERE source_plugin_id=? AND deleted_at IS NULL`, now, now, topID); err != nil {
 		}
 	}
 	return tx.Commit()
+}
+
+// liveRelationTargetSet returns the set of target plugin IDs the source
+// currently holds live relations to. Update uses it as the embedded-target
+// exemption set (see lockRelationTargets): a source may resubmit an edge to an
+// embedded child it ALREADY owns, but may not adopt a foreign graph's child.
+func liveRelationTargetSet(ctx context.Context, tx *sql.Tx, source string) (map[string]struct{}, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=? AND deleted_at IS NULL`, source)
+	if err != nil {
+		return nil, wrapped("load relation targets", err)
+	}
+	defer rows.Close()
+	set := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		set[id] = struct{}{}
+	}
+	return set, rows.Err()
 }
 
 func rejectLiveIncomingRelations(ctx context.Context, tx *sql.Tx, pluginID string) error {
