@@ -228,7 +228,7 @@ func (r *Repo) CreateGraph(ctx context.Context, scope Scope, nodes []Mutation) (
 	// import records the top's initial version. Embedded children are not flagged.
 	for i := range nodes {
 		if nodes[i].SnapshotVersion {
-			if _, err = snapshotVersion(ctx, tx, r.id, now, nodes[i].Plugin, nodes[i].Relations, nodes[i].Changelog, nodes[i].OperatorID); err != nil {
+			if syncs[i].NewVersionID, err = snapshotVersion(ctx, tx, r.id, now, nodes[i].Plugin, nodes[i].Relations, nodes[i].Changelog, nodes[i].OperatorID); err != nil {
 				return nil, err
 			}
 		}
@@ -397,7 +397,7 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 	// Snapshot the rebuilt top as a new history version (its content was just
 	// swapped) and advance current_version_id/current_version onto it.
 	if top.SnapshotVersion {
-		if _, err = snapshotVersion(ctx, tx, r.id, now, topPlugin, top.Relations, top.Changelog, top.OperatorID); err != nil {
+		if sync.NewVersionID, err = snapshotVersion(ctx, tx, r.id, now, topPlugin, top.Relations, top.Changelog, top.OperatorID); err != nil {
 			return nil, err
 		}
 	}

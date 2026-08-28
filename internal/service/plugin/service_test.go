@@ -158,6 +158,9 @@ func (f *fakeStore) CreateGraph(_ context.Context, s pluginrepo.Scope, nodes []p
 		}
 		f.relations[p.ID] = append([]model.PluginRelation(nil), rels...)
 		syncs[i] = &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: rels}
+		if nodes[i].SnapshotVersion {
+			syncs[i].NewVersionID = "ver-snap"
+		}
 	}
 	return syncs, nil
 }
@@ -214,7 +217,11 @@ func (f *fakeStore) RebuildGraph(_ context.Context, s pluginrepo.Scope, top plug
 		created = append(created, rels[j].ID)
 	}
 	f.relations[tp.ID] = append([]model.PluginRelation(nil), rels...)
-	return &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: rels}, nil
+	sync := &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: rels}
+	if top.SnapshotVersion {
+		sync.NewVersionID = "ver-snap"
+	}
+	return sync, nil
 }
 
 // collectEmbeddedChildren mirrors the repository's in-tx collectEmbeddedChildren:

@@ -170,7 +170,38 @@ func TestAdminUpdateAppliesSubmittedVersion(t *testing.T) {
 	}
 }
 
-// TestAdminUpdateRejectsTypeChange guards against reclassifying a plugin's type
+// TestAdminCreateStampsNewCurrentVersionID is the N2-residual regression: a
+// snapshotting admin create must return the new plugin_versions id on the
+// response plugin (it advanced current_version_id in the DB), not a nil pointer
+// that a follow-up GET contradicts.
+func TestAdminCreateStampsNewCurrentVersionID(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{}}
+	detail, err := fixedService(f).AdminCreate(context.Background(), adminCaller, adminSkillRequest())
+	if err != nil {
+		t.Fatalf("AdminCreate: %v", err)
+	}
+	if detail.Plugin.CurrentVersionID == nil || *detail.Plugin.CurrentVersionID != "ver-snap" {
+		t.Fatalf("admin create response current_version_id = %v, want ver-snap", detail.Plugin.CurrentVersionID)
+	}
+}
+
+// TestAdminUpdateStampsNewCurrentVersionID is the N2-residual regression on the
+// admin edit path: an admin edit snapshots a new version, so the response must
+// carry the NEW id, not the stale stored one.
+func TestAdminUpdateStampsNewCurrentVersionID(t *testing.T) {
+	space := adminGlobalSpace
+	oldVerID := "ver-old"
+	existing := &model.Plugin{ID: "skill-1", Name: "Ops Skill", Type: model.PluginTypeSkill, SpaceID: &space, Visibility: model.PluginVisibilitySystem, CurrentVersionID: &oldVerID, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	f := &fakeStore{plugins: map[string]*model.Plugin{"skill-1": existing}}
+	detail, err := fixedService(f).AdminUpdate(context.Background(), adminCaller, "skill-1", adminSkillRequest())
+	if err != nil {
+		t.Fatalf("AdminUpdate: %v", err)
+	}
+	if detail.Plugin.CurrentVersionID == nil || *detail.Plugin.CurrentVersionID != "ver-snap" {
+		t.Fatalf("admin update response current_version_id = %v, want the new ver-snap (not stale %q)", detail.Plugin.CurrentVersionID, oldVerID)
+	}
+}
+
 // through the admin update path.
 func TestAdminUpdateRejectsTypeChange(t *testing.T) {
 	space := adminGlobalSpace

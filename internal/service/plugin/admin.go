@@ -184,6 +184,9 @@ func (s *Service) AdminCreate(ctx context.Context, caller Caller, req WriteReque
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
+	if sync != nil && sync.NewVersionID != "" {
+		p.CurrentVersionID = &sync.NewVersionID
+	}
 	return &Detail{Plugin: p, Relations: rels, RelationResult: relationResult(sync)}, nil
 }
 
@@ -253,6 +256,12 @@ func (s *Service) AdminUpdate(ctx context.Context, caller Caller, pluginID strin
 	sync, err := s.repo.Update(ctx, adminScope(caller), m)
 	if err != nil {
 		return nil, mapStoreError(err)
+	}
+	// The snapshot advanced current_version_id; stamp the new row id onto the
+	// response so it agrees with the DB (a follow-up GET must not contradict it),
+	// mirroring the tenant update path.
+	if sync != nil && sync.NewVersionID != "" {
+		p.CurrentVersionID = &sync.NewVersionID
 	}
 	return &Detail{Plugin: p, Relations: rels, RelationResult: relationResult(sync)}, nil
 }

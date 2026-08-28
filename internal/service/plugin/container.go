@@ -601,6 +601,13 @@ func validateGraphRelations(sourceType model.PluginType, rels []model.PluginRela
 
 func (s *Service) topLevelDetail(ctx context.Context, p *model.Plugin, sync *pluginrepo.RelationSync) *Detail {
 	p.IconURL = s.resolveIcon(ctx, p.Icon)
+	// The container write snapshotted the top node and advanced its
+	// current_version_id; stamp the new row id onto the response so it agrees
+	// with the DB (a follow-up GET must not contradict it), mirroring the tenant
+	// and admin single-plugin paths.
+	if sync != nil && sync.NewVersionID != "" {
+		p.CurrentVersionID = &sync.NewVersionID
+	}
 	rels := []model.PluginRelation{}
 	if sync != nil && sync.Relations != nil {
 		rels = sync.Relations
