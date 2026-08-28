@@ -20,10 +20,11 @@ type Mutation struct {
 	RequestID    string
 	Remark       *string
 	// SnapshotVersion, when set, appends one immutable plugin_versions row for this
-	// Plugin inside the write transaction and advances current_version_id to it, so
-	// every save (create / edit / container reupload) records a full version
-	// snapshot. Only top-level nodes set it; embedded children version with their
-	// container. Changelog is the optional note stored on that snapshot.
+	// Plugin inside the write transaction, so every save (create / edit / container
+	// reupload) records a full version snapshot for history. It does NOT advance the
+	// plugin's current_version pointer. Only top-level nodes set it; embedded
+	// children version with their container. Changelog is the optional note stored
+	// on that snapshot.
 	SnapshotVersion bool
 	Changelog       *string
 }
@@ -111,14 +112,17 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.T
 }
 
 // snapshotVersion appends one immutable plugin_versions row capturing p's current
-// content plus the given relation set, then advances the plugin row's
-// current_version_id/current_version to it. The version label is a per-plugin
+// content plus the given relation set. It records history ONLY: the plugin row's
+// current_version_id/current_version pointer is deliberately left untouched by the
+// write path for now, so a save never advances the "current version" label (a
+// fresh create therefore keeps an empty current_version until that pointer is
+// managed elsewhere). The version label on the history row is a per-plugin
 // auto-increment sequence computed under the transaction — for Update the plugin
 // row is already FOR UPDATE-locked, and a fresh Create has no prior snapshot, so
-// the COUNT is race-free. relations is marshaled in the same shape as Publish
-// (a []model.PluginRelation), and nil becomes an empty JSON array to satisfy the
-// relations_json ARRAY check. attachment_keys_json mirrors the current row's
-// storage-attachment sidecar. Callers hold the transaction.
+// the COUNT is race-free. relations is marshaled as a []model.PluginRelation, and
+// nil becomes an empty JSON array to satisfy the relations_json ARRAY check.
+// attachment_keys_json mirrors the current row's storage-attachment sidecar.
+// Callers hold the transaction.
 func snapshotVersion(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, p model.Plugin, relations []model.PluginRelation, changelog *string, createdBy string) error {
 	var count int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_versions WHERE plugin_id=?`, p.ID).Scan(&count); err != nil {
@@ -136,9 +140,6 @@ func snapshotVersion(ctx context.Context, tx *sql.Tx, newID func() string, now i
 	if _, err := tx.ExecContext(ctx, `INSERT INTO plugin_versions (version_id,plugin_id,version,manifest_json,plugin_json,attachment_keys_json,manifest_hash,plugin_hash,relations_json,changelog,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		versionID, p.ID, seq, string(p.Manifest), string(p.Package), jsonColumn(p.AttachmentKeys), p.ManifestHash, p.PluginHash, string(relationJSON), changelog, createdBy, now); err != nil {
 		return wrapped("snapshot version", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE plugins SET current_version_id=?,current_version=?,updated_at=? WHERE plugin_id=? AND deleted_at IS NULL`, versionID, seq, now, p.ID); err != nil {
-		return wrapped("advance current version", err)
 	}
 	return nil
 }
@@ -379,8 +380,8 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 			return nil, err
 		}
 	}
-	// Snapshot the rebuilt top as a new version (its content was just swapped),
-	// advancing current_version_id off the preserved old pointer.
+	// Snapshot the rebuilt top as a new history version (its content was just
+	// swapped); the current_version pointer is left untouched.
 	if top.SnapshotVersion {
 		if err = snapshotVersion(ctx, tx, r.id, now, topPlugin, top.Relations, top.Changelog, top.OperatorID); err != nil {
 			return nil, err
