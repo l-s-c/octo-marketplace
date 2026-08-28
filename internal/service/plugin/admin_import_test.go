@@ -98,6 +98,10 @@ func TestAdminImportCreatesPublicGlobalSkillWithPlacement(t *testing.T) {
 	if created.CategoryID == nil || *created.CategoryID != category {
 		t.Fatalf("category = %v, want %q threaded through", created.CategoryID, category)
 	}
+	// The create stamps a current_version label (a save is a version).
+	if created.CurrentVersion == nil || *created.CurrentVersion != "1.0.0" {
+		t.Fatalf("create current_version = %v, want 1.0.0", created.CurrentVersion)
+	}
 	// The reserved package ID is the persisted row ID.
 	if created.ID != "plugin-admin" || detail.Plugin.ID != "plugin-admin" {
 		t.Fatalf("id = %q / %q, want reserved plugin-admin", created.ID, detail.Plugin.ID)

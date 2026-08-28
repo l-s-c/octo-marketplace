@@ -158,6 +158,9 @@ func (s *Service) adminImportConsumedTask(ctx context.Context, caller Caller, ta
 		return nil, err
 	}
 	p.CreatedAt = oldPlugin.CreatedAt
+	// Seed current_version_id from the old row so a no-op reupload (deduped
+	// snapshot) still returns a valid pointer; a real snapshot overrides it below.
+	p.CurrentVersionID = oldPlugin.CurrentVersionID
 	// Keep the stored version label only when the reupload omits a version; a
 	// submitted version is applied (buildWrite set it), mirroring AdminUpdate.
 	if strings.TrimSpace(req.Version) == "" {

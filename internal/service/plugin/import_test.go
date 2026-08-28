@@ -160,6 +160,12 @@ func TestImportCreatesSkillPluginAndAttachesDefaultPlacement(t *testing.T) {
 	if string(created.Tags) != `["deploy"]` {
 		t.Fatalf("tags = %s", created.Tags)
 	}
+	// Create stamps the resolved package version (the parse task's 2.0.0), NOT the
+	// "1.0.0" default — the row's current_version must match the version baked into
+	// the shipped SKILL.md.
+	if created.CurrentVersion == nil || *created.CurrentVersion != "2.0.0" {
+		t.Fatalf("create current_version = %v, want the package version 2.0.0", created.CurrentVersion)
+	}
 	pkg := string(created.Package)
 	if !strings.Contains(pkg, `"SKILL.md"`) || !strings.Contains(pkg, "# Uploaded Skill") {
 		t.Fatalf("package missing inline SKILL.md: %s", pkg)

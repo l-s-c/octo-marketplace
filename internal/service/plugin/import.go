@@ -289,7 +289,7 @@ func (s *Service) buildImportedSkillWrite(ctx context.Context, objectSpace, rese
 	if err != nil {
 		return nil, "", nil, err
 	}
-	req, err := buildImportWriteRequest(f, attachments)
+	req, err := buildImportWriteRequest(f, attachments, reservedID != "")
 	if err != nil {
 		s.deleteObjects(ctx, uploaded...)
 		return nil, "", nil, err
@@ -341,7 +341,7 @@ func (s *Service) readVerifiedUpload(ctx context.Context, task *skillrepo.ParseT
 	return data, nil
 }
 
-func buildImportWriteRequest(f *importFields, attachments []map[string]any) (*WriteRequest, error) {
+func buildImportWriteRequest(f *importFields, attachments []map[string]any, isUpdate bool) (*WriteRequest, error) {
 	tagsJSON, err := canonicalJSONValue(nonNilTags(f.tags))
 	if err != nil {
 		return nil, ErrInvalidRequest
@@ -367,12 +367,15 @@ func buildImportWriteRequest(f *importFields, attachments []map[string]any) (*Wr
 	if err != nil {
 		return nil, ErrInvalidRequest
 	}
-	// Carry the submitted version through so buildWrite stamps it onto
-	// current_version; when the caller omitted a version we leave it empty so the
-	// create defaults to "1.0.0" and the reupload keeps the row's existing label.
-	version := ""
-	if f.versionSubmitted {
-		version = f.version
+	// Version selection is operation-aware: a CREATE stamps the resolved version
+	// (submitted → parsed package version → "1.0.0"), so the row's current_version
+	// matches the version baked into the shipped SKILL.md. An UPDATE stamps the
+	// version only when the caller explicitly submitted one, leaving it empty
+	// otherwise so Service.update keeps the row's existing label instead of
+	// resetting a reupload to the package version or "1.0.0".
+	version := f.version
+	if isUpdate && !f.versionSubmitted {
+		version = ""
 	}
 	return &WriteRequest{
 		Name:       f.pluginName,
