@@ -237,6 +237,27 @@ func TestImportReuploadPreservesIconWhenOmitted(t *testing.T) {
 // by its container graph — returns ErrNotFound even for the owner, so it can only
 // be swapped through a container reupload. The parse task is never consumed (the
 // guard fires before mutation), so the upload stays retryable.
+// TestImportReuploadKeepsStoredVersionWhenOmitted is the version-reset
+// regression: a package-only tenant reupload that sends no version must keep the
+// row's stored current_version label, not reset it to the package version or the
+// "1.0.0" default. (versionSubmitted must reach Service.update; it was previously
+// defeated by an unconditional req.Version override.)
+func TestImportReuploadKeepsStoredVersionWhenOmitted(t *testing.T) {
+	store, _, _, svc := importFixtures(t)
+	space := "space-a"
+	ver := "2.4.0"
+	existing := &model.Plugin{ID: "skill-1", Name: "Existing", Type: model.PluginTypeSkill, OwnerUID: "user-1", SpaceID: &space, Visibility: model.PluginVisibilitySpace, CurrentVersion: &ver, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{"attachments":[]}`)}
+	store.plugins["skill-1"] = existing
+
+	// No Version in the request — the stored 2.4.0 label must survive.
+	if _, err := svc.Import(context.Background(), testCaller, ImportParams{ParseTaskID: "task-1", PluginID: "skill-1"}); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if store.update == nil || store.update.CurrentVersion == nil || *store.update.CurrentVersion != ver {
+		t.Fatalf("stored version label not preserved on omitted-version reupload: %#v", store.update)
+	}
+}
+
 func TestImportReuploadRejectsEmbeddedChild(t *testing.T) {
 	store, _, tasks, svc := importFixtures(t)
 	space := "space-a"

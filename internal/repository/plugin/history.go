@@ -24,7 +24,11 @@ func (r *Repo) ListVersions(ctx context.Context, scope Scope, pluginID string, l
 	if limit > 100 {
 		limit = 100
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT v.version_id,v.plugin_id,v.version,v.manifest_json,v.plugin_json,v.attachment_keys_json,v.manifest_hash,v.plugin_hash,v.relations_json,v.changelog,v.created_by,v.created_at
+	// Project metadata columns only: the versions LIST redacts manifest/package to
+	// keep intermediate/rolled-back content out of the response, so materializing
+	// those (up to 1 MiB each × the page) server-side just to discard them would
+	// compound the row count into hundreds of MB per request.
+	rows, err := r.db.QueryContext(ctx, `SELECT v.version_id,v.plugin_id,v.version,v.manifest_hash,v.plugin_hash,v.relations_json,v.changelog,v.created_by,v.created_at
 FROM plugin_versions v JOIN plugins p ON p.plugin_id=v.plugin_id WHERE v.plugin_id=? AND p.status=1 AND p.deleted_at IS NULL AND `+visibilitySQL+` ORDER BY v.created_at DESC,v.version_id DESC LIMIT ? OFFSET ?`, pluginID, scope.SpaceID, scope.CallerUID, limit, max(offset, 0))
 	if err != nil {
 		return nil, 0, err
@@ -133,14 +137,13 @@ func (r *Repo) visibleTargetIDs(ctx context.Context, scope Scope, ids map[string
 
 func scanPluginVersion(s interface{ Scan(...any) error }) (*model.PluginVersion, error) {
 	var v model.PluginVersion
-	var manifest, pkg, attachKeys, rels []byte
+	var rels []byte
 	var changelog sql.NullString
-	if err := s.Scan(&v.ID, &v.PluginID, &v.Version, &manifest, &pkg, &attachKeys, &v.ManifestHash, &v.PluginHash, &rels, &changelog, &v.CreatedBy, &v.CreatedAt); err != nil {
+	// Metadata projection only — manifest/package/sidecar are intentionally not
+	// selected (see ListVersions); the DTO redacts them.
+	if err := s.Scan(&v.ID, &v.PluginID, &v.Version, &v.ManifestHash, &v.PluginHash, &rels, &changelog, &v.CreatedBy, &v.CreatedAt); err != nil {
 		return nil, err
 	}
-	v.Manifest = cloneJSON(manifest)
-	v.Package = cloneJSON(pkg)
-	v.AttachmentKeys = cloneJSON(attachKeys)
 	v.Relations = cloneJSON(rels)
 	v.Changelog = nullString(changelog)
 	return &v, nil

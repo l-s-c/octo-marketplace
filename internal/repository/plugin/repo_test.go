@@ -176,19 +176,61 @@ func TestUpdateSnapshotsIncrementingVersion(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugin_versions WHERE plugin_id=\?`).
 		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
 	mock.ExpectExec(`INSERT INTO plugin_versions`).
-		WithArgs("version-id", "plugin-id", "3", "{}", "{}", nil, "sha256:m", "sha256:p", "[]", nil, "caller", now).
+		WithArgs("version-id", "plugin-id", "3", "{}", "{}", nil, "sha256:m2", "sha256:p2", "[]", nil, "caller", now).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`UPDATE plugins SET current_version_id=\?,current_version=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).
 		WithArgs("version-id", "1.0.0", now, "plugin-id").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 	_, err := r.Update(context.Background(), scope, Mutation{
+		Plugin:          model.Plugin{ID: "plugin-id", Type: model.PluginTypeExpert, Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m2", PluginHash: "sha256:p2", Status: 1},
+		OperatorID:      "caller",
+		SnapshotVersion: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateSkipsSnapshotWhenContentUnchanged locks the anti-bloat guard: a
+// SnapshotVersion update whose manifest/plugin hashes both match the row under
+// lock writes NO plugin_versions row (and no current_version pointer bump), so a
+// client cannot append unbounded identical version rows by resubmitting the same
+// body. The plugins UPDATE + audit still run.
+func TestUpdateSkipsSnapshotWhenContentUnchanged(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	r.id = func() string { return "audit-id" }
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("plugin-id", scope.CallerUID, scope.SpaceID).WillReturnRows(ownedPluginRow("plugin-id", scope, now))
+	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}))
+	mock.ExpectExec(`UPDATE plugins SET plugin_name=`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}))
+	// No COUNT / INSERT plugin_versions / current_version UPDATE — the content is
+	// byte-identical to the locked row, so the snapshot is skipped.
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	sync, err := r.Update(context.Background(), scope, Mutation{
 		Plugin:          model.Plugin{ID: "plugin-id", Type: model.PluginTypeExpert, Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p", Status: 1},
 		OperatorID:      "caller",
 		SnapshotVersion: true,
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if sync.NewVersionID != "" {
+		t.Fatalf("no-op update recorded a new version id %q — content was unchanged", sync.NewVersionID)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

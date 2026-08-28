@@ -223,7 +223,11 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 		return nil, err
 	}
 	req.Changelog = f.changelog
-	req.Version = f.version
+	// req.Version is already set by buildImportWriteRequest to the submitted
+	// version (empty when the caller omitted one) — do NOT force it to f.version
+	// here: f.version always falls back to the package version or "1.0.0", which
+	// would reset a reupload's stored label instead of letting Service.update keep
+	// it. versionSubmitted gates this, mirroring the admin import twin.
 	var detail *Detail
 	if updateID == "" {
 		// Persist under the reserved ID so the shipped SKILL.md frontmatter, the

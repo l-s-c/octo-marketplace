@@ -512,7 +512,13 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	if err != nil {
 		return nil, err
 	}
-	if m.SnapshotVersion {
+	// A save is a version — but a save that changes nothing is not. Skip the
+	// snapshot when the content is byte-identical to the row under lock (both
+	// hashes match `before`), so a client cannot append an unbounded run of
+	// identical full-document version rows by resubmitting the same body. On a
+	// no-op the caller keeps its existing current_version_id (the service seeds it
+	// from the old row and only overrides it when a new snapshot is written).
+	if m.SnapshotVersion && (p.PluginHash != before.PluginHash || p.ManifestHash != before.ManifestHash) {
 		if sync.NewVersionID, err = snapshotVersion(ctx, tx, r.id, now, p, m.Relations, m.Changelog, m.OperatorID); err != nil {
 			return nil, err
 		}

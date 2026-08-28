@@ -25,7 +25,7 @@ func TestListVersionsReturnsExactScopedTotalForEmptyPage(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(42))
 	mock.ExpectQuery(`SELECT v.version_id.*WHERE v.plugin_id=\? AND p.status=1.*p.space_id = \?.*p.owner_uid = \?.*LIMIT \? OFFSET \?`).
 		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID, 20, 40).
-		WillReturnRows(sqlmock.NewRows([]string{"version_id", "plugin_id", "version", "manifest_json", "plugin_json", "attachment_keys_json", "manifest_hash", "plugin_hash", "relations_json", "changelog", "created_by", "created_at"}))
+		WillReturnRows(sqlmock.NewRows([]string{"version_id", "plugin_id", "version", "manifest_hash", "plugin_hash", "relations_json", "changelog", "created_by", "created_at"}))
 
 	items, total, err := r.ListVersions(context.Background(), scope, "plugin-id", 20, 40)
 	if err != nil || len(items) != 0 || total != 42 {
@@ -53,8 +53,8 @@ func TestListVersionsRedactsCrossSpaceRelationTargets(t *testing.T) {
 	relJSON := `[{"target_plugin_id":"vis-target","relation_type":"expert_skill"},{"target_plugin_id":"priv-target","relation_type":"expert_skill","data":{"secret":"x"}}]`
 	mock.ExpectQuery(`SELECT v.version_id.*WHERE v.plugin_id=\? AND p.status=1.*p.space_id = \?.*p.owner_uid = \?.*LIMIT \? OFFSET \?`).
 		WithArgs("plugin-id", scope.SpaceID, scope.CallerUID, 20, 0).
-		WillReturnRows(sqlmock.NewRows([]string{"version_id", "plugin_id", "version", "manifest_json", "plugin_json", "attachment_keys_json", "manifest_hash", "plugin_hash", "relations_json", "changelog", "created_by", "created_at"}).
-			AddRow("v1", "plugin-id", "1.0.0", "{}", "{}", nil, "mh", "ph", relJSON, nil, "creator", now))
+		WillReturnRows(sqlmock.NewRows([]string{"version_id", "plugin_id", "version", "manifest_hash", "plugin_hash", "relations_json", "changelog", "created_by", "created_at"}).
+			AddRow("v1", "plugin-id", "1.0.0", "mh", "ph", relJSON, nil, "creator", now))
 	// The visibility re-check returns only the visible target (args order is
 	// map-iteration dependent, so match the query shape, not the args). The
 	// aliased `plugins p` table is load-bearing: visibilitySQL references p.*,
