@@ -1,11 +1,10 @@
 # oasdiff auto-discovers this config. `make openapi-diff` (and a bare
 # `oasdiff breaking` run from the repo root) reads err-ignore from here.
 #
-# The unified-plugin migration (#72) retires the legacy per-type admin surface
-# (skills / mcps / experts / squads / *_categories / expert_tags) wholesale and
-# replaces it with the unified /plugins + /admin/plugins surface. That is an
-# intentional, coordinated breaking change, disclosed in the PR description and
-# shipped lockstep with the octo-web / octo-admin clients — so its path removals
-# are listed as a documented exception in breaking-ignore.txt. Any path removal
-# NOT enumerated there still fails the breaking-change gate.
+# The unified-plugin migration (#72) retires POST /plugins/publish — a save is
+# now a version, so the explicit publish step is gone. That is an intentional,
+# coordinated breaking change, disclosed in the PR description and shipped
+# lockstep with the octo-web / octo-admin clients, so it is listed as a
+# documented exception in breaking-ignore.txt. Any path removal NOT enumerated
+# there still fails the breaking-change gate.
 err-ignore: docs/openapi/breaking-ignore.txt
