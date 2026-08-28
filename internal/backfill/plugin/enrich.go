@@ -185,6 +185,23 @@ func (r *Runner) enrichConnectorCategories(ctx context.Context, p *enrichPlan) e
 				query: `INSERT INTO plugin_categories(category_id,name,icon_key,plugin_types_json,sort_order,status,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?)`,
 				args:  []any{catID, connectorCategoryName(key), "", `["connector"]`, order, enrichStamp, enrichStamp},
 			})
+		} else if name := connectorCategoryName(key); name != key {
+			// The category already exists — likely enriched by an earlier run that
+			// stored the raw slug as the name (before localization). Sync a stale
+			// raw-slug name to the localized one; scoping the UPDATE to name=key keeps
+			// it idempotent (a row already carrying the localized name is skipped) and
+			// never clobbers an operator-renamed category.
+			stale, err := r.rowExists(ctx, `SELECT COUNT(*) FROM plugin_categories WHERE category_id=? AND name=?`, catID, key)
+			if err != nil {
+				return err
+			}
+			if stale {
+				p.actions = append(p.actions, enrichAction{
+					count: func(c *EnrichCounts) *int { return &c.ConnectorCategories },
+					query: `UPDATE plugin_categories SET name=?,updated_at=? WHERE category_id=? AND name=?`,
+					args:  []any{name, enrichStamp, catID, key},
+				})
+			}
 		}
 		cpID := DeterministicID("category_placement", "default#connector#"+catID)
 		exists, err = r.rowExists(ctx, `SELECT COUNT(*) FROM plugin_category_placements WHERE placement_id=?`, cpID)

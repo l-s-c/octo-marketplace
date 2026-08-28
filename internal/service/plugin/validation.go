@@ -19,14 +19,14 @@ import (
 )
 
 const (
-	maxJSONBytes  = 1 << 20 // current-state and snapshot JSON are metadata, not artifacts
-	maxNameBytes  = 160
-	maxTags       = 100
-	maxTagBytes   = 128
-	maxRelations  = 200
-	maxListLimit  = 100
-	maxListTags   = 20 // bound on AND-combined tag filters per list query
-	maxIconBytes  = 512
+	maxJSONBytes = 1 << 20 // current-state and snapshot JSON are metadata, not artifacts
+	maxNameBytes = 160
+	maxTags      = 100
+	maxTagBytes  = 128
+	maxRelations = 200
+	maxListLimit = 100
+	maxListTags  = 20 // bound on AND-combined tag filters per list query
+	maxIconBytes = 512
 )
 
 // defaultCurrentVersion is the current-version label stamped on a write that
