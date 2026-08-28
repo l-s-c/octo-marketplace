@@ -194,8 +194,8 @@ func TestUpdateSnapshotsIncrementingVersion(t *testing.T) {
 	}
 }
 
-// TestCreateSkipsSnapshotWhenNotFlagged locks that the import-driven create (which
-// defers to a following Publish) writes no plugin_versions row.
+// TestCreateSkipsSnapshotWhenNotFlagged locks that a create with SnapshotVersion
+// unset writes no plugin_versions row.
 func TestCreateSkipsSnapshotWhenNotFlagged(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()

@@ -57,6 +57,9 @@ func TestSweepLiveRowsAgainstLibContract(t *testing.T) {
 			}
 		}
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("row iteration failed after %d rows (partial sweep is not a pass): %v", total, err)
+	}
 	t.Logf("validated %d live rows against octo-plugin-lib", total)
 }
 

@@ -324,10 +324,24 @@ func (r *Runner) expandAudits(ctx context.Context, exp SkillExpander, apply bool
 			oldAfter = *w.afterHash
 		}
 		expandable := len(w.pkg) > 0 && hasLegacyPointer(w.pkg)
+		// A skill/package.zip snapshot's real files live in a managed object
+		// resolved via the sidecar key, but audit rows carry no sidecar and
+		// repackage already stripped the inline storage_uri — ExpandSkillPackage
+		// would then collapse this immutable snapshot to a SKILL.md stub
+		// (irreversible truncation). Skip it fail-closed; the skill/ref.json layout
+		// (inline pointer) still expands normally.
+		zipUnresolvable := expandable && hasStorageZipPointer(w.pkg)
 		if !apply {
-			if expandable {
+			if zipUnresolvable {
+				p.issues = append(p.issues, Issue{"skip", "audit_zip_unresolvable", "plugin_audit_logs", w.id, "skill/package.zip snapshot has no resolvable key; left unexpanded to avoid truncating the audit record"})
+			} else if expandable {
 				p.actions = append(p.actions, expandAction{count: func(c *ExpandCounts) *int { return &c.Audits }})
 			}
+			continue
+		}
+		if zipUnresolvable {
+			p.issues = append(p.issues, Issue{"skip", "audit_zip_unresolvable", "plugin_audit_logs", w.id, "skill/package.zip snapshot has no resolvable key; left unexpanded to avoid truncating the audit record"})
+			lastHash[w.pluginID] = oldAfter
 			continue
 		}
 		newPkg, changed := w.pkg, false
@@ -414,6 +428,27 @@ func hasLegacyPointer(pkg []byte) bool {
 	}
 	for _, a := range doc.Attachments {
 		if a.Path == "skill/ref.json" || a.Path == "skill/package.zip" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasStorageZipPointer reports whether the package carries a skill/package.zip
+// attachment — the legacy layout whose real files live in a managed object
+// resolved through the sidecar key. Unlike the skill/ref.json layout (inline
+// pointer), a package.zip snapshot cannot be expanded without a resolvable key.
+func hasStorageZipPointer(pkg []byte) bool {
+	var doc struct {
+		Attachments []struct {
+			Path string `json:"path"`
+		} `json:"attachments"`
+	}
+	if json.Unmarshal(pkg, &doc) != nil {
+		return false
+	}
+	for _, a := range doc.Attachments {
+		if a.Path == "skill/package.zip" {
 			return true
 		}
 	}

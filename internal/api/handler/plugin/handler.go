@@ -415,7 +415,7 @@ func (h *Handler) Delete(c *gin.Context) {
 
 // ListVersions godoc
 // @Summary List plugin versions
-// @Description List immutable published versions of a visible Plugin using offset pagination.
+// @Description List a visible Plugin's version history (one immutable snapshot per save, newest first) using offset pagination.
 // @Tags plugin
 // @ID plugin.version.list
 // @Accept json

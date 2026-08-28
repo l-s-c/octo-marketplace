@@ -5592,8 +5592,8 @@ paths:
       - plugin
   /plugins/versions:
     get:
-      description: List immutable published versions of a visible Plugin using offset
-        pagination.
+      description: List a visible Plugin's version history (one immutable snapshot
+        per save, newest first) using offset pagination.
       operationId: plugin.version.list
       parameters:
       - description: Plugin ID

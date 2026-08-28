@@ -861,11 +861,11 @@ func insertRelationRow(ctx context.Context, tx *sql.Tx, now interface{}, source,
 	return nil
 }
 
-// insertPlacements writes the current-state placements a create attaches. Unlike
-// Publish (which registers categories against plugin_category_placements before
-// inserting), the admin auto-placement is intentional and must not fail on an
-// unregistered category — a plain visible placement is enough to surface the
-// plugin in the market list. Tenant callers pass no placements (nil → no-op).
+// insertPlacements writes the current-state placements a create attaches. The
+// auto-placement (tenant and admin create both pass one default visible
+// placement) is intentional and must not fail on an unregistered category — a
+// plain visible placement is enough to surface the plugin in the market list. A
+// caller passing no placements (nil) is a no-op.
 func insertPlacements(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, pluginID string, placements []model.PluginPlacement) error {
 	for _, x := range placements {
 		id := x.ID
