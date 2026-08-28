@@ -374,6 +374,39 @@ func TestExpandSkillPackagePrefersRefObjectOverStub(t *testing.T) {
 	}
 }
 
+// TestWouldTruncateFailsClosedOnUnresolvedZip drives the real guard (not the
+// stub): a skill/package.zip pointer with no resolvable key, alongside a
+// resolvable ref.json object_key, would be expanded to a SKILL.md stub that
+// drops the archive's files. The guard must report truncation despite the
+// resolvable object key (which only supplies the stub's SKILL.md body).
+func TestWouldTruncateFailsClosedOnUnresolvedZip(t *testing.T) {
+	space := "space-a"
+	pkg := json.RawMessage(`{"$schema":"` + packageSchema + `","attachments":[` +
+		`{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# stub"},` +
+		`{"path":"skill/package.zip","content_type":"storage","mime_type":"application/zip","content_size":10,"content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},` +
+		`{"path":"skill/ref.json","content_type":"raw","mime_type":"application/json","raw_content":"{\"object_key\":\"skills/x/SKILL.md\"}"}` +
+		`]}`)
+	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{}})
+	if !svc.WouldTruncateSkillPackage(space, "plug-t1", pkg, nil) {
+		t.Fatal("guard green-lit a row whose unresolved zip would be truncated to a SKILL.md stub")
+	}
+}
+
+// TestWouldTruncateAllowsResolvableObjectWithoutZip locks the other side: a
+// snapshot skill with only a resolvable ref.json object_key and NO zip pointer
+// loses nothing (its SKILL.md is the object), so the guard must NOT flag it.
+func TestWouldTruncateAllowsResolvableObjectWithoutZip(t *testing.T) {
+	space := "space-a"
+	pkg := json.RawMessage(`{"$schema":"` + packageSchema + `","attachments":[` +
+		`{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# stub"},` +
+		`{"path":"skill/ref.json","content_type":"raw","mime_type":"application/json","raw_content":"{\"object_key\":\"skills/x/SKILL.md\"}"}` +
+		`]}`)
+	svc := New(&fakeStore{}, &importStorage{objects: map[string][]byte{"skills/x/SKILL.md": []byte("# Real")}})
+	if svc.WouldTruncateSkillPackage(space, "plug-t2", pkg, nil) {
+		t.Fatal("guard flagged a no-zip snapshot whose object resolves — nothing is lost")
+	}
+}
+
 func TestExpandSkillPackageTreeUnchanged(t *testing.T) {
 	space := "space-a"
 	// Already a tree (no legacy pointer): unchanged.

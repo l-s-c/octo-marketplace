@@ -362,15 +362,23 @@ func (s *Service) WouldTruncateSkillPackage(spaceID, pluginID string, pkg, keys 
 	p := &model.Plugin{Name: pluginID, SpaceID: &spaceID, Package: pkg, AttachmentKeys: keys}
 	ref := s.skillRef(p)
 	if _, ok := s.migrationZipKey(p, ref); ok {
-		return false // the managed zip resolves — the real files expand
+		return false // the managed zip resolves — buildSkillAttachmentTree expands the real files
+	}
+	// The zip pointer did NOT resolve. If there WAS one (a package.zip attachment
+	// or a ref zip key), ExpandSkillPackage takes the SKILL.md-stub else-branch and
+	// drops the archive's other files — so fail closed BEFORE the ObjectKey
+	// shortcut. A resolvable ref.json ObjectKey only supplies the stub's SKILL.md
+	// body; it does NOT recover the lost zip files, so it must not green-light the
+	// row.
+	if hasZipAttachment || ref.zipKey() != "" {
+		return true
 	}
 	if migrationArtifactKey(ref.ObjectKey, p.SpaceID) {
-		return false // the referenced object resolves — the real SKILL.md expands
+		return false // no zip to lose; the referenced object is the authoritative SKILL.md
 	}
-	// Neither pointer resolves: this truncates only if there WAS a real pointer to
-	// lose (a package.zip attachment, or a ref carrying an object/zip key). A pure
-	// inline snapshot has nothing to lose and expands to the same inline SKILL.md.
-	return hasZipAttachment || ref.ObjectKey != "" || ref.zipKey() != ""
+	// No zip and no resolvable object: a non-empty (untrusted/unresolvable) object
+	// pointer would be lost to an inline stub; a pure inline snapshot loses nothing.
+	return ref.ObjectKey != ""
 }
 
 // getObjectBytes reads an object fully, capped at limit bytes.
