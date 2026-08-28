@@ -12,9 +12,13 @@ import (
 )
 
 func TestSweepLiveRowsAgainstLibContract(t *testing.T) {
-	dsn := os.Getenv("MYSQL_DSN")
+	// Gate on TEST_MYSQL_DSN (the repo's test convention, set by CI) rather than
+	// MYSQL_DSN — MYSQL_DSN is the PRODUCTION variable read by marketplace-api and
+	// plugin-backfill, so gating on it both skips this sweep on every CI run and
+	// risks `go test ./...` on an operator shell connecting to production.
+	dsn := os.Getenv("TEST_MYSQL_DSN")
 	if dsn == "" {
-		t.Skip("MYSQL_DSN not set")
+		t.Skip("TEST_MYSQL_DSN not set")
 	}
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
