@@ -366,10 +366,8 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 `+updWhere, updArgs...); err != nil {
 		return nil, wrapped("rebuild", err)
 	}
-	if topPlugin.CategoryID != nil {
-		if _, err = tx.ExecContext(ctx, `UPDATE plugin_placements SET category_id=?,updated_at=? WHERE plugin_id=?`, topPlugin.CategoryID, now, topPlugin.ID); err != nil {
-			return nil, wrapped("rebuild placements", err)
-		}
+	if _, err = tx.ExecContext(ctx, `UPDATE plugin_placements SET category_id=?,updated_at=? WHERE plugin_id=?`, topPlugin.CategoryID, now, topPlugin.ID); err != nil {
+		return nil, wrapped("rebuild placements", err)
 	}
 	// Phase 4: resync the top plugin's relations to the new children. Every new
 	// edge carries an empty ID so syncRelations inserts it and soft-deletes the
@@ -492,15 +490,15 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 		return nil, wrapped("update", err)
 	}
 	// Placements filter list pages by their own category copy; keep it in sync
-	// with the current-state category so an updated Plugin doesn't keep
-	// filtering under its old category until the next publish. A nil category
-	// on the update leaves placement categories alone — publish owns clearing
-	// per-placement configuration.
-	if p.CategoryID != nil {
-		_, err = tx.ExecContext(ctx, `UPDATE plugin_placements SET category_id=?,updated_at=? WHERE plugin_id=?`, p.CategoryID, now, p.ID)
-		if err != nil {
-			return nil, wrapped("update placements", err)
-		}
+	// with the current-state category on every update — including clearing it to
+	// NULL when the plugin's category is cleared — so the scene-scoped market
+	// never keeps filtering a plugin under a category it no longer has. (With
+	// publish removed, the update owns placement category configuration; the
+	// plugins row's own category_id is written unconditionally just above, so the
+	// placement simply tracks it.)
+	_, err = tx.ExecContext(ctx, `UPDATE plugin_placements SET category_id=?,updated_at=? WHERE plugin_id=?`, p.CategoryID, now, p.ID)
+	if err != nil {
+		return nil, wrapped("update placements", err)
 	}
 	sync, err := syncRelations(ctx, tx, r.id, now, p.ID, m.OperatorID, m.Relations)
 	if err != nil {

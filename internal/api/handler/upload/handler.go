@@ -92,6 +92,11 @@ func (h *Handler) SetDevBotMode(enabled bool) {
 func (h *Handler) RegisterAdmin(r *gin.Engine, adminAuth *middleware.AdminAuthenticator) {
 	admin := r.Group("/api/v1/admin", adminAuth.Handler(middleware.RoleMarketAdmin))
 	admin.POST("/skill_uploads", h.InitUpload)
+	// Admin twin of the tenant /skill_icon_uploads: InitIconUpload keys the
+	// object by the caller UID only (no Space), and admin auth supplies the
+	// identity without requiring X-Space-Id, so the admin console can upload
+	// skill icons the same way it uploads connector icons (/admin/mcp_icon_uploads).
+	admin.POST("/skill_icon_uploads", h.InitIconUpload)
 	admin.POST("/skill_uploads/:skill_upload_id/parse", h.TriggerParse)
 	admin.GET("/skill_parse_tasks/:skill_parse_task_id", h.PollParse)
 	admin.GET("/skills/:skill_id/download", h.AdminDownload)
