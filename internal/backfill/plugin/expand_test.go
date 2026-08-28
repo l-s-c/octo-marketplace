@@ -9,7 +9,10 @@ import (
 	libplugin "github.com/Mininglamp-OSS/octo-plugin-lib/plugin"
 )
 
-type stubExpander struct{ out, keys string }
+type stubExpander struct {
+	out, keys string
+	truncate  bool
+}
 
 func (s stubExpander) ExpandSkillPackage(_ context.Context, _, _ string, pkg, _ json.RawMessage) (json.RawMessage, json.RawMessage, bool, error) {
 	// A tree package (no legacy pointer) passes straight through unchanged; a
@@ -18,6 +21,12 @@ func (s stubExpander) ExpandSkillPackage(_ context.Context, _, _ string, pkg, _ 
 		return pkg, nil, false, nil
 	}
 	return json.RawMessage(s.out), json.RawMessage(s.keys), true, nil
+}
+
+// WouldTruncateSkillPackage reports the configured verdict for a legacy pointer;
+// most tests expand normally (truncate == false).
+func (s stubExpander) WouldTruncateSkillPackage(_, _ string, pkg, _ json.RawMessage) bool {
+	return s.truncate && hasLegacyPointer(pkg)
 }
 
 func legacySkillPkg() string {
@@ -33,6 +42,37 @@ func TestHasLegacyPointer(t *testing.T) {
 	tree := `{"attachments":[` + attachmentJSON("SKILL.md", "text/markdown", "# d") + `]}`
 	if hasLegacyPointer([]byte(tree)) {
 		t.Fatal("tree package should not be legacy")
+	}
+}
+
+// TestExpandAuditsSkipsUnexpandableSnapshotFailClosed pins the audit skip: a
+// legacy snapshot whose archive/object key cannot be resolved is left unexpanded
+// (never rebuilt as a stub), recorded at the non-gating "info" level so the
+// rollout gate can still go green, and emits no rewrite action for that row.
+func TestExpandAuditsSkipsUnexpandableSnapshotFailClosed(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	r := New(db)
+
+	manifest := `{"plugin_name":"技能","name":"skill-a","description":"d"}`
+	before, after := "sha256:b", "sha256:a"
+	mock.ExpectQuery(`SELECT audit_log_id, plugin_id, manifest_snapshot_json, plugin_snapshot_json, before_hash, after_hash, created_at FROM plugin_audit_logs`).
+		WillReturnRows(sqlmock.NewRows([]string{"audit_log_id", "plugin_id", "manifest_snapshot_json", "plugin_snapshot_json", "before_hash", "after_hash", "created_at"}).
+			AddRow("a1", "p1", manifest, legacySkillPkg(), before, after, "2026-01-01T00:00:00Z"))
+
+	var p expandPlan
+	if err := r.expandAudits(context.Background(), stubExpander{truncate: true}, true,
+		map[string]string{"p1": "skill"}, map[string]string{"p1": "space-a"}, &p); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.actions) != 0 {
+		t.Fatalf("unexpandable audit must emit no rewrite action, got %d", len(p.actions))
+	}
+	if len(p.issues) != 1 || p.issues[0].Level != "info" || p.issues[0].Code != "audit_unexpandable" {
+		t.Fatalf("expected one non-gating info skip, got %#v", p.issues)
 	}
 }
 

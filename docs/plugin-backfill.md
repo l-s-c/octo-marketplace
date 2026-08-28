@@ -32,6 +32,8 @@ The default mode is `dry-run`. Output is structured JSON containing expected and
 
 Review every `issues` entry before cutover. A skipped field or row requires a product/data decision rather than inferred semantics. In particular, a `repackage_invalid_package` row keeps its 1.0 `$schema` and is left read-only: reads still work (host parsers do not assert `$schema`), but any later fetch-edit-save is rejected by the 2.0 `DecodePackage` `$schema` check, so these rows need manual remediation.
 
+The `expand-skills` phase may emit `audit_unexpandable` at the **non-gating `info`** level: an immutable `plugin_audit_logs` snapshot whose archive/object key cannot be resolved without a sidecar is left unexpanded rather than rebuilt as a truncated SKILL.md stub. This is expected and safe (audit snapshots are never dereferenced for bytes), does not fail the gate, and needs no action — it only records which historical snapshots were preserved as-is.
+
 ## Phases
 
 The command carries four idempotent phases (all support `dry-run` / `apply` / `verify`):

@@ -26,6 +26,7 @@ import (
 // package, reporting whether it changed. *pluginsvc.Service satisfies it.
 type SkillExpander interface {
 	ExpandSkillPackage(ctx context.Context, spaceID, pluginID string, pkg, keys json.RawMessage) (json.RawMessage, json.RawMessage, bool, error)
+	WouldTruncateSkillPackage(spaceID, pluginID string, pkg, keys json.RawMessage) bool
 }
 
 type ExpandCounts struct {
@@ -324,24 +325,31 @@ func (r *Runner) expandAudits(ctx context.Context, exp SkillExpander, apply bool
 			oldAfter = *w.afterHash
 		}
 		expandable := len(w.pkg) > 0 && hasLegacyPointer(w.pkg)
-		// A skill/package.zip snapshot's real files live in a managed object
-		// resolved via the sidecar key, but audit rows carry no sidecar and
-		// repackage already stripped the inline storage_uri — ExpandSkillPackage
-		// would then collapse this immutable snapshot to a SKILL.md stub
-		// (irreversible truncation). Skip it fail-closed; the skill/ref.json layout
-		// (inline pointer) still expands normally.
-		zipUnresolvable := expandable && hasStorageZipPointer(w.pkg)
+		// Audit rows carry no sidecar (keys == nil), and repackage stripped the
+		// inline storage_uri, so a snapshot whose real files live in a managed
+		// archive/object can no longer be resolved — ExpandSkillPackage would
+		// collapse it to a SKILL.md stub (irreversible truncation of an immutable
+		// record). Probe the actual resolvability (not a path-shape) and, when it
+		// would truncate, leave the snapshot unexpanded. This is a permanent,
+		// data-preserving skip (audit packages are never dereferenced for bytes),
+		// so it is recorded at the non-gating "info" level rather than blocking the
+		// rollout gate; see docs/plugin-backfill.md.
+		wouldTruncate := expandable && exp.WouldTruncateSkillPackage(spaces[w.pluginID], w.pluginID, w.pkg, nil)
 		if !apply {
-			if zipUnresolvable {
-				p.issues = append(p.issues, Issue{"skip", "audit_zip_unresolvable", "plugin_audit_logs", w.id, "skill/package.zip snapshot has no resolvable key; left unexpanded to avoid truncating the audit record"})
+			if wouldTruncate {
+				p.issues = append(p.issues, Issue{"info", "audit_unexpandable", "plugin_audit_logs", w.id, "snapshot's archive/object key is unresolvable without a sidecar; left unexpanded to preserve the immutable audit record"})
 			} else if expandable {
 				p.actions = append(p.actions, expandAction{count: func(c *ExpandCounts) *int { return &c.Audits }})
 			}
 			continue
 		}
-		if zipUnresolvable {
-			p.issues = append(p.issues, Issue{"skip", "audit_zip_unresolvable", "plugin_audit_logs", w.id, "skill/package.zip snapshot has no resolvable key; left unexpanded to avoid truncating the audit record"})
-			lastHash[w.pluginID] = oldAfter
+		if wouldTruncate {
+			p.issues = append(p.issues, Issue{"info", "audit_unexpandable", "plugin_audit_logs", w.id, "snapshot's archive/object key is unresolvable without a sidecar; left unexpanded to preserve the immutable audit record"})
+			// A delete audit carries a NULL after_hash — it must NOT become the
+			// chain link for the following row (mirrors the guard below).
+			if oldAfter != "" {
+				lastHash[w.pluginID] = oldAfter
+			}
 			continue
 		}
 		newPkg, changed := w.pkg, false
@@ -428,27 +436,6 @@ func hasLegacyPointer(pkg []byte) bool {
 	}
 	for _, a := range doc.Attachments {
 		if a.Path == "skill/ref.json" || a.Path == "skill/package.zip" {
-			return true
-		}
-	}
-	return false
-}
-
-// hasStorageZipPointer reports whether the package carries a skill/package.zip
-// attachment — the legacy layout whose real files live in a managed object
-// resolved through the sidecar key. Unlike the skill/ref.json layout (inline
-// pointer), a package.zip snapshot cannot be expanded without a resolvable key.
-func hasStorageZipPointer(pkg []byte) bool {
-	var doc struct {
-		Attachments []struct {
-			Path string `json:"path"`
-		} `json:"attachments"`
-	}
-	if json.Unmarshal(pkg, &doc) != nil {
-		return false
-	}
-	for _, a := range doc.Attachments {
-		if a.Path == "skill/package.zip" {
 			return true
 		}
 	}

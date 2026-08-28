@@ -201,7 +201,7 @@ func repackageRunner(t *testing.T) (*Runner, sqlmock.Sqlmock, func()) {
 
 func oldExpertPkg(t *testing.T) (string, string) {
 	t.Helper()
-	manifest := `{"plugin_name":"专家","name":"expert-a","description":"d"}`
+	manifest := `{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"专家","name":"expert-a","description":"d"}`
 	pkg := `{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
 		attachmentJSON("expert/instruction.md", "text/markdown", "do work") + `,` +
 		attachmentJSON("expert/mcp.json", "application/json", `{"mcpServers":{}}`) + `,` +
@@ -247,7 +247,7 @@ func TestRepackagePluginsGuardsUpdateWithOldHash(t *testing.T) {
 func TestRepackagePluginsRewritesHashEvenWithoutContentChange(t *testing.T) {
 	r, mock, done := repackageRunner(t)
 	defer done()
-	manifest := `{"plugin_name":"S","name":"s","description":"d"}`
+	manifest := `{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"S","name":"s","description":"d"}`
 	// An already-migrated 2.0 package: raw attachment without content_size/hash, so
 	// repackage finds no content change and only the stale-hash row is rewritten.
 	pkg := `{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
@@ -398,4 +398,41 @@ func TestTransformVersionRelationsRewritesSnapshotEntries(t *testing.T) {
 	if _, again, err := transformVersionRelations(out, "team-1"); err != nil || again {
 		t.Fatalf("second pass changed=%v err=%v", again, err)
 	}
+}
+
+// TestTransformSchemaInjectsAbsentAndRejectsUnknown pins P1-5: an absent $schema
+// is injected (so the row is migrated + validated, not rehashed unvalidated), a
+// 1.0 id upgrades, an already-2.0 doc is a manifest no-op, and an unrecognized
+// generation is refused rather than silently downgraded to 2.0.
+func TestTransformSchemaInjectsAbsentAndRejectsUnknown(t *testing.T) {
+	// Manifest: absent -> injected (changed).
+	out, changed, err := transformManifest([]byte(`{"name":"s","plugin_name":"S","description":"d"}`))
+	if err != nil || !changed {
+		t.Fatalf("absent manifest: changed=%v err=%v", changed, err)
+	}
+	if s, _ := jsonField(out, "$schema"); s != "cowork-plugin-manifest-2.0.json" {
+		t.Fatalf("absent manifest not injected: %s", out)
+	}
+	// Manifest: unrecognized generation -> error.
+	if _, _, err := transformManifest([]byte(`{"$schema":"cowork-plugin-manifest-3.0.json","name":"s"}`)); err == nil {
+		t.Fatal("unrecognized manifest $schema should error, not downgrade")
+	}
+	// Package: absent -> injected (changed).
+	_, _, pchanged, err := transformPackage([]byte(`{"attachments":[`+attachmentJSON("SKILL.md", "text/markdown", "# d")+`]}`), "skill", []byte(`{"$schema":"cowork-plugin-manifest-2.0.json","name":"s"}`))
+	if err != nil || !pchanged {
+		t.Fatalf("absent package: changed=%v err=%v", pchanged, err)
+	}
+	// Package: unrecognized generation -> error.
+	if _, _, _, err := transformPackage([]byte(`{"$schema":"cowork-plugin-package-3.0.json","attachments":[]}`), "skill", []byte(`{}`)); err == nil {
+		t.Fatal("unrecognized package $schema should error, not downgrade")
+	}
+}
+
+func jsonField(raw []byte, key string) (string, bool) {
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return "", false
+	}
+	s, ok := m[key].(string)
+	return s, ok
 }

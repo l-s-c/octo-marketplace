@@ -342,6 +342,37 @@ func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID stri
 	return canonical, keys, true, nil
 }
 
+// WouldTruncateSkillPackage reports whether ExpandSkillPackage, given these keys,
+// would collapse a legacy-pointer package to a SKILL.md-only stub because it
+// cannot resolve the real archive/object — i.e. expanding it would discard the
+// package's files. It mirrors ExpandSkillPackage's own resolution decision
+// (migrationZipKey, then migrationArtifactKey on the ref object) rather than a
+// path-shape heuristic. A package whose pointer resolves, or that carries no real
+// pointer to lose (a genuine inline SKILL.md snapshot), does NOT truncate. Used by
+// the backfill to fail-closed skip audit snapshots that have no resolvable key
+// instead of rebuilding them as a stub.
+func (s *Service) WouldTruncateSkillPackage(spaceID, pluginID string, pkg, keys json.RawMessage) bool {
+	hasZipAttachment := false
+	for _, a := range decodePackageAttachments(pkg) {
+		if a.Path == "skill/package.zip" {
+			hasZipAttachment = true
+			break
+		}
+	}
+	p := &model.Plugin{Name: pluginID, SpaceID: &spaceID, Package: pkg, AttachmentKeys: keys}
+	ref := s.skillRef(p)
+	if _, ok := s.migrationZipKey(p, ref); ok {
+		return false // the managed zip resolves — the real files expand
+	}
+	if migrationArtifactKey(ref.ObjectKey, p.SpaceID) {
+		return false // the referenced object resolves — the real SKILL.md expands
+	}
+	// Neither pointer resolves: this truncates only if there WAS a real pointer to
+	// lose (a package.zip attachment, or a ref carrying an object/zip key). A pure
+	// inline snapshot has nothing to lose and expands to the same inline SKILL.md.
+	return hasZipAttachment || ref.ObjectKey != "" || ref.zipKey() != ""
+}
+
 // getObjectBytes reads an object fully, capped at limit bytes.
 func (s *Service) getObjectBytes(ctx context.Context, key string, limit int64) ([]byte, error) {
 	body, err := s.storage.GetObject(ctx, key)

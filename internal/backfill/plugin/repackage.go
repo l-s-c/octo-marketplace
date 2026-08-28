@@ -546,10 +546,17 @@ func transformManifest(raw []byte) ([]byte, bool, error) {
 	if err := dec.Decode(&doc); err != nil {
 		return nil, false, fmt.Errorf("invalid manifest JSON: %w", err)
 	}
-	if s, _ := doc["$schema"].(string); s == "" || s == "cowork-plugin-manifest-2.0.json" {
+	// Inject the 2.0 id when absent (DecodeManifest hard-asserts it), upgrade a
+	// 1.0 id, no-op an already-2.0 doc, and REFUSE an unrecognized generation
+	// rather than silently relabeling a future 3.0 down to 2.0.
+	switch s, _ := doc["$schema"].(string); s {
+	case "cowork-plugin-manifest-2.0.json":
 		return raw, false, nil
+	case "", "cowork-plugin-manifest-1.0.json":
+		doc["$schema"] = "cowork-plugin-manifest-2.0.json"
+	default:
+		return nil, false, fmt.Errorf("unrecognized manifest $schema %q", s)
 	}
-	doc["$schema"] = "cowork-plugin-manifest-2.0.json"
 	marshaled, err := json.Marshal(doc)
 	if err != nil {
 		return nil, false, err
@@ -699,9 +706,17 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, [
 			}
 		}
 	}
-	if s, _ := doc["$schema"].(string); s != "" && s != "cowork-plugin-package-2.0.json" {
+	// Inject the 2.0 id when absent (DecodePackage hard-asserts it), upgrade a 1.0
+	// id, no-op an already-2.0 doc, and REFUSE an unrecognized generation rather
+	// than silently relabeling a future 3.0 down to 2.0.
+	switch s, _ := doc["$schema"].(string); s {
+	case "cowork-plugin-package-2.0.json":
+		// leave as-is; other transforms above may still have set changed.
+	case "", "cowork-plugin-package-1.0.json":
 		doc["$schema"] = "cowork-plugin-package-2.0.json"
 		changed = true
+	default:
+		return nil, nil, false, fmt.Errorf("unrecognized package $schema %q", s)
 	}
 	if !changed {
 		return raw, nil, false, nil
