@@ -1,0 +1,37 @@
+# Documented exception: unified-plugin migration retires the legacy per-type
+# admin surface (skills/mcps/experts/squads/*_categories/expert_tags) wholesale,
+# replaced by the unified /plugins + /admin/plugins surface. Coordinated, breaking,
+# declared in PR #72. A path removal NOT listed here still fails the diff.
+
+delete /admin/expert_categories/{category_id} api path removed without deprecation
+delete /admin/experts/{expert_id} api path removed without deprecation
+delete /admin/mcps/{mcp_id} api path removed without deprecation
+delete /admin/skill_categories/{skill_category_id} api path removed without deprecation
+delete /admin/skills/{skill_id} api path removed without deprecation
+delete /admin/squads/{squad_id} api path removed without deprecation
+get /admin/expert_categories api path removed without deprecation
+get /admin/expert_tags api path removed without deprecation
+get /admin/experts api path removed without deprecation
+get /admin/experts/{expert_id} api path removed without deprecation
+get /admin/experts/{expert_id}/skill_md api path removed without deprecation
+get /admin/mcps api path removed without deprecation
+get /admin/mcps/{mcp_id} api path removed without deprecation
+get /admin/skill_categories api path removed without deprecation
+get /admin/skills api path removed without deprecation
+get /admin/skills/{skill_id} api path removed without deprecation
+get /admin/squads api path removed without deprecation
+get /admin/squads/{squad_id} api path removed without deprecation
+get /admin/squads/{squad_id}/skill_md api path removed without deprecation
+patch /admin/expert_categories/{category_id} api path removed without deprecation
+patch /admin/experts/{expert_id} api path removed without deprecation
+patch /admin/mcps/{mcp_id} api path removed without deprecation
+patch /admin/skill_categories/{skill_category_id} api path removed without deprecation
+patch /admin/skills/{skill_id} api path removed without deprecation
+patch /admin/squads/{squad_id} api path removed without deprecation
+post /admin/expert_categories api path removed without deprecation
+post /admin/experts api path removed without deprecation
+post /admin/mcps api path removed without deprecation
+post /admin/skill_categories api path removed without deprecation
+post /admin/skills api path removed without deprecation
+post /admin/skills/{skill_id}/reupload api path removed without deprecation
+post /admin/squads api path removed without deprecation
