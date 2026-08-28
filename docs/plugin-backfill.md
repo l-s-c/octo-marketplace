@@ -60,9 +60,12 @@ data phases above do NOT — run them explicitly right after deploying a new bac
    - fresh environment: `plan` apply → verify, then `enrich` apply → verify;
    - previously-deployed environment: `enrich` apply → verify (if pending), then
      `repackage` apply → verify, then `expand-skills` apply → verify
-     (each `remaining` must be all zeros AND `issues` empty; the command exits 2
-     in ANY mode — including `apply` — when a phase leaves a non-zero remaining
-     count or records an error/skip issue, so review the reported issues before
+     (each `remaining` must be all zeros AND no `error`/`skip` issue remains; the
+     command exits 2 in ANY mode — including `apply` — when a phase leaves a
+     non-zero remaining count or records an `error` or `skip` issue. `info` issues
+     are non-gating and expected — e.g. `audit_unexpandable`, a permanent,
+     data-preserving skip of an audit snapshot with no resolvable key — so a run
+     that reports only `info` issues is green. Review every reported issue before
      proceeding).
    `expand-skills` additionally needs object-storage env (`STORAGE_DRIVER` +
    `OSS_*` / `LOCAL_STORAGE_DIR`); the other phases run DB-only.

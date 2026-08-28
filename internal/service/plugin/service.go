@@ -411,6 +411,9 @@ func (s *Service) createWithID(ctx context.Context, caller Caller, req WriteRequ
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
+	if sync != nil && sync.NewVersionID != "" {
+		p.CurrentVersionID = &sync.NewVersionID
+	}
 	if sync != nil && sync.Relations != nil {
 		rels = sync.Relations
 	}
@@ -480,6 +483,9 @@ func (s *Service) update(ctx context.Context, caller Caller, pluginID string, re
 	sync, err := s.repo.Update(ctx, scope(caller), m)
 	if err != nil {
 		return nil, mapStoreError(err)
+	}
+	if sync != nil && sync.NewVersionID != "" {
+		p.CurrentVersionID = &sync.NewVersionID
 	}
 	if sync != nil && sync.Relations != nil {
 		rels = sync.Relations

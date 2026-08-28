@@ -407,6 +407,14 @@ func (r *Runner) expandAudits(ctx context.Context, exp SkillExpander, apply bool
 // the lib hash. It returns ok=false (recording an issue) when the package fails
 // to expand.
 func (r *Runner) expandRow(ctx context.Context, exp SkillExpander, spaceID, pluginID, source string, manifest, pkg, keys []byte, p *expandPlan) (newPkg []byte, newKeys []byte, newHash string, ok bool) {
+	// Fail-closed on a live row whose archive/object key cannot be resolved even
+	// with its sidecar: ExpandSkillPackage would collapse it to a SKILL.md stub,
+	// destroying the live skill's files. Unlike the audit case this is a live-data
+	// problem the operator must remediate, so it gates ("skip"); see the runbook.
+	if exp.WouldTruncateSkillPackage(spaceID, pluginID, pkg, keys) {
+		p.issues = append(p.issues, Issue{"skip", "expand_would_truncate", source, pluginID, "archive/object key unresolvable; skipped to avoid truncating the live skill to a SKILL.md stub"})
+		return nil, nil, "", false
+	}
 	expanded, splitKeys, changed, err := exp.ExpandSkillPackage(ctx, spaceID, pluginID, pkg, keys)
 	if err != nil {
 		p.issues = append(p.issues, Issue{"skip", "expand_failed", source, pluginID, err.Error()})

@@ -211,3 +211,30 @@ func TestApplyExpandActionsCommitsWhenGuardHolds(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestExpandPluginsSkipsTruncatableLiveRowFailClosed pins the LIVE-row guard: a
+// skill whose archive/object key cannot be resolved is skipped (fail-closed) with
+// a gating "skip" issue rather than collapsed to a SKILL.md stub — the guard is
+// wired to the live plugins/plugin_versions paths, not only the audit table.
+func TestExpandPluginsSkipsTruncatableLiveRowFailClosed(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	r := New(db)
+	manifest := `{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"S","name":"s","description":"d"}`
+	mock.ExpectQuery(`SELECT plugin_id, manifest_json, plugin_json, attachment_keys_json, plugin_hash FROM plugins WHERE plugin_type='skill'`).
+		WillReturnRows(sqlmock.NewRows([]string{"plugin_id", "manifest_json", "plugin_json", "attachment_keys_json", "plugin_hash"}).
+			AddRow("s1", manifest, legacySkillPkg(), nil, "sha256:old"))
+	var p expandPlan
+	if err := r.expandPlugins(context.Background(), stubExpander{truncate: true}, true, map[string]string{"s1": "space-a"}, &p); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.actions) != 0 {
+		t.Fatalf("truncatable live row must emit no rewrite action, got %d", len(p.actions))
+	}
+	if len(p.issues) != 1 || p.issues[0].Level != "skip" || p.issues[0].Code != "expand_would_truncate" {
+		t.Fatalf("expected one gating expand_would_truncate skip, got %#v", p.issues)
+	}
+}

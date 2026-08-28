@@ -38,6 +38,11 @@ type RelationSync struct {
 	Updated   []string
 	Deleted   []string
 	Relations []model.PluginRelation
+	// NewVersionID is the id of the plugin_versions row this write snapshotted and
+	// advanced current_version_id to (empty when the write did not snapshot). The
+	// service stamps it back onto the returned plugin so the write response's
+	// current_version_id matches the DB and a subsequent GET.
+	NewVersionID string
 }
 
 // Create atomically inserts current state, one-level relations, and an audit event.
@@ -75,8 +80,9 @@ func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	if err = insertPlacements(ctx, tx, r.id, now, p.ID, m.Placements); err != nil {
 		return nil, err
 	}
+	var newVersionID string
 	if m.SnapshotVersion {
-		if err = snapshotVersion(ctx, tx, r.id, now, p, m.Relations, m.Changelog, m.OperatorID); err != nil {
+		if newVersionID, err = snapshotVersion(ctx, tx, r.id, now, p, m.Relations, m.Changelog, m.OperatorID); err != nil {
 			return nil, err
 		}
 	}
@@ -86,7 +92,7 @@ func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
-	return &RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}, nil
+	return &RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: m.Relations, NewVersionID: newVersionID}, nil
 }
 
 // jsonColumn maps an optional JSON document to a nullable SQL column value: NULL
@@ -122,10 +128,10 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.T
 // nil becomes an empty JSON array to satisfy the relations_json ARRAY check.
 // attachment_keys_json mirrors the current row's storage-attachment sidecar.
 // Callers hold the transaction.
-func snapshotVersion(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, p model.Plugin, relations []model.PluginRelation, changelog *string, createdBy string) error {
+func snapshotVersion(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, p model.Plugin, relations []model.PluginRelation, changelog *string, createdBy string) (string, error) {
 	var count int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_versions WHERE plugin_id=?`, p.ID).Scan(&count); err != nil {
-		return wrapped("count versions", err)
+		return "", wrapped("count versions", err)
 	}
 	seq := strconv.Itoa(count + 1)
 	if relations == nil {
@@ -133,12 +139,12 @@ func snapshotVersion(ctx context.Context, tx *sql.Tx, newID func() string, now i
 	}
 	relationJSON, err := json.Marshal(relations)
 	if err != nil {
-		return err
+		return "", err
 	}
 	versionID := newID()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO plugin_versions (version_id,plugin_id,version,manifest_json,plugin_json,attachment_keys_json,manifest_hash,plugin_hash,relations_json,changelog,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		versionID, p.ID, seq, string(p.Manifest), string(p.Package), jsonColumn(p.AttachmentKeys), p.ManifestHash, p.PluginHash, string(relationJSON), changelog, createdBy, now); err != nil {
-		return wrapped("snapshot version", err)
+		return "", wrapped("snapshot version", err)
 	}
 	// current_version is the caller-declared label; fall back to "1.0.0" so the
 	// pointer is never left NULL (the service normally sets p.CurrentVersion).
@@ -147,9 +153,11 @@ func snapshotVersion(ctx context.Context, tx *sql.Tx, newID func() string, now i
 		currentVersion = *p.CurrentVersion
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE plugins SET current_version_id=?,current_version=?,updated_at=? WHERE plugin_id=? AND deleted_at IS NULL`, versionID, currentVersion, now, p.ID); err != nil {
-		return wrapped("advance current version", err)
+		return "", wrapped("advance current version", err)
 	}
-	return nil
+	// The new history row is now the current version; return its id so the write
+	// response carries the same pointer the DB (and a subsequent GET) will show.
+	return versionID, nil
 }
 
 // CreateGraph atomically inserts several current-state plugins, their one-level
@@ -220,7 +228,7 @@ func (r *Repo) CreateGraph(ctx context.Context, scope Scope, nodes []Mutation) (
 	// import records the top's initial version. Embedded children are not flagged.
 	for i := range nodes {
 		if nodes[i].SnapshotVersion {
-			if err = snapshotVersion(ctx, tx, r.id, now, nodes[i].Plugin, nodes[i].Relations, nodes[i].Changelog, nodes[i].OperatorID); err != nil {
+			if _, err = snapshotVersion(ctx, tx, r.id, now, nodes[i].Plugin, nodes[i].Relations, nodes[i].Changelog, nodes[i].OperatorID); err != nil {
 				return nil, err
 			}
 		}
@@ -389,7 +397,7 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 	// Snapshot the rebuilt top as a new history version (its content was just
 	// swapped) and advance current_version_id/current_version onto it.
 	if top.SnapshotVersion {
-		if err = snapshotVersion(ctx, tx, r.id, now, topPlugin, top.Relations, top.Changelog, top.OperatorID); err != nil {
+		if _, err = snapshotVersion(ctx, tx, r.id, now, topPlugin, top.Relations, top.Changelog, top.OperatorID); err != nil {
 			return nil, err
 		}
 	}
@@ -505,7 +513,7 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 		return nil, err
 	}
 	if m.SnapshotVersion {
-		if err = snapshotVersion(ctx, tx, r.id, now, p, m.Relations, m.Changelog, m.OperatorID); err != nil {
+		if sync.NewVersionID, err = snapshotVersion(ctx, tx, r.id, now, p, m.Relations, m.Changelog, m.OperatorID); err != nil {
 			return nil, err
 		}
 	}

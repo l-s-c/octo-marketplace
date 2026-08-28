@@ -152,6 +152,24 @@ func TestAdminUpdateNormalizesLegacyPublicToSystem(t *testing.T) {
 	}
 }
 
+// TestAdminUpdateAppliesSubmittedVersion pins that an admin edit which SENDS a
+// version applies it (AdminUpdate previously restored the stored label
+// unconditionally, silently discarding a submitted version and returning 200).
+func TestAdminUpdateAppliesSubmittedVersion(t *testing.T) {
+	space := adminGlobalSpace
+	oldVer := "1.0.0"
+	existing := &model.Plugin{ID: "skill-1", Name: "Ops Skill", Type: model.PluginTypeSkill, SpaceID: &space, Visibility: model.PluginVisibilitySystem, CurrentVersion: &oldVer, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	f := &fakeStore{plugins: map[string]*model.Plugin{"skill-1": existing}}
+	req := adminSkillRequest()
+	req.Version = "3.0.0"
+	if _, err := fixedService(f).AdminUpdate(context.Background(), adminCaller, "skill-1", req); err != nil {
+		t.Fatalf("AdminUpdate: %v", err)
+	}
+	if f.update == nil || f.update.CurrentVersion == nil || *f.update.CurrentVersion != "3.0.0" {
+		t.Fatalf("submitted version not applied: %#v", f.update)
+	}
+}
+
 // TestAdminUpdateRejectsTypeChange guards against reclassifying a plugin's type
 // through the admin update path.
 func TestAdminUpdateRejectsTypeChange(t *testing.T) {

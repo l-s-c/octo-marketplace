@@ -105,7 +105,11 @@ func (f *fakeStore) Create(_ context.Context, s pluginrepo.Scope, m pluginrepo.M
 		created = append(created, m.Relations[i].ID)
 	}
 	f.createRels = m.Relations
-	return &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}, nil
+	sync := &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}
+	if m.SnapshotVersion {
+		sync.NewVersionID = "ver-snap"
+	}
+	return sync, nil
 }
 func (f *fakeStore) Update(_ context.Context, _ pluginrepo.Scope, m pluginrepo.Mutation) (*pluginrepo.RelationSync, error) {
 	p := m.Plugin
@@ -117,7 +121,11 @@ func (f *fakeStore) Update(_ context.Context, _ pluginrepo.Scope, m pluginrepo.M
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &pluginrepo.RelationSync{Created: []string{}, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}, nil
+	sync := &pluginrepo.RelationSync{Created: []string{}, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}
+	if m.SnapshotVersion {
+		sync.NewVersionID = "ver-snap"
+	}
+	return sync, nil
 }
 func (f *fakeStore) CreateGraph(_ context.Context, s pluginrepo.Scope, nodes []pluginrepo.Mutation) ([]*pluginrepo.RelationSync, error) {
 	f.graphNodes, f.graphScope = nodes, s
@@ -757,5 +765,19 @@ func TestValidRelationTypeMirrorsLibEndpointMatrix(t *testing.T) {
 		if validRelationType(tt.relation, tt.source, tt.target) {
 			t.Fatalf("%s %s->%s accepted", tt.relation, tt.source, tt.target)
 		}
+	}
+}
+
+// TestCreateStampsNewCurrentVersionID pins that a snapshotting create returns the
+// new plugin_versions id on the response plugin, so the write response's
+// current_version_id matches the DB (and a subsequent GET) rather than being nil.
+func TestCreateStampsNewCurrentVersionID(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{}}
+	detail, err := fixedService(f).Create(context.Background(), testCaller, validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Plugin.CurrentVersionID == nil || *detail.Plugin.CurrentVersionID != "ver-snap" {
+		t.Fatalf("create response current_version_id = %v, want ver-snap", detail.Plugin.CurrentVersionID)
 	}
 }

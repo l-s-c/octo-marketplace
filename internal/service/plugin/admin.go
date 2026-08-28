@@ -228,7 +228,13 @@ func (s *Service) AdminUpdate(ctx context.Context, caller Caller, pluginID strin
 		return nil, err
 	}
 	p.CreatedAt, p.CurrentVersionID = old.CreatedAt, old.CurrentVersionID
-	p.CurrentVersion = old.CurrentVersion // keep the published version label, not just its id
+	// Keep the stored version label only when the admin edit omits a version; a
+	// submitted version is applied (buildWrite already set it), mirroring the
+	// tenant update — otherwise an admin edit that sends a new version returns 200
+	// while silently not applying it.
+	if strings.TrimSpace(req.Version) == "" {
+		p.CurrentVersion = old.CurrentVersion
+	}
 	p.CreatorName, p.CreatedByType = old.CreatorName, old.CreatedByType
 	p.CreatedByBotUID, p.CreatedByBotName = old.CreatedByBotUID, old.CreatedByBotName
 	p.SpaceID = old.SpaceID   // preserve the row's existing Space on update
