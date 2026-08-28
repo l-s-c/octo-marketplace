@@ -1762,12 +1762,8 @@ components:
           type: string
         created_by:
           type: string
-        manifest:
-          type: object
         manifest_hash:
           type: string
-        package:
-          type: object
         plugin_hash:
           type: string
         plugin_id:
@@ -5593,7 +5589,10 @@ paths:
   /plugins/versions:
     get:
       description: List a visible Plugin's version history (one immutable snapshot
-        per save, newest first) using offset pagination.
+        per save, newest first) using offset pagination. Each row is metadata only
+        (label, hashes, changelog, timestamp); full manifest/package content is fetched
+        from the plugin detail, so intermediate/rolled-back saves are not exposed
+        in bulk.
       operationId: plugin.version.list
       parameters:
       - description: Plugin ID

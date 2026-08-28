@@ -210,12 +210,15 @@ type relationResultResponse struct {
 	Deleted []string `json:"deleted"`
 }
 
+// versionResponse is the metadata-only projection of one history row. It
+// deliberately omits the full manifest/package bytes: the versions LIST would
+// otherwise expose every intermediate/rolled-back save's complete content of a
+// visible (incl. system) plugin. Callers get the label, hashes, changelog and
+// timestamp per row; full content is fetched from the plugin detail.
 type versionResponse struct {
 	VersionID    string           `json:"version_id"`
 	PluginID     string           `json:"plugin_id"`
 	Version      string           `json:"version"`
-	Manifest     json.RawMessage  `json:"manifest" swaggertype:"object"`
-	Package      json.RawMessage  `json:"package" swaggertype:"object"`
 	ManifestHash string           `json:"manifest_hash"`
 	PluginHash   string           `json:"plugin_hash"`
 	Relations    []map[string]any `json:"relations"`
@@ -415,7 +418,7 @@ func (h *Handler) Delete(c *gin.Context) {
 
 // ListVersions godoc
 // @Summary List plugin versions
-// @Description List a visible Plugin's version history (one immutable snapshot per save, newest first) using offset pagination.
+// @Description List a visible Plugin's version history (one immutable snapshot per save, newest first) using offset pagination. Each row is metadata only (label, hashes, changelog, timestamp); full manifest/package content is fetched from the plugin detail, so intermediate/rolled-back saves are not exposed in bulk.
 // @Tags plugin
 // @ID plugin.version.list
 // @Accept json
@@ -684,7 +687,7 @@ func detailDTO(d *pluginsvc.Detail) detailResponse {
 	return out
 }
 func versionDTO(x model.PluginVersion) versionResponse {
-	return versionResponse{VersionID: x.ID, PluginID: x.PluginID, Version: x.Version, Manifest: x.Manifest, Package: x.Package, ManifestHash: x.ManifestHash, PluginHash: x.PluginHash, Relations: versionRelationSlice(x.Relations), Changelog: x.Changelog, CreatedBy: x.CreatedBy, CreatedAt: x.CreatedAt}
+	return versionResponse{VersionID: x.ID, PluginID: x.PluginID, Version: x.Version, ManifestHash: x.ManifestHash, PluginHash: x.PluginHash, Relations: versionRelationSlice(x.Relations), Changelog: x.Changelog, CreatedBy: x.CreatedBy, CreatedAt: x.CreatedAt}
 }
 
 func rawJSON(value any) json.RawMessage {
