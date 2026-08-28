@@ -1681,6 +1681,8 @@ components:
             type: string
           type: array
           uniqueItems: false
+        version:
+          type: string
         visibility:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginVisibility'
       type: object

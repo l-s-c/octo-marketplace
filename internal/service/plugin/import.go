@@ -185,6 +185,7 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 		return nil, err
 	}
 	req.Changelog = f.changelog
+	req.Version = f.version
 	var detail *Detail
 	if updateID == "" {
 		// Persist under the reserved ID so the shipped SKILL.md frontmatter, the

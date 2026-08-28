@@ -118,8 +118,8 @@ func TestCreateAttachesVisiblePlacementInSameTx(t *testing.T) {
 
 // TestCreateSnapshotsVersionWhenFlagged locks the per-save version history: a
 // create with SnapshotVersion appends a plugin_versions row with an
-// auto-increment label (first snapshot -> "1"). The current_version pointer is
-// deliberately NOT advanced.
+// auto-increment history label (first snapshot -> "1") and points
+// current_version_id at it, stamping current_version (defaulting to "1.0.0").
 func TestCreateSnapshotsVersionWhenFlagged(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
@@ -135,6 +135,8 @@ func TestCreateSnapshotsVersionWhenFlagged(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO plugin_versions`).
 		WithArgs("version-id", "plugin-id", "1", "{}", "{}", nil, "sha256:m", "sha256:p", "[]", nil, "caller", now).
 		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`UPDATE plugins SET current_version_id=\?,current_version=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("version-id", "1.0.0", now, "plugin-id").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 	_, err := r.Create(context.Background(), Scope{CallerUID: "caller", SpaceID: "space"}, Mutation{
@@ -151,8 +153,8 @@ func TestCreateSnapshotsVersionWhenFlagged(t *testing.T) {
 }
 
 // TestUpdateSnapshotsIncrementingVersion locks that an edit snapshots the next
-// sequential label off the existing version count (2 prior -> "3") inside the
-// update transaction. The current_version pointer is deliberately NOT advanced.
+// sequential history label off the existing version count (2 prior -> "3") and
+// points current_version_id at it, stamping current_version (default "1.0.0").
 func TestUpdateSnapshotsIncrementingVersion(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
@@ -175,6 +177,8 @@ func TestUpdateSnapshotsIncrementingVersion(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO plugin_versions`).
 		WithArgs("version-id", "plugin-id", "3", "{}", "{}", nil, "sha256:m", "sha256:p", "[]", nil, "caller", now).
 		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`UPDATE plugins SET current_version_id=\?,current_version=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("version-id", "1.0.0", now, "plugin-id").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 	_, err := r.Update(context.Background(), scope, Mutation{

@@ -91,6 +91,7 @@ type pluginWriteRequest struct {
 	Publisher    string                 `json:"publisher,omitempty"`
 	Icon         string                 `json:"icon,omitempty"`
 	Visibility   model.PluginVisibility `json:"visibility"`
+	Version      string                 `json:"version,omitempty"`
 	ManifestJSON json.RawMessage        `json:"manifest_json" swaggertype:"object"`
 	PluginJSON   json.RawMessage        `json:"plugin_json" swaggertype:"object"`
 }
@@ -105,7 +106,7 @@ func (r upsertRequest) serviceRequest() pluginsvc.WriteRequest {
 	for i, x := range r.Relations {
 		relations[i] = pluginsvc.RelationRequest{ID: x.RelationID, SourcePluginID: x.SourcePluginID, TargetPluginID: x.TargetPluginID, Type: x.RelationType, SortOrder: x.SortOrder, Data: x.Data}
 	}
-	return pluginsvc.WriteRequest{Name: r.Plugin.PluginName, Type: r.Plugin.PluginType, CategoryID: r.Plugin.CategoryID, Tags: rawJSON(r.Plugin.Tags), Publisher: r.Plugin.Publisher, Icon: r.Plugin.Icon, Visibility: r.Plugin.Visibility, Manifest: r.Plugin.ManifestJSON, Package: r.Plugin.PluginJSON, Relations: relations}
+	return pluginsvc.WriteRequest{Name: r.Plugin.PluginName, Type: r.Plugin.PluginType, CategoryID: r.Plugin.CategoryID, Tags: rawJSON(r.Plugin.Tags), Publisher: r.Plugin.Publisher, Icon: r.Plugin.Icon, Visibility: r.Plugin.Visibility, Version: r.Plugin.Version, Manifest: r.Plugin.ManifestJSON, Package: r.Plugin.PluginJSON, Relations: relations}
 }
 
 type deleteRequest struct {

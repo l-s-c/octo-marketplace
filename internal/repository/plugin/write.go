@@ -20,11 +20,11 @@ type Mutation struct {
 	RequestID    string
 	Remark       *string
 	// SnapshotVersion, when set, appends one immutable plugin_versions row for this
-	// Plugin inside the write transaction, so every save (create / edit / container
-	// reupload) records a full version snapshot for history. It does NOT advance the
-	// plugin's current_version pointer. Only top-level nodes set it; embedded
-	// children version with their container. Changelog is the optional note stored
-	// on that snapshot.
+	// Plugin inside the write transaction and points current_version_id at it,
+	// setting current_version to the caller-declared label, so every save
+	// (create / edit / container reupload) records a full version snapshot. Only
+	// top-level nodes set it; embedded children version with their container.
+	// Changelog is the optional note stored on that snapshot.
 	SnapshotVersion bool
 	Changelog       *string
 }
@@ -112,12 +112,11 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.T
 }
 
 // snapshotVersion appends one immutable plugin_versions row capturing p's current
-// content plus the given relation set. It records history ONLY: the plugin row's
-// current_version_id/current_version pointer is deliberately left untouched by the
-// write path for now, so a save never advances the "current version" label (a
-// fresh create therefore keeps an empty current_version until that pointer is
-// managed elsewhere). The version label on the history row is a per-plugin
-// auto-increment sequence computed under the transaction — for Update the plugin
+// content plus the given relation set, then points the plugin's current_version_id
+// at that new snapshot and sets current_version to the caller-declared label
+// (p.CurrentVersion, defaulting to "1.0.0"). The history row's own version column
+// is a per-plugin auto-increment sequence (1, 2, 3 ...) — distinct from the
+// current_version LABEL — computed under the transaction: for Update the plugin
 // row is already FOR UPDATE-locked, and a fresh Create has no prior snapshot, so
 // the COUNT is race-free. relations is marshaled as a []model.PluginRelation, and
 // nil becomes an empty JSON array to satisfy the relations_json ARRAY check.
@@ -140,6 +139,15 @@ func snapshotVersion(ctx context.Context, tx *sql.Tx, newID func() string, now i
 	if _, err := tx.ExecContext(ctx, `INSERT INTO plugin_versions (version_id,plugin_id,version,manifest_json,plugin_json,attachment_keys_json,manifest_hash,plugin_hash,relations_json,changelog,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		versionID, p.ID, seq, string(p.Manifest), string(p.Package), jsonColumn(p.AttachmentKeys), p.ManifestHash, p.PluginHash, string(relationJSON), changelog, createdBy, now); err != nil {
 		return wrapped("snapshot version", err)
+	}
+	// current_version is the caller-declared label; fall back to "1.0.0" so the
+	// pointer is never left NULL (the service normally sets p.CurrentVersion).
+	currentVersion := "1.0.0"
+	if p.CurrentVersion != nil && *p.CurrentVersion != "" {
+		currentVersion = *p.CurrentVersion
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE plugins SET current_version_id=?,current_version=?,updated_at=? WHERE plugin_id=? AND deleted_at IS NULL`, versionID, currentVersion, now, p.ID); err != nil {
+		return wrapped("advance current version", err)
 	}
 	return nil
 }
@@ -381,7 +389,7 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 		}
 	}
 	// Snapshot the rebuilt top as a new history version (its content was just
-	// swapped); the current_version pointer is left untouched.
+	// swapped) and advance current_version_id/current_version onto it.
 	if top.SnapshotVersion {
 		if err = snapshotVersion(ctx, tx, r.id, now, topPlugin, top.Relations, top.Changelog, top.OperatorID); err != nil {
 			return nil, err

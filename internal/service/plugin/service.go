@@ -157,6 +157,10 @@ type WriteRequest struct {
 	Manifest   json.RawMessage
 	Package    json.RawMessage
 	Relations  []RelationRequest
+	// Version is the caller-declared current-version label written to
+	// plugins.current_version. Empty defaults to "1.0.0". It is independent of the
+	// per-save history label (plugin_versions.version stays an auto-increment int).
+	Version string
 	// Changelog is the optional note recorded on the version snapshot this write
 	// appends. The tenant upsert path leaves it nil; skill import carries the
 	// uploaded changelog through to the snapshot.
@@ -557,13 +561,21 @@ func (s *Service) buildWrite(ctx context.Context, c Caller, pluginID string, req
 	if !validIcon(icon) {
 		return nil, nil, ErrInvalidRequest
 	}
+	// current_version is caller-declared: use the submitted version, defaulting to
+	// "1.0.0" when none is passed. Reject a malformed non-empty label.
+	currentVersion := strings.TrimSpace(req.Version)
+	if currentVersion == "" {
+		currentVersion = defaultCurrentVersion
+	} else if !validVersion(currentVersion) {
+		return nil, nil, ErrInvalidRequest
+	}
 	toolCount := 0
 	if req.Type == model.PluginTypeConnector {
 		toolCount = ConnectorToolCount(docs.Package)
 	}
 	spaceID := c.SpaceID
 	createdBy, botUID, botName := provenance(c)
-	p := &model.Plugin{ID: pluginID, Name: name, Type: req.Type, CategoryID: trimOptional(req.CategoryID), Tags: docs.Tags, Publisher: strings.TrimSpace(req.Publisher), OwnerUID: c.UID, SpaceID: &spaceID, Visibility: req.Visibility, CreatorName: c.Name, CreatedByType: createdBy, CreatedByBotUID: botUID, CreatedByBotName: botName, Icon: icon, IconURL: s.resolveIcon(ctx, icon), ToolCount: toolCount, Manifest: docs.Manifest, Package: docs.Package, AttachmentKeys: docs.AttachmentKeys, ManifestHash: docs.ManifestHash, PluginHash: docs.PluginHash, Status: 1, CreatedAt: now, UpdatedAt: now}
+	p := &model.Plugin{ID: pluginID, Name: name, Type: req.Type, CategoryID: trimOptional(req.CategoryID), Tags: docs.Tags, Publisher: strings.TrimSpace(req.Publisher), OwnerUID: c.UID, SpaceID: &spaceID, Visibility: req.Visibility, CreatorName: c.Name, CreatedByType: createdBy, CreatedByBotUID: botUID, CreatedByBotName: botName, Icon: icon, IconURL: s.resolveIcon(ctx, icon), ToolCount: toolCount, Manifest: docs.Manifest, Package: docs.Package, AttachmentKeys: docs.AttachmentKeys, ManifestHash: docs.ManifestHash, PluginHash: docs.PluginHash, CurrentVersion: &currentVersion, Status: 1, CreatedAt: now, UpdatedAt: now}
 	rels, err := s.buildRelations(ctx, c, admin, p, req.Relations, now)
 	if err != nil {
 		return nil, nil, err

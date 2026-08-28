@@ -29,6 +29,10 @@ const (
 	maxIconBytes  = 512
 )
 
+// defaultCurrentVersion is the current-version label stamped on a write that
+// declares no version of its own (e.g. connectors, which have no version field).
+const defaultCurrentVersion = "1.0.0"
+
 var (
 	versionPattern    = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$`)
 	relationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
