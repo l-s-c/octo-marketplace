@@ -95,7 +95,7 @@ func (s *Service) Import(ctx context.Context, caller Caller, p ImportParams) (*D
 		oldPlugin = old
 	}
 
-	fields, err := resolveImportFields(p, task, caller.IsSystemAdmin)
+	fields, err := resolveImportFields(p, task, caller.IsSystemAdmin, oldPlugin)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +130,7 @@ type importFields struct {
 	changelog   *string
 }
 
-func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdmin bool) (*importFields, error) {
+func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdmin bool, old *model.Plugin) (*importFields, error) {
 	f := &importFields{
 		pluginName:  strings.TrimSpace(p.PluginName),
 		name:        strings.TrimSpace(p.Name),
@@ -140,6 +140,31 @@ func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdm
 		visibility:  p.Visibility,
 		categoryID:  trimOptional(p.CategoryID),
 		icon:        strings.TrimSpace(p.Icon),
+	}
+	// A package-only reupload replaces the package/tags but must preserve the
+	// row's curated market identity. The display name (plugin.Name column), the
+	// machine name (manifest name), the description, and the category live on the
+	// existing row, NOT the freshly-parsed package — so on a reupload prefer the
+	// old row over the package's parse result whenever the client omits a field.
+	// Without this an omitted name silently resets the skill's display name to
+	// the package's, the description to the package's, and the category to NULL;
+	// the two-step edit's follow-up metadata PATCH cannot be relied on to repair
+	// it (a transient failure — or the consumed parse task blocking a retry —
+	// leaves a corrupted row with no undo). The follow-up PATCH still applies any
+	// real edits the operator made.
+	if old != nil {
+		if f.pluginName == "" {
+			f.pluginName = old.Name
+		}
+		if f.name == "" {
+			f.name = manifestName(old.Manifest)
+		}
+		if f.description == "" {
+			f.description = manifestDescription(old.Manifest)
+		}
+		if f.categoryID == nil {
+			f.categoryID = old.CategoryID
+		}
 	}
 	if f.name == "" {
 		f.name = strings.TrimSpace(task.ResultName)

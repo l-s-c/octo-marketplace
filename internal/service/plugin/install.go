@@ -473,6 +473,18 @@ func manifestDescription(manifest json.RawMessage) string {
 	return doc.Description
 }
 
+// manifestName reads the display name (`name`) out of a stored manifest. Used
+// to preserve an existing skill's curated display name on a package-only
+// reupload rather than resetting it to the freshly-parsed package's machine
+// name.
+func manifestName(manifest json.RawMessage) string {
+	var doc struct {
+		Name string `json:"name"`
+	}
+	_ = json.Unmarshal(manifest, &doc)
+	return doc.Name
+}
+
 // trackTimeout bounds the best-effort install counter bump; see the expert
 // service for the rationale (a stalled Redis must not delay the response).
 const trackTimeout = 2 * time.Second

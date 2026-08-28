@@ -158,6 +158,54 @@ func TestAdminImportReuploadPreservesVisibilitySpaceOwner(t *testing.T) {
 	}
 }
 
+// TestAdminImportReuploadPreservesCuratedMetadata is the B1 regression: a
+// package-only reupload (the client omits name/description/category — those ride
+// the follow-up metadata PATCH) must NOT reset the row's curated market identity
+// to the freshly-parsed package's values. The old row's display name (plugin
+// Name column), description (manifest), and category win over the package's
+// parse result, so a failed/retried follow-up PATCH cannot leave a corrupted row.
+func TestAdminImportReuploadPreservesCuratedMetadata(t *testing.T) {
+	store, _, tasks, svc := adminImportFixtures(t)
+	// The uploaded package parses to DIFFERENT display/description values; without
+	// the fix these would overwrite the curated row.
+	pkgDesc := "Package description"
+	tasks.task.ResultName = "package-machine-name"
+	tasks.task.ResultDescription = &pkgDesc
+
+	tenant := "tenant-space"
+	category := "cat-old"
+	existing := &model.Plugin{
+		ID: "skill-9", Name: "运维技能", Type: model.PluginTypeSkill, OwnerUID: "tenant-user", SpaceID: &tenant,
+		Visibility: model.PluginVisibilityPrivate, CategoryID: &category,
+		Tags:     json.RawMessage(`[]`),
+		Manifest: json.RawMessage(`{"name":"ops-skill-machine","description":"Curated ops description"}`),
+		Package:  json.RawMessage(`{"attachments":[]}`),
+	}
+	store.plugins["skill-9"] = existing
+
+	if _, err := svc.AdminImport(context.Background(), adminCaller, ImportParams{ParseTaskID: "task-admin", PluginID: "skill-9", Version: "2.0.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if store.update == nil {
+		t.Fatal("no update issued")
+	}
+	// Display name (plugin Name column) preserved, not reset to the package's.
+	if store.update.Name != "运维技能" {
+		t.Fatalf("display name reset to %q, want the curated 运维技能", store.update.Name)
+	}
+	// Category preserved, not NULLed.
+	if store.update.CategoryID == nil || *store.update.CategoryID != category {
+		t.Fatalf("category reset to %v, want preserved %q", store.update.CategoryID, category)
+	}
+	// Description preserved in the rebuilt manifest, not the package's.
+	if !strings.Contains(string(store.update.Manifest), "Curated ops description") {
+		t.Fatalf("curated description not preserved in manifest: %s", store.update.Manifest)
+	}
+	if strings.Contains(string(store.update.Manifest), pkgDesc) {
+		t.Fatalf("package description leaked into the reuploaded row: %s", store.update.Manifest)
+	}
+}
+
 // TestAdminImportRejectsForeignOrUnfinishedTasks proves the admin import only
 // consumes the admin's own completed, unbound upload.
 func TestAdminImportRejectsForeignOrUnfinishedTasks(t *testing.T) {

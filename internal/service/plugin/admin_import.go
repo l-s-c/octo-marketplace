@@ -79,7 +79,7 @@ func (s *Service) AdminImport(ctx context.Context, caller Caller, p ImportParams
 	// admin conventions below (system on create, preserved on reupload), never by
 	// a caller-supplied visibility.
 	p.Visibility = ""
-	fields, err := resolveImportFields(p, task, true)
+	fields, err := resolveImportFields(p, task, true, oldPlugin)
 	if err != nil {
 		return nil, err
 	}
