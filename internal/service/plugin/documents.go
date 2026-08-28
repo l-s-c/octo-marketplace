@@ -195,68 +195,6 @@ func splitStorageKeys(pkg json.RawMessage, spaceID string) (json.RawMessage, jso
 	return strippedPkg, keysJSON, nil
 }
 
-// injectStorageKeys is the inverse of splitStorageKeys: it re-embeds each storage
-// attachment's object key (from the sidecar map) back into the package as an
-// inline storage_uri. It is used when a STORED (already-split) package must be
-// fed back through the write path — e.g. the import rollback rebuilds a
-// WriteRequest from the persisted row, whose Package no longer carries
-// storage_uri; without re-injection canonicalizeDocuments' splitStorageKeys would
-// see a storage attachment with no key and reject the restore. A package with no
-// storage attachments, or an empty sidecar, is returned unchanged.
-func injectStorageKeys(pkg, keysJSON json.RawMessage) json.RawMessage {
-	keys := attachmentKeyMap(keysJSON)
-	if len(keys) == 0 {
-		return pkg
-	}
-	var doc map[string]json.RawMessage
-	if json.Unmarshal(pkg, &doc) != nil {
-		return pkg
-	}
-	rawAttachments, ok := doc["attachments"]
-	if !ok {
-		return pkg
-	}
-	var attachments []map[string]json.RawMessage
-	if json.Unmarshal(rawAttachments, &attachments) != nil {
-		return pkg
-	}
-	changed := false
-	for _, attachment := range attachments {
-		var contentType string
-		if raw, ok := attachment["content_type"]; ok {
-			_ = json.Unmarshal(raw, &contentType)
-		}
-		if contentType != "storage" {
-			continue
-		}
-		var path string
-		_ = json.Unmarshal(attachment["path"], &path)
-		key, ok := keys[path]
-		if !ok || key == "" {
-			continue
-		}
-		encoded, err := json.Marshal(key)
-		if err != nil {
-			continue
-		}
-		attachment["storage_uri"] = encoded
-		changed = true
-	}
-	if !changed {
-		return pkg
-	}
-	reencoded, err := json.Marshal(attachments)
-	if err != nil {
-		return pkg
-	}
-	doc["attachments"] = reencoded
-	injected, err := json.Marshal(doc)
-	if err != nil {
-		return pkg
-	}
-	return injected
-}
-
 // storageContentHashes maps each storage attachment's path to its content_hash
 // in a package document, used to bind a re-injected key to unchanged content.
 func storageContentHashes(pkg json.RawMessage) map[string]string {

@@ -133,38 +133,6 @@ func TestCanonicalizeDocumentsUsesLibHashFormula(t *testing.T) {
 	}
 }
 
-// TestInjectStorageKeysRoundTripsWithSplit locks the restore path: re-injecting
-// a sidecar back into a stripped package reproduces a package that splitStorageKeys
-// re-splits to the identical sidecar, so an import rollback can re-canonicalize a
-// stored (already-split) package without ErrInvalidRequest.
-func TestInjectStorageKeysRoundTripsWithSplit(t *testing.T) {
-	space := "space-a"
-	key := "plugins/space-a/attachments/skill-x-deadbeefdeadbeef.bin"
-	original := json.RawMessage(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
-		`{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# doc"},` +
-		`{"path":"assets/logo.bin","content_type":"storage","mime_type":"application/octet-stream","content_size":10,"content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","storage_uri":"` + key + `"}]}`)
-	stripped, keys, err := splitStorageKeys(original, space)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Feeding the STORED (stripped) package straight back through the write path
-	// must fail — this is the read-modify-write blocker reinjectUpdateStorageKeys
-	// works around on the update path.
-	if _, _, err := splitStorageKeys(stripped, space); err == nil {
-		t.Fatalf("re-splitting a stripped package should reject the keyless storage attachment")
-	}
-	// Re-injecting the sidecar first makes the round trip succeed and reproduce
-	// the identical key map.
-	reinjected := injectStorageKeys(stripped, keys)
-	_, keys2, err := splitStorageKeys(reinjected, space)
-	if err != nil {
-		t.Fatalf("re-split after inject failed: %v", err)
-	}
-	if string(keys2) != string(keys) {
-		t.Fatalf("round-trip keys drifted: %s vs %s", keys2, keys)
-	}
-}
-
 // TestUpdateRoundTripReinjectsStorageKeys is the empirical probe for the
 // read-modify-write blocker: the stored 2.0 package returned by GET carries no
 // inline storage_uri, so echoing it back into the write path is rejected by

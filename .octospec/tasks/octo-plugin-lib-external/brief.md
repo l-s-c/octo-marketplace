@@ -141,12 +141,13 @@ Status is not sent by octo-web, so C1 does not touch the frontend.
   moved BEFORE the no-op short-circuit so a row needing only normalization still
   migrates. `repackagePlugins`/`repackageVersions` persist `attachment_keys_json`
   only when keys were split (never overwriting an expand-populated sidecar).
-- **Restore path:** `restoreWriteRequest` (import rollback) now re-injects
-  `storage_uri` from `old.AttachmentKeys` via `injectStorageKeys` before feeding
-  the stored package back through the write path, which otherwise rejected the
-  keyless storage attachment and failed the rollback.
+- **Restore path:** retired with the publish flow. The import rollback
+  (`restoreWriteRequest`) and its `injectStorageKeys` re-injection helper were
+  removed along with `Service.Publish`; a re-import is now just another save
+  revision with no half-applied state to restore, so there is no stored-package
+  re-canonicalization to guard.
 - New regression tests: `TestTransformPackageSplitsStorageURI`,
-  `TestSkillRefFallsBackToInlineStorageURI`, `TestInjectStorageKeysRoundTripsWithSplit`,
+  `TestSkillRefFallsBackToInlineStorageURI`,
   `TestAttachmentKeysMigrationAddsAndDropsColumn`.
 
 ## Progress (this branch `feat/octo-plugin-lib-external`)

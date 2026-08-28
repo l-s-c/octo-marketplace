@@ -217,13 +217,13 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 		// spilled object namespace, and the row all agree on one plugin_id. The
 		// create is a single transaction that snapshots the version and attaches the
 		// default-scene placement itself, so no separate publish follows.
-		detail, err = s.createWithID(ctx, caller, *req, pluginID, true)
+		detail, err = s.createWithID(ctx, caller, *req, pluginID)
 	} else {
 		// The update is a single transaction that snapshots the new version and
 		// keeps the existing default placement's category in sync; a re-import is
 		// just another save revision, so there is no version-string conflict to
 		// pre-flight and no half-applied state to restore on failure.
-		detail, err = s.update(ctx, caller, updateID, *req, true)
+		detail, err = s.update(ctx, caller, updateID, *req)
 	}
 	if err != nil {
 		s.deleteObjects(ctx, uploaded...)
