@@ -123,23 +123,29 @@ type importFields struct {
 	name        string
 	description string
 	version     string
-	tags        []string
-	visibility  model.PluginVisibility
-	categoryID  *string
-	icon        string
-	changelog   *string
+	// versionSubmitted records whether the caller explicitly sent a version (vs
+	// the resolved fallback to the parse result or the "1.0.0" default). The
+	// reupload path keeps the old current_version label only when no version was
+	// submitted, mirroring the tenant/admin update paths.
+	versionSubmitted bool
+	tags             []string
+	visibility       model.PluginVisibility
+	categoryID       *string
+	icon             string
+	changelog        *string
 }
 
 func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdmin bool, old *model.Plugin) (*importFields, error) {
 	f := &importFields{
-		pluginName:  strings.TrimSpace(p.PluginName),
-		name:        strings.TrimSpace(p.Name),
-		description: strings.TrimSpace(p.Description),
-		changelog:   trimOptional(p.Changelog),
-		version:     strings.TrimSpace(p.Version),
-		visibility:  p.Visibility,
-		categoryID:  trimOptional(p.CategoryID),
-		icon:        strings.TrimSpace(p.Icon),
+		pluginName:       strings.TrimSpace(p.PluginName),
+		name:             strings.TrimSpace(p.Name),
+		description:      strings.TrimSpace(p.Description),
+		changelog:        trimOptional(p.Changelog),
+		version:          strings.TrimSpace(p.Version),
+		versionSubmitted: strings.TrimSpace(p.Version) != "",
+		visibility:       p.Visibility,
+		categoryID:       trimOptional(p.CategoryID),
+		icon:             strings.TrimSpace(p.Icon),
 	}
 	// A package-only reupload replaces the package/tags but must preserve the
 	// row's curated market identity. The display name (plugin.Name column), the
@@ -164,6 +170,13 @@ func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdm
 		}
 		if f.categoryID == nil {
 			f.categoryID = old.CategoryID
+		}
+		// Preserve the row's visibility on a package-only reupload that omits it,
+		// rather than letting it default to `space` below — otherwise a private
+		// skill silently widens to Space-visible on reupload. Tenant path only; the
+		// admin import forces its own visibility via adminEffectiveWrite.
+		if !systemAdmin && f.visibility == "" {
+			f.visibility = old.Visibility
 		}
 	}
 	if f.name == "" {
@@ -350,6 +363,13 @@ func buildImportWriteRequest(f *importFields, attachments []map[string]any) (*Wr
 	if err != nil {
 		return nil, ErrInvalidRequest
 	}
+	// Carry the submitted version through so buildWrite stamps it onto
+	// current_version; when the caller omitted a version we leave it empty so the
+	// create defaults to "1.0.0" and the reupload keeps the row's existing label.
+	version := ""
+	if f.versionSubmitted {
+		version = f.version
+	}
 	return &WriteRequest{
 		Name:       f.pluginName,
 		Type:       model.PluginTypeSkill,
@@ -357,6 +377,7 @@ func buildImportWriteRequest(f *importFields, attachments []map[string]any) (*Wr
 		Tags:       canonicalTags,
 		Icon:       f.icon,
 		Visibility: f.visibility,
+		Version:    version,
 		Manifest:   manifest,
 		Package:    pkg,
 	}, nil
