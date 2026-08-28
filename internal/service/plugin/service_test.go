@@ -614,6 +614,23 @@ func TestUpdateAcceptsRelationIDAndMatchingSourceWireID(t *testing.T) {
 	}
 }
 
+// TestUpdateWithoutVersionKeepsCurrentVersion pins that a metadata edit which
+// omits the optional version does NOT reset an imported plugin's declared
+// current_version to the "1.0.0" default — every existing client omits the field.
+func TestUpdateWithoutVersionKeepsCurrentVersion(t *testing.T) {
+	ver, verID := "2.4.0", "ver-1"
+	f := &fakeStore{plugins: map[string]*model.Plugin{
+		"plugin-1": {ID: "plugin-1", Name: "Example Plugin", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), CurrentVersion: &ver, CurrentVersionID: &verID},
+	}}
+	req := validRequest() // carries no Version
+	if _, err := fixedService(f).Update(context.Background(), testCaller, "plugin-1", req); err != nil {
+		t.Fatal(err)
+	}
+	if f.update == nil || f.update.CurrentVersion == nil || *f.update.CurrentVersion != ver {
+		t.Fatalf("current_version not preserved on version-less update: %#v", f.update)
+	}
+}
+
 func TestUpdateRejectsForeignRelationSourceWireID(t *testing.T) {
 	f := &fakeStore{plugins: map[string]*model.Plugin{
 		"plugin-1": {ID: "plugin-1", Name: "Example Plugin", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},

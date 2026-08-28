@@ -460,6 +460,13 @@ func (s *Service) update(ctx context.Context, caller Caller, pluginID string, re
 		return nil, err
 	}
 	p.CreatedAt, p.CurrentVersionID = old.CreatedAt, old.CurrentVersionID
+	// A metadata edit that omits `version` must keep the existing current-version
+	// label — buildWrite otherwise defaults an omitted version to "1.0.0", which
+	// would silently reset a plugin imported as e.g. "2.4.0" on its first save.
+	// Mirrors AdminUpdate / container reupload, which also carry old.CurrentVersion.
+	if strings.TrimSpace(req.Version) == "" {
+		p.CurrentVersion = old.CurrentVersion
+	}
 	// Creation provenance is immutable; keep the original creator identity.
 	p.CreatorName, p.CreatedByType = old.CreatorName, old.CreatedByType
 	p.CreatedByBotUID, p.CreatedByBotName = old.CreatedByBotUID, old.CreatedByBotName
