@@ -8,6 +8,10 @@ on the public module `github.com/Mininglamp-OSS/octo-plugin-lib/plugin`, and
 adopt its current contract generation (schema 2.0). One authoritative contract,
 no hand-maintained copy that can silently drift from upstream.
 
+This branch also lands the coordinated version / placement / publish model
+changes that the 2.0 adoption enabled — see "Additional scope landed with this
+migration" below; they are declared, not incidental.
+
 ## Why the public module is a contract *upgrade*, not a mirror swap
 
 Three sources of the same library exist with different generations:
@@ -108,25 +112,78 @@ window as the backend (2.0 rejects 1.0 `$schema`):
 - `packages/dmworkskillmarket/src/api/skillApiReal.ts` lines 593, 622
 Status is not sent by octo-web, so C1 does not touch the frontend.
 
+## Additional scope landed with this migration (declared)
+
+Beyond the pure contract swap above, this branch also lands the version /
+placement / publish model changes below. They are in scope for this PR and
+disclosed in its description's "Scope & deploy coordination" section; they are
+recorded here so the Linked Spec and the shipped change agree.
+
+- **`POST /plugins/publish` removed.** A save IS a version — every create/edit
+  snapshots a `plugin_versions` row and, for tenant/admin create, auto-attaches
+  the default market placement — so the explicit publish step (and its import
+  rollback / `restoreWriteRequest` / `injectStorageKeys`) is gone. This is a
+  knowing, coordinated OpenAPI breaking change (documented exception in
+  `docs/openapi/breaking-ignore.txt` + `.oasdiff.yaml`).
+- **Per-save version history + `version` wire field.** `/plugins/upsert` accepts
+  an optional `version` label stored on `plugins.current_version` (default
+  `1.0.0`; a version-less update inherits the stored label; import create stamps
+  the parsed package version). `plugin_versions.version` is a per-plugin
+  auto-increment ordinal by design, NOT the caller label. The snapshot dedup skips
+  only a byte-identical no-op — content hashes AND label AND relations AND sidecar
+  AND changelog all unchanged — so a client cannot bloat history with identical
+  resubmits while every real save is recorded.
+- **`GET /plugins/versions`** returns per-save history gated by ordinary plugin
+  visibility, projected to metadata only (label / hashes / changelog / timestamp);
+  full manifest/package bytes are not returned per history row.
+- **Create-time + self-healing default placement.** Create attaches the default
+  visible placement; `Update`/`RebuildGraph` insert it when missing so a plugin
+  created before auto-placement stays market-listable. Placement `visible` /
+  `sort_order` / multi-scene control retired with publish.
+- **`POST /admin/skill_icon_uploads`** admin twin route (mirrors
+  `/admin/mcp_icon_uploads`); connector category names localized into
+  `plugin_categories.name`.
+- **Backfill** additionally attaches default placements (`plan`) and fills
+  categories / icons / tool-counts / metrics (`enrich`); `expand-skills` fails
+  closed on an unresolvable live archive/object (gating `skip`) and repairs the
+  audit hash chain across expanded→skipped boundaries.
+
 ## Out of scope
 
 - Re-keying / moving stored skill blobs (explicitly rejected in favor of the
   sidecar).
 - Adopting the upstream `pluginstore`/`pluginservice`/`pluginconformance` layers
   or the `RevisionContent` contract; the marketplace keeps its own persistence.
-- Any octo-web change beyond the four `$schema` constants.
+- octo-web / octo-admin changes beyond the coordinated set that ships in the same
+  deploy window (the four `$schema` constants, the `version` wire field, and
+  reliance on tenant create-time auto-placement) — see the paired PRs
+  octo-web #1584 / octo-admin #145.
 
 ## Acceptance criteria
 
+Closed in CI / this branch:
 - `go build ./...`, `gofmt -l` clean, `go test ./...` green.
-- `make openapi-check` / `make openapi-diff` unaffected (no wire DTO change) or
-  documented.
-- MySQL-gated: migration up/down test, backfill dry-run/apply/verify idempotent
-  and byte-identical to fresh canonicalize, `contract_sweep_test` validates all
-  live rows through the 2.0 lib, storage read paths (install + download) resolve
-  keys from the sidecar.
-- Deploy runbook: backend backfill runs before or with the octo-web `$schema`
-  bump; the two ship in one coordinated window.
+- `make openapi-check` passes; `make openapi-diff` breaking is documented — the
+  `POST /plugins/publish` removal is a knowing exception, and the added
+  `/admin/skill_icon_uploads` route + metadata-only `GET /plugins/versions` are
+  regenerated into the spec.
+- CI's MySQL 8.0 service verifies the migration up/down test.
+- The version/placement/publish model is covered by unit + sqlmock tests:
+  per-save snapshot, no-op dedup over every recorded component, version-label
+  contract (create vs update), self-healing default placement, and the
+  expand-skills truncation guard + audit-chain repair.
+
+Deploy-time runbook gates (require a live MySQL + object store — cannot be closed
+in the worktree or by CI, which does not run migrations before the sweep):
+- Run the combined backfill (`plan` → `enrich`, or `enrich` → `repackage` →
+  `expand-skills` for a previously-deployed env) against the real DB: hash
+  recompute + `$schema` rewrite + storage_uri split byte-identical to a fresh
+  canonicalize, idempotent, `remaining` all zero, no `error`/`skip` issue.
+- `contract_sweep_test` (gated on `TEST_MYSQL_DSN`) validates every live row
+  through the 2.0 lib against a migrated, populated database.
+- Storage read paths (install + download) resolve keys from the sidecar.
+- Backend backfill runs before or with the octo-web / octo-admin releases; all
+  ship in one coordinated window (#72 deploys first or atomically).
 
 ## Post-review fixes (adversarial self-review, 3 confirmed correctness bugs)
 
