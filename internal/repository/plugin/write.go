@@ -512,18 +512,23 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	if err != nil {
 		return nil, err
 	}
-	// A save is a version — but a save that changes nothing is not. Skip the
-	// snapshot only when BOTH the content (manifest/plugin hashes) AND the
-	// caller-declared label match the row under lock, so a client cannot append an
-	// unbounded run of identical version rows by resubmitting the same body, while
-	// a version-label-only change still records a version and persists the new
-	// label (current_version is written only inside snapshotVersion). On a true
-	// no-op the caller keeps its existing current_version_id (the service seeds it
-	// from the old row and only overrides it when a new snapshot is written).
+	// A save is a version — but a save that changes NOTHING is not. Snapshot when
+	// any component a version row records differs from the row under lock: the
+	// content hashes, the caller-declared label (written only inside
+	// snapshotVersion — the main UPDATE above does not touch current_version), the
+	// relation graph (syncRelations reports adds/updates/deletes), or a submitted
+	// changelog. Only a byte-identical resubmit with no relation change and no
+	// changelog is skipped — the anti-bloat no-op — so a client cannot append an
+	// unbounded run of identical version rows, while a version-, relation-, or
+	// changelog-only save is still recorded and its label/graph/changelog
+	// persisted. A skipped no-op keeps its existing current_version_id (seeded
+	// from the old row by the service).
 	contentUnchanged := p.PluginHash == before.PluginHash && p.ManifestHash == before.ManifestHash
 	labelUnchanged := (p.CurrentVersion == nil) == (before.CurrentVersion == nil) &&
 		(p.CurrentVersion == nil || *p.CurrentVersion == *before.CurrentVersion)
-	if m.SnapshotVersion && !(contentUnchanged && labelUnchanged) {
+	relationsChanged := len(sync.Created) > 0 || len(sync.Updated) > 0 || len(sync.Deleted) > 0
+	hasChangelog := m.Changelog != nil && *m.Changelog != ""
+	if m.SnapshotVersion && (!contentUnchanged || !labelUnchanged || relationsChanged || hasChangelog) {
 		if sync.NewVersionID, err = snapshotVersion(ctx, tx, r.id, now, p, m.Relations, m.Changelog, m.OperatorID); err != nil {
 			return nil, err
 		}
