@@ -516,19 +516,22 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	// any component a version row records differs from the row under lock: the
 	// content hashes, the caller-declared label (written only inside
 	// snapshotVersion — the main UPDATE above does not touch current_version), the
-	// relation graph (syncRelations reports adds/updates/deletes), or a submitted
-	// changelog. Only a byte-identical resubmit with no relation change and no
-	// changelog is skipped — the anti-bloat no-op — so a client cannot append an
-	// unbounded run of identical version rows, while a version-, relation-, or
-	// changelog-only save is still recorded and its label/graph/changelog
+	// relation graph (syncRelations reports adds/updates/deletes), the attachment
+	// sidecar (the managed object keys are stripped before hashing, so a same-path
+	// key swap leaves the hashes equal), or a submitted changelog. Only a
+	// byte-identical resubmit with no relation/sidecar change and no changelog is
+	// skipped — the anti-bloat no-op — so a client cannot append an unbounded run
+	// of identical version rows, while a version-, relation-, sidecar-, or
+	// changelog-only save is still recorded and its label/graph/keys/changelog
 	// persisted. A skipped no-op keeps its existing current_version_id (seeded
 	// from the old row by the service).
 	contentUnchanged := p.PluginHash == before.PluginHash && p.ManifestHash == before.ManifestHash
 	labelUnchanged := (p.CurrentVersion == nil) == (before.CurrentVersion == nil) &&
 		(p.CurrentVersion == nil || *p.CurrentVersion == *before.CurrentVersion)
 	relationsChanged := len(sync.Created) > 0 || len(sync.Updated) > 0 || len(sync.Deleted) > 0
+	sidecarUnchanged := sameAttachmentKeys(p.AttachmentKeys, before.AttachmentKeys)
 	hasChangelog := m.Changelog != nil && *m.Changelog != ""
-	if m.SnapshotVersion && (!contentUnchanged || !labelUnchanged || relationsChanged || hasChangelog) {
+	if m.SnapshotVersion && (!contentUnchanged || !labelUnchanged || relationsChanged || !sidecarUnchanged || hasChangelog) {
 		if sync.NewVersionID, err = snapshotVersion(ctx, tx, r.id, now, p, m.Relations, m.Changelog, m.OperatorID); err != nil {
 			return nil, err
 		}
@@ -996,4 +999,32 @@ func insertAudit(ctx context.Context, tx *sql.Tx, auditID string, now interface{
 	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO plugin_audit_logs (audit_log_id,plugin_id,action,operator_id,operator_name,request_id,before_hash,after_hash,manifest_snapshot_json,plugin_snapshot_json,remark,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, auditID, p.ID, action, m.OperatorID, m.OperatorName, m.RequestID, bh, ah, manifest, pkg, m.Remark, now)
 	return wrapped("append audit", err)
+}
+
+// sameAttachmentKeys reports whether two attachment sidecars hold the same
+// path→object-key map, tolerant of nil / empty / JSON key ordering. The managed
+// keys are stripped before the package is hashed, so a same-path key swap leaves
+// plugin_hash/manifest_hash unchanged; the version-snapshot dedup consults this
+// so a sidecar-only save still records a version rather than silently moving the
+// live row's keys away from the snapshot current_version_id points at.
+func sameAttachmentKeys(a, b json.RawMessage) bool {
+	ma, mb := decodeSidecarMap(a), decodeSidecarMap(b)
+	if len(ma) != len(mb) {
+		return false
+	}
+	for k, v := range ma {
+		if bv, ok := mb[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+func decodeSidecarMap(raw json.RawMessage) map[string]string {
+	m := map[string]string{}
+	if len(raw) == 0 {
+		return m
+	}
+	_ = json.Unmarshal(raw, &m)
+	return m
 }
