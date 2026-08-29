@@ -374,8 +374,8 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 `+updWhere, updArgs...); err != nil {
 		return nil, wrapped("rebuild", err)
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE plugin_placements SET category_id=?,updated_at=? WHERE plugin_id=?`, topPlugin.CategoryID, now, topPlugin.ID); err != nil {
-		return nil, wrapped("rebuild placements", err)
+	if err = syncDefaultPlacement(ctx, tx, r.id, now, topPlugin.ID, topPlugin.CategoryID); err != nil {
+		return nil, err
 	}
 	// Phase 4: resync the top plugin's relations to the new children. Every new
 	// edge carries an empty ID so syncRelations inserts it and soft-deletes the
@@ -504,9 +504,8 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	// publish removed, the update owns placement category configuration; the
 	// plugins row's own category_id is written unconditionally just above, so the
 	// placement simply tracks it.)
-	_, err = tx.ExecContext(ctx, `UPDATE plugin_placements SET category_id=?,updated_at=? WHERE plugin_id=?`, p.CategoryID, now, p.ID)
-	if err != nil {
-		return nil, wrapped("update placements", err)
+	if err = syncDefaultPlacement(ctx, tx, r.id, now, p.ID, p.CategoryID); err != nil {
+		return nil, err
 	}
 	sync, err := syncRelations(ctx, tx, r.id, now, p.ID, m.OperatorID, m.Relations)
 	if err != nil {
@@ -1027,4 +1026,31 @@ func decodeSidecarMap(raw json.RawMessage) map[string]string {
 	}
 	_ = json.Unmarshal(raw, &m)
 	return m
+}
+
+// syncDefaultPlacement keeps a plugin listable across a save. Market list pages
+// INNER JOIN the "default" placement, and after publish-removal no non-create
+// path inserts one — so a plugin created before auto-placement (e.g. an old
+// tenant create that never published) would be permanently filtered out on its
+// next edit. Insert the default placement when the plugin has none (self-healing,
+// carrying the current category), otherwise sync the existing placement's
+// category to the current one (including clearing it to NULL). The id is consumed
+// only on the insert path. Only the default placement is managed; publish-era
+// multi-scene placements are gone.
+func syncDefaultPlacement(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, pluginID string, categoryID *string) error {
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM plugin_placements WHERE plugin_id=? AND placement_code=?)`, pluginID, "default").Scan(&exists); err != nil {
+		return wrapped("check placement", err)
+	}
+	if !exists {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO plugin_placements (placement_id,placement_code,plugin_id,category_id,visible,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+			newID(), "default", pluginID, categoryID, true, 0, now, now); err != nil {
+			return wrapped("insert default placement", err)
+		}
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE plugin_placements SET category_id=?,updated_at=? WHERE plugin_id=?`, categoryID, now, pluginID); err != nil {
+		return wrapped("update placements", err)
+	}
+	return nil
 }
