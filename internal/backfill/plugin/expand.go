@@ -345,6 +345,22 @@ func (r *Runner) expandAudits(ctx context.Context, exp SkillExpander, apply bool
 		}
 		if wouldTruncate {
 			p.issues = append(p.issues, Issue{"info", "audit_unexpandable", "plugin_audit_logs", w.id, "snapshot's archive/object key is unresolvable without a sidecar; left unexpanded to preserve the immutable audit record"})
+			// The snapshot stays unexpanded, but its before_hash must still be
+			// repaired to the predecessor's rewritten after_hash — otherwise the
+			// chain breaks at an expanded→skipped boundary (the previous row was
+			// rehashed while this row's before_hash still points at its OLD after).
+			// Repair before_hash ONLY; plugin_snapshot_json and this row's own
+			// (unchanged) after_hash are left untouched, and that after_hash remains
+			// the link for the next row via lastHash below.
+			if oldBefore != "" {
+				if previous, seen := lastHash[w.pluginID]; seen && previous != "" && previous != oldBefore {
+					p.actions = append(p.actions, expandAction{
+						count: func(c *ExpandCounts) *int { return &c.Audits },
+						query: `UPDATE plugin_audit_logs SET before_hash=? WHERE audit_log_id=?`,
+						args:  []any{hashColumn(previous, beforeWasNull), w.id},
+					})
+				}
+			}
 			// A delete audit carries a NULL after_hash — it must NOT become the
 			// chain link for the following row (mirrors the guard below).
 			if oldAfter != "" {

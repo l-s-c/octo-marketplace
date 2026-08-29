@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -236,5 +237,76 @@ func TestExpandPluginsSkipsTruncatableLiveRowFailClosed(t *testing.T) {
 	}
 	if len(p.issues) != 1 || p.issues[0].Level != "skip" || p.issues[0].Code != "expand_would_truncate" {
 		t.Fatalf("expected one gating expand_would_truncate skip, got %#v", p.issues)
+	}
+}
+
+// zipTruncateExpander truncates only snapshots that carry skill/package.zip (an
+// unresolvable managed archive) and expands ref.json snapshots — so one plugin's
+// audit history can mix expanded and skipped rows.
+type zipTruncateExpander struct{ out string }
+
+func (zipTruncateExpander) WouldTruncateSkillPackage(_, _ string, pkg, _ json.RawMessage) bool {
+	return strings.Contains(string(pkg), "skill/package.zip")
+}
+
+func (z zipTruncateExpander) ExpandSkillPackage(_ context.Context, _, _ string, pkg, _ json.RawMessage) (json.RawMessage, json.RawMessage, bool, error) {
+	if !hasLegacyPointer(pkg) {
+		return pkg, nil, false, nil
+	}
+	return json.RawMessage(z.out), nil, true, nil
+}
+
+// TestExpandAuditsRepairsChainAcrossSkippedBoundary pins the audit-chain fix: when
+// a plugin's history mixes an expanded row (A, rehashed) and a skipped truncatable
+// row (B), B's before_hash must be repaired to A's NEW after_hash so the per-plugin
+// chain stays linked across the expanded→skipped boundary. B's snapshot and its own
+// after_hash stay untouched, and B is still a non-gating info skip.
+func TestExpandAuditsRepairsChainAcrossSkippedBoundary(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	r := New(db)
+
+	manifest := `{"plugin_name":"技能","name":"skill-a","description":"d"}`
+	refPkg := legacySkillPkg() // skill/ref.json → expandable, not truncatable
+	zipPkg := `{"attachments":[` + attachmentJSON("SKILL.md", "text/markdown", "# stub") +
+		`,{"path":"skill/package.zip","content_type":"storage","mime_type":"application/zip","content_size":10,"content_hash":"sha256:0"}]}`
+	tree := `{"$schema":"cowork-plugin-package-2.0.json","attachments":[` + attachmentJSON("SKILL.md", "text/markdown", "# real") + `]}`
+
+	mock.ExpectQuery(`SELECT audit_log_id, plugin_id, manifest_snapshot_json, plugin_snapshot_json, before_hash, after_hash, created_at FROM plugin_audit_logs`).
+		WillReturnRows(sqlmock.NewRows([]string{"audit_log_id", "plugin_id", "manifest_snapshot_json", "plugin_snapshot_json", "before_hash", "after_hash", "created_at"}).
+			AddRow("a1", "p1", manifest, refPkg, "sha256:root", "sha256:a-old", "2026-01-01T00:00:00Z").
+			AddRow("a2", "p1", manifest, zipPkg, "sha256:a-old", "sha256:b", "2026-01-02T00:00:00Z"))
+
+	var p expandPlan
+	if err := r.expandAudits(context.Background(), zipTruncateExpander{out: tree}, true,
+		map[string]string{"p1": "skill"}, map[string]string{"p1": "space-a"}, &p); err != nil {
+		t.Fatal(err)
+	}
+
+	var aNewAfter, bBeforeRepair string
+	var bRepairSeen bool
+	for _, act := range p.actions {
+		if strings.Contains(act.query, "plugin_snapshot_json") && len(act.args) == 4 && act.args[3] == "a1" {
+			aNewAfter, _ = act.args[2].(string) // after_hash
+		}
+		if act.query == `UPDATE plugin_audit_logs SET before_hash=? WHERE audit_log_id=?` && act.args[1] == "a2" {
+			bRepairSeen = true
+			bBeforeRepair, _ = act.args[0].(string)
+		}
+	}
+	if aNewAfter == "" {
+		t.Fatal("A did not get a rewritten after_hash")
+	}
+	if !bRepairSeen {
+		t.Fatal("B's before_hash was not repaired — the chain breaks at the expanded→skipped boundary")
+	}
+	if bBeforeRepair != aNewAfter {
+		t.Fatalf("B before_hash %q != A new after_hash %q — chain not linked", bBeforeRepair, aNewAfter)
+	}
+	if len(p.issues) != 1 || p.issues[0].Code != "audit_unexpandable" {
+		t.Fatalf("expected one non-gating info skip for B, got %#v", p.issues)
 	}
 }
