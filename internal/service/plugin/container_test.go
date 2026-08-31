@@ -944,3 +944,47 @@ func TestImportExpertContainerPreservesMCPConfigVerbatim(t *testing.T) {
 		t.Fatalf("mcp_config not preserved verbatim (secret scanned/blanked?): %q", mcp)
 	}
 }
+
+// TestImportContainerStampsTopCurrentVersionID is the N2-residual regression on
+// the container import path: CreateGraph snapshots the top node, so the imported
+// top's response must carry the new plugin_versions id (not nil) — the DB row's
+// current_version_id advanced and a follow-up GET must agree.
+func TestImportContainerStampsTopCurrentVersionID(t *testing.T) {
+	store := &fakeStore{plugins: map[string]*model.Plugin{}}
+	svc := containerService(store)
+	manifest := map[string]any{
+		"name":        "Release Captain",
+		"summary":     "Ships releases safely.",
+		"tags":        []string{"ops"},
+		"instruction": "You coordinate the release train.",
+		"mcp_config":  `{"mcpServers":{}}`,
+		"skills": []map[string]any{
+			{"name": "Deployer", "file": "skills/deploy.zip"},
+		},
+	}
+	archive := containerZip(t, "expert.json", manifest, map[string][]byte{
+		"skills/deploy.zip": textSkillZip(t, "Deployer"),
+	})
+	detail, err := svc.ImportContainer(context.Background(), containerCaller, ContainerImportParams{Archive: archive})
+	if err != nil {
+		t.Fatalf("ImportContainer: %v", err)
+	}
+	if detail.Plugin.CurrentVersionID == nil || *detail.Plugin.CurrentVersionID != "ver-snap" {
+		t.Fatalf("import top current_version_id = %v, want ver-snap", detail.Plugin.CurrentVersionID)
+	}
+}
+
+// TestReuploadContainerStampsTopCurrentVersionID is the N2-residual regression on
+// the container reupload path: RebuildGraph snapshots the rebuilt top, so the
+// response must carry the NEW id, not the stale stored one.
+func TestReuploadContainerStampsTopCurrentVersionID(t *testing.T) {
+	store, _ := existingExpertStore(t)
+	svc := containerService(store)
+	detail, err := svc.ReuploadContainer(context.Background(), containerCaller, "expert-9", ContainerImportParams{Archive: expertReuploadArchive(t)})
+	if err != nil {
+		t.Fatalf("ReuploadContainer: %v", err)
+	}
+	if detail.Plugin.CurrentVersionID == nil || *detail.Plugin.CurrentVersionID != "ver-snap" {
+		t.Fatalf("reupload top current_version_id = %v, want the new ver-snap", detail.Plugin.CurrentVersionID)
+	}
+}

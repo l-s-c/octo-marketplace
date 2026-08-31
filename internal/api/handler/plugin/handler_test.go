@@ -62,9 +62,6 @@ func (f *fakeService) Delete(_ context.Context, c pluginsvc.Caller, _ string) er
 func (f *fakeService) ListVersions(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginVersion, int64, error) {
 	return f.versions, f.versionTotal, f.err
 }
-func (f *fakeService) Publish(context.Context, pluginsvc.Caller, string, pluginsvc.PublishRequest) (*model.PluginVersion, error) {
-	return &model.PluginVersion{}, f.err
-}
 func (f *fakeService) ListCategories(context.Context, pluginsvc.Caller, string, model.PluginType) ([]model.PluginCategory, error) {
 	return nil, f.err
 }

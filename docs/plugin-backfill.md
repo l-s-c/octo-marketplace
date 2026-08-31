@@ -30,7 +30,9 @@ go run ./cmd/plugin-backfill -mode verify
 
 The default mode is `dry-run`. Output is structured JSON containing expected and observed counts, deterministic hashes, missing/conflicting counts, and explicit skipped-field/source issues. `apply` is transactional for each execution. `verify` performs no writes. The command exits with status 2 when verification finds missing or conflicting rows.
 
-Review every `issues` entry before cutover. A skipped field or row requires a product/data decision rather than inferred semantics.
+Review every `issues` entry before cutover. A skipped field or row requires a product/data decision rather than inferred semantics. In particular, a `repackage_invalid_package` row keeps its 1.0 `$schema` and is left read-only: reads still work (host parsers do not assert `$schema`), but any later fetch-edit-save is rejected by the 2.0 `DecodePackage` `$schema` check, so these rows need manual remediation.
+
+The `expand-skills` phase may emit `audit_unexpandable` at the **non-gating `info`** level: an immutable `plugin_audit_logs` snapshot whose archive/object key cannot be resolved without a sidecar is left unexpanded rather than rebuilt as a truncated SKILL.md stub. This is expected and safe (audit snapshots are never dereferenced for bytes), does not fail the gate, and needs no action — it only records which historical snapshots were preserved as-is.
 
 ## Phases
 
@@ -38,10 +40,10 @@ The command carries four idempotent phases (all support `dry-run` / `apply` / `v
 
 | Phase | What it does | When to run |
 | --- | --- | --- |
-| `plan` (default) | Deterministic historical backfill from the legacy tables (skills / mcp_servers / experts / expert_squads) into the unified plugin tables, emitting the contracts/v1 package layout. | Environments whose unified tables are empty while legacy data exists. |
+| `plan` (default) | Deterministic historical backfill from the legacy tables (skills / mcp_servers / experts / expert_squads) into the unified plugin tables, emitting the octo-plugin-lib 2.0 package layout (`cowork-plugin-*-2.0.json`). | Environments whose unified tables are empty while legacy data exists. |
 | `enrich` | Display-data fill: legacy icons, connector category registration, materialized tool counts, one-time resource-metrics copy onto plugin rows. | After `plan`, or on environments that predate these columns. |
-| `repackage` | Migrates already-stored documents to the contracts/v1 layout: strips embedded manifest.json, collapses expert_team packages to a single AGENTS.md, converts first-generation layouts, renames `expert_team_member` relations to `expert_team_expert` (re-deriving deterministic relation IDs), and recomputes every `plugin_hash` with the octo-plugin-lib formula across plugins, version snapshots, and audit chains. | Environments that ran a pre-contracts/v1 build of the unified plugin backend. |
-| `expand-skills` | **STORAGE-AWARE.** Expands skill packages from the legacy pointer layout (SKILL.md stub + `skill/ref.json`, or a `skill/package.zip` storage attachment) into the flat attachment tree — one attachment per file, text inlined and binary/oversize files re-uploaded to the Space's managed prefix — then recomputes `plugin_hash` across plugins, version snapshots, and audit chains. Unlike every other phase this one fetches each skill's stored zip and re-uploads files, so it **requires object-storage credentials** (`STORAGE_DRIVER` + `OSS_*` / `LOCAL_STORAGE_DIR`, the same variables marketplace-api reads). Empty-pointer snapshot skills collapse to a single inline SKILL.md. Idempotent: already-expanded skills carry no pointer and are skipped. | Environments that ran a pre-attachment-tree build of the unified skill backend (after `repackage`). |
+| `repackage` | Migrates already-stored documents to the octo-plugin-lib **2.0** contract: bumps the manifest and package `$schema` to `*-2.0.json` (recomputing `manifest_hash`), strips the derived `content_size`/`content_hash` from raw attachments, splits each storage attachment's `storage_uri` out of the package into the host-private `attachment_keys_json` sidecar column, strips embedded manifest.json, collapses expert_team packages to a single AGENTS.md, converts first-generation layouts, renames `expert_team_member` relations to `expert_team_expert` (re-deriving deterministic relation IDs), and recomputes every `plugin_hash` with the octo-plugin-lib formula (which stable-sorts attachments by path) across plugins, version snapshots, and audit chains. | Environments that ran a pre-2.0-contract build of the unified plugin backend. |
+| `expand-skills` | **STORAGE-AWARE.** Expands skill packages from the legacy pointer layout (SKILL.md stub + `skill/ref.json`, or a `skill/package.zip` storage attachment) into the flat 2.0 attachment tree — one attachment per file, text inlined and binary/oversize files re-uploaded to the Space's managed prefix and recorded in the `attachment_keys_json` sidecar — then recomputes `plugin_hash` across plugins, version snapshots, and audit chains. Because `repackage` has already moved any `skill/package.zip` key into the sidecar, this phase reads the sidecar to resolve the managed zip. Unlike every other phase this one fetches each skill's stored zip and re-uploads files, so it **requires object-storage credentials** (`STORAGE_DRIVER` + `OSS_*` / `LOCAL_STORAGE_DIR`, the same variables marketplace-api reads). Empty-pointer snapshot skills collapse to a single inline SKILL.md. Idempotent: already-expanded skills carry no pointer and are skipped. | Environments that ran a pre-attachment-tree build of the unified skill backend (**run after `repackage`**, which is what populates the sidecar). |
 
 ## Deployment runbook
 
@@ -58,17 +60,29 @@ data phases above do NOT — run them explicitly right after deploying a new bac
    - fresh environment: `plan` apply → verify, then `enrich` apply → verify;
    - previously-deployed environment: `enrich` apply → verify (if pending), then
      `repackage` apply → verify, then `expand-skills` apply → verify
-     (each `remaining` must be all zeros AND `issues` empty; the command exits 2
-     in ANY mode — including `apply` — when a phase leaves a non-zero remaining
-     count or records an error/skip issue, so review the reported issues before
+     (each `remaining` must be all zeros AND no `error`/`skip` issue remains; the
+     command exits 2 in ANY mode — including `apply` — when a phase leaves a
+     non-zero remaining count or records an `error` or `skip` issue. `info` issues
+     are non-gating and expected — e.g. `audit_unexpandable`, a permanent,
+     data-preserving skip of an audit snapshot with no resolvable key — so a run
+     that reports only `info` issues is green. Review every reported issue before
      proceeding).
    `expand-skills` additionally needs object-storage env (`STORAGE_DRIVER` +
    `OSS_*` / `LOCAL_STORAGE_DIR`); the other phases run DB-only.
 4. Release the matching octo-web build in the same window — old and new frontends read
    different package layouts, so the migration and the frontend must not drift apart.
 
-Keep the gap between steps 2 and 3 short: the new binary reads the contracts/v1 layout,
-so pre-migration rows are served degraded until `repackage` completes.
+Keep the gap between steps 2 and 3 short: the new binary reads the 2.0 contract layout,
+so pre-migration rows are served degraded until `repackage` completes. Storage-backed
+reads survive the gap via the inline-`storage_uri` fallback, but manifests/packages are
+only contract-valid once `repackage` runs.
+
+> **One-way door.** Once `repackage`/`expand-skills` strip `storage_uri` from
+> `plugin_json`, the `attachment_keys_json` sidecar is the only surviving record of each
+> object key. The migration `20260827-00-plugin-attachment-keys.sql` `Down` simply drops
+> the sidecar columns — it does **not** re-inline the keys — so schema rollback is not
+> available after the backfill has run. Snapshot/restore the database before applying if
+> you need a true revert path.
 
 ## Standalone image
 

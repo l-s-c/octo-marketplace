@@ -19,11 +19,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/Mininglamp-OSS/octo-marketplace/internal/logging"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 	skillrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/skill"
 	skillsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/skill"
-	"go.uber.org/zap"
 )
 
 // ErrInvalidParseTask covers absent, foreign, unfinished, and already-consumed
@@ -79,13 +77,12 @@ func (s *Service) Import(ctx context.Context, caller Caller, p ImportParams) (*D
 
 	updateID := ""
 	var oldPlugin *model.Plugin
-	var oldRels []model.PluginRelation
 	if strings.TrimSpace(p.PluginID) != "" {
 		updateID, err = parseStorageID(p.PluginID)
 		if err != nil {
 			return nil, err
 		}
-		old, rels, err := s.repo.GetWithRelations(ctx, scope(caller), updateID)
+		old, _, err := s.repo.GetWithRelations(ctx, scope(caller), updateID)
 		if err != nil {
 			return nil, mapStoreError(err)
 		}
@@ -95,26 +92,12 @@ func (s *Service) Import(ctx context.Context, caller Caller, p ImportParams) (*D
 		if old.OwnerUID != caller.UID || old.Type != model.PluginTypeSkill || old.IsEmbedded {
 			return nil, ErrNotFound
 		}
-		oldPlugin, oldRels = old, rels
+		oldPlugin = old
 	}
 
-	fields, err := resolveImportFields(p, task, caller.IsSystemAdmin)
+	fields, err := resolveImportFields(p, task, caller.IsSystemAdmin, oldPlugin)
 	if err != nil {
 		return nil, err
-	}
-
-	// Pre-flight the immutable-version conflict on the re-import path BEFORE any
-	// document mutation or object upload. Re-importing an existing version string
-	// is the ordinary user mistake; catching it here means the publish failure can
-	// no longer leave the live document half-updated under the old version pointer.
-	if updateID != "" {
-		exists, err := s.repo.VersionExists(ctx, scope(caller), updateID, fields.version)
-		if err != nil {
-			return nil, mapStoreError(err)
-		}
-		if exists {
-			return nil, ErrConflict
-		}
 	}
 
 	// Consume first: the optimistic status flip is the duplicate-import lock.
@@ -125,7 +108,7 @@ func (s *Service) Import(ctx context.Context, caller Caller, p ImportParams) (*D
 		}
 		return nil, fmt.Errorf("consume parse task: %w", err)
 	}
-	detail, err := s.importConsumedTask(ctx, caller, task, fields, updateID, oldPlugin, oldRels)
+	detail, err := s.importConsumedTask(ctx, caller, task, fields, updateID, oldPlugin)
 	if err != nil {
 		_ = s.parseTasks.ReleaseConsumedParseTask(context.WithoutCancel(ctx), task.ID)
 		return nil, err
@@ -140,23 +123,61 @@ type importFields struct {
 	name        string
 	description string
 	version     string
-	tags        []string
-	visibility  model.PluginVisibility
-	categoryID  *string
-	icon        string
-	changelog   *string
+	// versionSubmitted records whether the caller explicitly sent a version (vs
+	// the resolved fallback to the parse result or the "1.0.0" default). The
+	// reupload path keeps the old current_version label only when no version was
+	// submitted, mirroring the tenant/admin update paths.
+	versionSubmitted bool
+	tags             []string
+	visibility       model.PluginVisibility
+	categoryID       *string
+	icon             string
+	changelog        *string
 }
 
-func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdmin bool) (*importFields, error) {
+func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdmin bool, old *model.Plugin) (*importFields, error) {
 	f := &importFields{
-		pluginName:  strings.TrimSpace(p.PluginName),
-		name:        strings.TrimSpace(p.Name),
-		description: strings.TrimSpace(p.Description),
-		changelog:   trimOptional(p.Changelog),
-		version:     strings.TrimSpace(p.Version),
-		visibility:  p.Visibility,
-		categoryID:  trimOptional(p.CategoryID),
-		icon:        strings.TrimSpace(p.Icon),
+		pluginName:       strings.TrimSpace(p.PluginName),
+		name:             strings.TrimSpace(p.Name),
+		description:      strings.TrimSpace(p.Description),
+		changelog:        trimOptional(p.Changelog),
+		version:          strings.TrimSpace(p.Version),
+		versionSubmitted: strings.TrimSpace(p.Version) != "",
+		visibility:       p.Visibility,
+		categoryID:       trimOptional(p.CategoryID),
+		icon:             strings.TrimSpace(p.Icon),
+	}
+	// A package-only reupload replaces the package/tags but must preserve the
+	// row's curated market identity. The display name (plugin.Name column), the
+	// machine name (manifest name), the description, and the category live on the
+	// existing row, NOT the freshly-parsed package — so on a reupload prefer the
+	// old row over the package's parse result whenever the client omits a field.
+	// Without this an omitted name silently resets the skill's display name to
+	// the package's, the description to the package's, and the category to NULL;
+	// the two-step edit's follow-up metadata PATCH cannot be relied on to repair
+	// it (a transient failure — or the consumed parse task blocking a retry —
+	// leaves a corrupted row with no undo). The follow-up PATCH still applies any
+	// real edits the operator made.
+	if old != nil {
+		if f.pluginName == "" {
+			f.pluginName = old.Name
+		}
+		if f.name == "" {
+			f.name = manifestName(old.Manifest)
+		}
+		if f.description == "" {
+			f.description = manifestDescription(old.Manifest)
+		}
+		if f.categoryID == nil {
+			f.categoryID = old.CategoryID
+		}
+		// Preserve the row's visibility on a package-only reupload that omits it,
+		// rather than letting it default to `space` below — otherwise a private
+		// skill silently widens to Space-visible on reupload. Tenant path only; the
+		// admin import forces its own visibility via adminEffectiveWrite.
+		if !systemAdmin && f.visibility == "" {
+			f.visibility = old.Visibility
+		}
 	}
 	if f.name == "" {
 		f.name = strings.TrimSpace(task.ResultName)
@@ -190,7 +211,7 @@ func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdm
 	return f, nil
 }
 
-func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *skillrepo.ParseTaskRow, f *importFields, updateID string, oldPlugin *model.Plugin, oldRels []model.PluginRelation) (*Detail, error) {
+func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *skillrepo.ParseTaskRow, f *importFields, updateID string, oldPlugin *model.Plugin) (*Detail, error) {
 	// A package-only re-upload omits the icon (nothing to change); the import is
 	// a full replace, so fall back to the existing row's icon rather than
 	// clearing it. A fresh create has no prior icon, so this only affects updates.
@@ -201,53 +222,28 @@ func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *s
 	if err != nil {
 		return nil, err
 	}
+	req.Changelog = f.changelog
+	// req.Version is already set by buildImportWriteRequest to the submitted
+	// version (empty when the caller omitted one) — do NOT force it to f.version
+	// here: f.version always falls back to the package version or "1.0.0", which
+	// would reset a reupload's stored label instead of letting Service.update keep
+	// it. versionSubmitted gates this, mirroring the admin import twin.
 	var detail *Detail
 	if updateID == "" {
 		// Persist under the reserved ID so the shipped SKILL.md frontmatter, the
-		// spilled object namespace, and the row all agree on one plugin_id.
+		// spilled object namespace, and the row all agree on one plugin_id. The
+		// create is a single transaction that snapshots the version and attaches the
+		// default-scene placement itself, so no separate publish follows.
 		detail, err = s.createWithID(ctx, caller, *req, pluginID)
 	} else {
-		detail, err = s.Update(ctx, caller, updateID, *req)
+		// The update is a single transaction that snapshots the new version and
+		// keeps the existing default placement's category in sync; a re-import is
+		// just another save revision, so there is no version-string conflict to
+		// pre-flight and no half-applied state to restore on failure.
+		detail, err = s.update(ctx, caller, updateID, *req)
 	}
 	if err != nil {
 		s.deleteObjects(ctx, uploaded...)
-		return nil, err
-	}
-	// Publish rebuilds the single default placement, keeping the Plugin
-	// discoverable in the confirmed marketplace scene. The ordinary version-string
-	// conflict was pre-flighted before mutation; a conflict here can only come
-	// from a concurrent publish racing between that check and this write.
-	placement := PlacementRequest{PlacementCode: "default", CategoryID: f.categoryID, Visible: true}
-	if _, err := s.Publish(ctx, caller, detail.Plugin.ID, PublishRequest{Version: f.version, Changelog: f.changelog, Placements: []PlacementRequest{placement}}); err != nil {
-		if updateID == "" {
-			// Create rollback: nothing else references the fresh objects yet.
-			_ = s.Delete(ctx, caller, detail.Plugin.ID)
-			s.deleteObjects(ctx, uploaded...)
-			return nil, err
-		}
-		// Update rollback: restore the prior document so the failed re-publish
-		// leaves no half-applied content change under the old version pointer.
-		// Only on a successful restore are the newly-uploaded objects safe to
-		// drop — buildSkillAttachmentTree recorded solely genuinely-new keys
-		// (Q3), so none are shared with the restored state. If the restore itself
-		// fails the live row still references those objects, so they are kept.
-		// NOTE (B5): the restore replays through Service.Update, so a not-yet-
-		// expanded backfilled skill whose stored package still carries a legacy-root
-		// skill/ref.json fails the caller-path canonicalization gate and the restore
-		// is skipped (logged). This only affects the narrow concurrent-publish race
-		// on an un-expanded legacy row; the runbook's expand-skills phase removes
-		// those legacy pointers before the row is served.
-		if oldPlugin != nil {
-			if _, restoreErr := s.Update(ctx, caller, updateID, restoreWriteRequest(oldPlugin, oldRels)); restoreErr == nil {
-				s.deleteObjects(ctx, uploaded...)
-			} else {
-				logging.Error("import_restore_failed",
-					zap.String("operation", "plugin.import.restore"),
-					zap.String("plugin_id", updateID),
-					logging.ErrorField(restoreErr),
-				)
-			}
-		}
 		return nil, err
 	}
 	return detail, nil
@@ -293,44 +289,12 @@ func (s *Service) buildImportedSkillWrite(ctx context.Context, objectSpace, rese
 	if err != nil {
 		return nil, "", nil, err
 	}
-	req, err := buildImportWriteRequest(f, attachments)
+	req, err := buildImportWriteRequest(f, attachments, reservedID != "")
 	if err != nil {
 		s.deleteObjects(ctx, uploaded...)
 		return nil, "", nil, err
 	}
 	return req, pluginID, uploaded, nil
-}
-
-// restoreWriteRequest rebuilds the write request that reproduces a plugin's
-// current persisted state, used to undo a committed import update when the
-// follow-up publish fails. The stored manifest/package/tags are already
-// canonical, so feeding them back through Update is idempotent; relations are
-// resubmitted by ID so the sync keeps them rather than deleting them.
-func restoreWriteRequest(old *model.Plugin, rels []model.PluginRelation) WriteRequest {
-	visibility := old.Visibility
-	relations := make([]RelationRequest, 0, len(rels))
-	for _, r := range rels {
-		relations = append(relations, RelationRequest{
-			ID:             r.ID,
-			SourcePluginID: r.SourcePluginID,
-			TargetPluginID: r.TargetPluginID,
-			Type:           r.Type,
-			SortOrder:      r.SortOrder,
-			Data:           r.Data,
-		})
-	}
-	return WriteRequest{
-		Name:       old.Name,
-		Type:       old.Type,
-		CategoryID: old.CategoryID,
-		Tags:       old.Tags,
-		Publisher:  old.Publisher,
-		Icon:       old.Icon,
-		Visibility: visibility,
-		Manifest:   old.Manifest,
-		Package:    old.Package,
-		Relations:  relations,
-	}
 }
 
 func decodeMetadata(raw json.RawMessage) map[string]any {
@@ -377,7 +341,7 @@ func (s *Service) readVerifiedUpload(ctx context.Context, task *skillrepo.ParseT
 	return data, nil
 }
 
-func buildImportWriteRequest(f *importFields, attachments []map[string]any) (*WriteRequest, error) {
+func buildImportWriteRequest(f *importFields, attachments []map[string]any, isUpdate bool) (*WriteRequest, error) {
 	tagsJSON, err := canonicalJSONValue(nonNilTags(f.tags))
 	if err != nil {
 		return nil, ErrInvalidRequest
@@ -403,6 +367,16 @@ func buildImportWriteRequest(f *importFields, attachments []map[string]any) (*Wr
 	if err != nil {
 		return nil, ErrInvalidRequest
 	}
+	// Version selection is operation-aware: a CREATE stamps the resolved version
+	// (submitted → parsed package version → "1.0.0"), so the row's current_version
+	// matches the version baked into the shipped SKILL.md. An UPDATE stamps the
+	// version only when the caller explicitly submitted one, leaving it empty
+	// otherwise so Service.update keeps the row's existing label instead of
+	// resetting a reupload to the package version or "1.0.0".
+	version := f.version
+	if isUpdate && !f.versionSubmitted {
+		version = ""
+	}
 	return &WriteRequest{
 		Name:       f.pluginName,
 		Type:       model.PluginTypeSkill,
@@ -410,6 +384,7 @@ func buildImportWriteRequest(f *importFields, attachments []map[string]any) (*Wr
 		Tags:       canonicalTags,
 		Icon:       f.icon,
 		Visibility: f.visibility,
+		Version:    version,
 		Manifest:   manifest,
 		Package:    pkg,
 	}, nil

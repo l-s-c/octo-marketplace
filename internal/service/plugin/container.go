@@ -16,8 +16,6 @@ package plugin
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -246,7 +244,9 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 	}
 
 	audit := s.audit(eff, top.ID, "update", old, top, s.now())
-	sync, err := s.repo.RebuildGraph(ctx, adminScope(eff), mutation(*top, topRels, audit), childNodes)
+	topMut := mutation(*top, topRels, audit)
+	topMut.SnapshotVersion = true
+	sync, err := s.repo.RebuildGraph(ctx, adminScope(eff), topMut, childNodes)
 	if err != nil {
 		s.deleteObjects(ctx, uploaded...)
 		return nil, mapStoreError(err)
@@ -274,6 +274,7 @@ func (s *Service) importExpertContainer(ctx context.Context, eff Caller, parsed 
 	// wired via relations, not listed on their own, so they carry no placement.
 	expertNode := s.graphMutation(eff, top, topRels)
 	expertNode.Placements = []model.PluginPlacement{defaultMarketPlacement(top.CategoryID)}
+	expertNode.SnapshotVersion = true
 	nodes := append(childNodes, expertNode)
 
 	syncs, err := s.repo.CreateGraph(ctx, adminScope(eff), nodes)
@@ -348,6 +349,7 @@ func (s *Service) importSquadContainer(ctx context.Context, eff Caller, parsed *
 	// not listed on their own, so they carry no placement.
 	teamNode := s.graphMutation(eff, top, topRels)
 	teamNode.Placements = []model.PluginPlacement{defaultMarketPlacement(top.CategoryID)}
+	teamNode.SnapshotVersion = true
 	nodes := append(childNodes, teamNode)
 
 	syncs, err := s.repo.CreateGraph(ctx, adminScope(eff), nodes)
@@ -599,6 +601,13 @@ func validateGraphRelations(sourceType model.PluginType, rels []model.PluginRela
 
 func (s *Service) topLevelDetail(ctx context.Context, p *model.Plugin, sync *pluginrepo.RelationSync) *Detail {
 	p.IconURL = s.resolveIcon(ctx, p.Icon)
+	// The container write snapshotted the top node and advanced its
+	// current_version_id; stamp the new row id onto the response so it agrees
+	// with the DB (a follow-up GET must not contradict it), mirroring the tenant
+	// and admin single-plugin paths.
+	if sync != nil && sync.NewVersionID != "" {
+		p.CurrentVersionID = &sync.NewVersionID
+	}
 	rels := []model.PluginRelation{}
 	if sync != nil && sync.Relations != nil {
 		rels = sync.Relations
@@ -692,16 +701,14 @@ func manifestDraft(typ model.PluginType, name, description string, tags []string
 	return raw, nil
 }
 
-// rawAttachmentMap builds one inline raw attachment map with the same field set
-// and hash formula the skill import and the backfill use.
+// rawAttachmentMap builds one inline raw attachment map. The 2.0 contract
+// forbids a derived content_size/content_hash on raw content (it carries its
+// bytes inline), so only the path/mime/raw_content triple is set.
 func rawAttachmentMap(path, mime, content string) map[string]any {
-	sum := sha256.Sum256([]byte(content))
 	return map[string]any{
 		"path":         path,
 		"content_type": "raw",
 		"mime_type":    mime,
-		"content_size": int64(len(content)),
-		"content_hash": "sha256:" + hex.EncodeToString(sum[:]),
 		"raw_content":  content,
 	}
 }

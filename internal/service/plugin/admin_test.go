@@ -11,8 +11,8 @@ import (
 var adminCaller = Caller{UID: "admin-1", Name: "Root", RequestID: "req-admin"}
 
 func adminSkillRequest() WriteRequest {
-	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"Ops Skill","plugin_type":"skill","name":"ops-skill","description":"An ops skill.","labels":[],"examples":[]}`)
-	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# Ops Skill"}]}`)
+	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"Ops Skill","plugin_type":"skill","name":"ops-skill","description":"An ops skill.","labels":[],"examples":[]}`)
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# Ops Skill"}]}`)
 	return WriteRequest{Name: "Ops Skill", Type: model.PluginTypeSkill, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`[]`), Manifest: manifest, Package: pkg}
 }
 
@@ -152,7 +152,56 @@ func TestAdminUpdateNormalizesLegacyPublicToSystem(t *testing.T) {
 	}
 }
 
-// TestAdminUpdateRejectsTypeChange guards against reclassifying a plugin's type
+// TestAdminUpdateAppliesSubmittedVersion pins that an admin edit which SENDS a
+// version applies it (AdminUpdate previously restored the stored label
+// unconditionally, silently discarding a submitted version and returning 200).
+func TestAdminUpdateAppliesSubmittedVersion(t *testing.T) {
+	space := adminGlobalSpace
+	oldVer := "1.0.0"
+	existing := &model.Plugin{ID: "skill-1", Name: "Ops Skill", Type: model.PluginTypeSkill, SpaceID: &space, Visibility: model.PluginVisibilitySystem, CurrentVersion: &oldVer, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	f := &fakeStore{plugins: map[string]*model.Plugin{"skill-1": existing}}
+	req := adminSkillRequest()
+	req.Version = "3.0.0"
+	if _, err := fixedService(f).AdminUpdate(context.Background(), adminCaller, "skill-1", req); err != nil {
+		t.Fatalf("AdminUpdate: %v", err)
+	}
+	if f.update == nil || f.update.CurrentVersion == nil || *f.update.CurrentVersion != "3.0.0" {
+		t.Fatalf("submitted version not applied: %#v", f.update)
+	}
+}
+
+// TestAdminCreateStampsNewCurrentVersionID is the N2-residual regression: a
+// snapshotting admin create must return the new plugin_versions id on the
+// response plugin (it advanced current_version_id in the DB), not a nil pointer
+// that a follow-up GET contradicts.
+func TestAdminCreateStampsNewCurrentVersionID(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{}}
+	detail, err := fixedService(f).AdminCreate(context.Background(), adminCaller, adminSkillRequest())
+	if err != nil {
+		t.Fatalf("AdminCreate: %v", err)
+	}
+	if detail.Plugin.CurrentVersionID == nil || *detail.Plugin.CurrentVersionID != "ver-snap" {
+		t.Fatalf("admin create response current_version_id = %v, want ver-snap", detail.Plugin.CurrentVersionID)
+	}
+}
+
+// TestAdminUpdateStampsNewCurrentVersionID is the N2-residual regression on the
+// admin edit path: an admin edit snapshots a new version, so the response must
+// carry the NEW id, not the stale stored one.
+func TestAdminUpdateStampsNewCurrentVersionID(t *testing.T) {
+	space := adminGlobalSpace
+	oldVerID := "ver-old"
+	existing := &model.Plugin{ID: "skill-1", Name: "Ops Skill", Type: model.PluginTypeSkill, SpaceID: &space, Visibility: model.PluginVisibilitySystem, CurrentVersionID: &oldVerID, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
+	f := &fakeStore{plugins: map[string]*model.Plugin{"skill-1": existing}}
+	detail, err := fixedService(f).AdminUpdate(context.Background(), adminCaller, "skill-1", adminSkillRequest())
+	if err != nil {
+		t.Fatalf("AdminUpdate: %v", err)
+	}
+	if detail.Plugin.CurrentVersionID == nil || *detail.Plugin.CurrentVersionID != "ver-snap" {
+		t.Fatalf("admin update response current_version_id = %v, want the new ver-snap (not stale %q)", detail.Plugin.CurrentVersionID, oldVerID)
+	}
+}
+
 // through the admin update path.
 func TestAdminUpdateRejectsTypeChange(t *testing.T) {
 	space := adminGlobalSpace
@@ -206,8 +255,8 @@ func TestAdminUpdateResolvesRelationTargetsUnderAdminScope(t *testing.T) {
 		plugins:    map[string]*model.Plugin{"expert-1": expert, "skill-1": skill},
 		relations:  map[string][]model.PluginRelation{"expert-1": {{ID: "r1", SourcePluginID: "expert-1", TargetPluginID: "skill-1", Type: "expert_skill", Status: 1}}},
 	}
-	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"E","plugin_type":"expert","name":"e","description":"d","labels":[],"examples":[]}`)
-	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[{"path":"AGENTS.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# doc"}]}`)
+	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"E","plugin_type":"expert","name":"e","description":"d","labels":[],"examples":[]}`)
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[{"path":"AGENTS.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# doc"}]}`)
 	req := WriteRequest{
 		Name:       "E",
 		Type:       model.PluginTypeExpert,
@@ -236,10 +285,10 @@ func TestAdminUpdateAcceptsStorageAttachmentUnderRowSpace(t *testing.T) {
 	tenantSpace := "tenant-space"
 	existing := &model.Plugin{ID: "skill-1", Name: "Tenant Skill", Type: model.PluginTypeSkill, OwnerUID: "tenant-user", SpaceID: &tenantSpace, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`)}
 	f := &fakeStore{plugins: map[string]*model.Plugin{"skill-1": existing}}
-	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"Tenant Skill","plugin_type":"skill","name":"tenant-skill","description":"d","labels":[],"examples":[]}`)
-	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"Tenant Skill","plugin_type":"skill","name":"tenant-skill","description":"d","labels":[],"examples":[]}`)
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
 		`{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# Tenant Skill"},` +
-		`{"path":"assets/logo.bin","content_type":"storage","mime_type":"application/octet-stream","storage_uri":"plugins/tenant-space/attachments/skill-skill-1-deadbeefdeadbeef.bin"}` +
+		`{"path":"assets/logo.bin","content_type":"storage","mime_type":"application/octet-stream","content_size":10,"content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","storage_uri":"plugins/tenant-space/attachments/skill-skill-1-deadbeefdeadbeef.bin"}` +
 		`]}`)
 	req := WriteRequest{Name: "Tenant Skill", Type: model.PluginTypeSkill, Tags: json.RawMessage(`[]`), Manifest: manifest, Package: pkg}
 	if _, err := fixedService(f).AdminUpdate(context.Background(), adminCaller, "skill-1", req); err != nil {

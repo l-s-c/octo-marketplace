@@ -24,6 +24,7 @@ type fakeStore struct {
 	createRels     []model.PluginRelation
 	createPlace    []model.PluginPlacement
 	createAudit    model.PluginAuditLog
+	createSnapshot bool
 	graphNodes     []pluginrepo.Mutation
 	graphScope     pluginrepo.Scope
 	graphErr       error
@@ -34,14 +35,14 @@ type fakeStore struct {
 	rebuildErr     error
 	update         *model.Plugin
 	updateRels     []model.PluginRelation
+	updateSnapshot bool
+	updateErr      error
 	deleteScope    pluginrepo.Scope
 	deleteID       string
 	deleteGraphID  string
 	deleteChildIDs []string
 	versionID      string
-	publishParams  pluginrepo.PublishParams
 	versions       []model.PluginVersion
-	versionExists  bool
 	scopeAware     bool
 	versionTotal   int64
 	list           []model.Plugin
@@ -53,7 +54,6 @@ type fakeStore struct {
 	declaredCounts map[string]int
 	tags           []model.TagFilter
 	tagFilter      pluginrepo.TagListFilter
-	publishErr     error
 	err            error
 }
 
@@ -92,6 +92,7 @@ func (f *fakeStore) Create(_ context.Context, s pluginrepo.Scope, m pluginrepo.M
 	p := m.Plugin
 	f.create, f.createRels, f.createScope = &p, m.Relations, s
 	f.createPlace = m.Placements
+	f.createSnapshot = m.SnapshotVersion
 	f.createAudit = model.PluginAuditLog{OperatorID: m.OperatorID, OperatorName: m.OperatorName, RequestID: m.RequestID, Remark: m.Remark}
 	if f.err != nil {
 		return nil, f.err
@@ -104,15 +105,27 @@ func (f *fakeStore) Create(_ context.Context, s pluginrepo.Scope, m pluginrepo.M
 		created = append(created, m.Relations[i].ID)
 	}
 	f.createRels = m.Relations
-	return &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}, nil
+	sync := &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}
+	if m.SnapshotVersion {
+		sync.NewVersionID = "ver-snap"
+	}
+	return sync, nil
 }
 func (f *fakeStore) Update(_ context.Context, _ pluginrepo.Scope, m pluginrepo.Mutation) (*pluginrepo.RelationSync, error) {
 	p := m.Plugin
 	f.update, f.updateRels = &p, m.Relations
+	f.updateSnapshot = m.SnapshotVersion
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &pluginrepo.RelationSync{Created: []string{}, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}, nil
+	sync := &pluginrepo.RelationSync{Created: []string{}, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}
+	if m.SnapshotVersion {
+		sync.NewVersionID = "ver-snap"
+	}
+	return sync, nil
 }
 func (f *fakeStore) CreateGraph(_ context.Context, s pluginrepo.Scope, nodes []pluginrepo.Mutation) ([]*pluginrepo.RelationSync, error) {
 	f.graphNodes, f.graphScope = nodes, s
@@ -145,6 +158,9 @@ func (f *fakeStore) CreateGraph(_ context.Context, s pluginrepo.Scope, nodes []p
 		}
 		f.relations[p.ID] = append([]model.PluginRelation(nil), rels...)
 		syncs[i] = &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: rels}
+		if nodes[i].SnapshotVersion {
+			syncs[i].NewVersionID = "ver-snap"
+		}
 	}
 	return syncs, nil
 }
@@ -201,7 +217,11 @@ func (f *fakeStore) RebuildGraph(_ context.Context, s pluginrepo.Scope, top plug
 		created = append(created, rels[j].ID)
 	}
 	f.relations[tp.ID] = append([]model.PluginRelation(nil), rels...)
-	return &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: rels}, nil
+	sync := &pluginrepo.RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: rels}
+	if top.SnapshotVersion {
+		sync.NewVersionID = "ver-snap"
+	}
+	return sync, nil
 }
 
 // collectEmbeddedChildren mirrors the repository's in-tx collectEmbeddedChildren:
@@ -245,24 +265,6 @@ func (f *fakeStore) ListVersions(_ context.Context, _ pluginrepo.Scope, id strin
 	f.versionID = id
 	return f.versions, f.versionTotal, f.err
 }
-func (f *fakeStore) VersionExists(_ context.Context, _ pluginrepo.Scope, _, version string) (bool, error) {
-	if f.err != nil {
-		return false, f.err
-	}
-	for _, v := range f.versions {
-		if v.Version == version {
-			return true, nil
-		}
-	}
-	return f.versionExists, nil
-}
-func (f *fakeStore) Publish(_ context.Context, _ pluginrepo.Scope, p pluginrepo.PublishParams) (*model.PluginVersion, error) {
-	f.publishParams = p
-	if f.publishErr != nil {
-		return nil, f.publishErr
-	}
-	return &model.PluginVersion{ID: "version-new", PluginID: p.PluginID, Version: p.Version, Manifest: json.RawMessage(`{"stored":true}`), Relations: json.RawMessage(`[]`), CreatedBy: p.CreatedBy}, f.err
-}
 func (f *fakeStore) CountMemberRelations(_ context.Context, teamIDs []string) (map[string]int, error) {
 	f.memberCountIDs = teamIDs
 	if f.memberCounts == nil {
@@ -289,14 +291,14 @@ func fixedService(f *fakeStore) *Service {
 var testCaller = Caller{UID: "user-1", Name: "Alice", SpaceID: "space-a", RequestID: "request-1"}
 
 func validRequest() WriteRequest {
-	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"Example Plugin","plugin_type":"expert","name":"example-plugin","description":"An example plugin.","labels":["one","two"],"examples":[]}`)
-	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[{"path":"AGENTS.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# Example Plugin"}]}`)
+	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"Example Plugin","plugin_type":"expert","name":"example-plugin","description":"An example plugin.","labels":["one","two"],"examples":[]}`)
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[{"path":"AGENTS.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# Example Plugin"}]}`)
 	return WriteRequest{Name: "  Example Plugin  ", Type: model.PluginTypeExpert, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`["one","one","two"]`), Manifest: manifest, Package: pkg}
 }
 
 func connectorRequest(config json.RawMessage) WriteRequest {
-	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"Example Plugin","plugin_type":"connector","name":"example-plugin","description":"An example plugin.","labels":["one","two"],"examples":[],"config":` + string(config) + `}`)
-	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","connector":{"type":"mcp","source":"connector.example-plugin"},"attachments":[{"path":"mcp.json","content_type":"raw","mime_type":"application/json","raw_content":"{\"mcpServers\":{}}"}]}`)
+	manifest := json.RawMessage(`{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"Example Plugin","plugin_type":"connector","name":"example-plugin","description":"An example plugin.","labels":["one","two"],"examples":[],"config":` + string(config) + `}`)
+	pkg := json.RawMessage(`{"$schema":"cowork-plugin-package-2.0.json","connector":{"type":"mcp","source":"connector.example-plugin"},"attachments":[{"path":"mcp.json","content_type":"raw","mime_type":"application/json","raw_content":"{\"mcpServers\":{}}"}]}`)
 	return WriteRequest{Name: "Example Plugin", Type: model.PluginTypeConnector, Visibility: model.PluginVisibilityPrivate, Tags: json.RawMessage(`["one","two"]`), Manifest: manifest, Package: pkg}
 }
 
@@ -306,7 +308,7 @@ func TestCreateValidatesAndCanonicalizes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	wantManifest := `{"$schema":"cowork-plugin-manifest-1.0.json","description":"An example plugin.","examples":[],"labels":["one","two"],"name":"example-plugin","plugin_name":"Example Plugin","plugin_type":"expert"}`
+	wantManifest := `{"$schema":"cowork-plugin-manifest-2.0.json","description":"An example plugin.","examples":[],"labels":["one","two"],"name":"example-plugin","plugin_name":"Example Plugin","plugin_type":"expert"}`
 	if f.create.Name != "Example Plugin" || string(f.create.Manifest) != wantManifest {
 		t.Fatalf("created = %#v", f.create)
 	}
@@ -319,6 +321,48 @@ func TestCreateValidatesAndCanonicalizes(t *testing.T) {
 	}
 	if string(f.create.Tags) != `["one","two"]` {
 		t.Fatalf("tags = %s", f.create.Tags)
+	}
+}
+
+// TestCreateAndUpdateFlagVersionSnapshot locks that the tenant save paths request
+// a per-save version snapshot from the repository.
+func TestCreateAndUpdateFlagVersionSnapshot(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{}}
+	svc := fixedService(f)
+	if _, err := svc.Create(context.Background(), testCaller, validRequest()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !f.createSnapshot {
+		t.Fatal("tenant Create did not flag SnapshotVersion")
+	}
+
+	f.plugins["plugin-1"] = &model.Plugin{ID: "plugin-1", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: &testCaller.SpaceID}
+	if _, err := svc.Update(context.Background(), testCaller, "plugin-1", validRequest()); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !f.updateSnapshot {
+		t.Fatal("tenant Update did not flag SnapshotVersion")
+	}
+}
+
+// TestCreateAttachesDefaultPlacement locks that a tenant Create is
+// self-sufficient for market visibility: it hands the store exactly one visible
+// "default" placement carrying the plugin's own category, so the plugin surfaces
+// in scene-scoped lists without a separate publish call.
+func TestCreateAttachesDefaultPlacement(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{}}
+	category := "cat-1"
+	req := validRequest()
+	req.CategoryID = &category
+	if _, err := fixedService(f).Create(context.Background(), testCaller, req); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(f.createPlace) != 1 {
+		t.Fatalf("placements = %#v, want exactly one default placement", f.createPlace)
+	}
+	pl := f.createPlace[0]
+	if pl.PlacementCode != "default" || !pl.Visible || pl.CategoryID == nil || *pl.CategoryID != category {
+		t.Fatalf("placement = %#v, want default+visible carrying the plugin category", pl)
 	}
 }
 
@@ -445,7 +489,7 @@ func TestCreateRejectsInvalidFieldsAndJSONShapes(t *testing.T) {
 		{"outer manifest tags mismatch", func(r *WriteRequest) { r.Tags = json.RawMessage(`["other"]`) }},
 		{"package scalar", func(r *WriteRequest) { r.Package = json.RawMessage(`true`) }},
 		{"package missing manifest", func(r *WriteRequest) {
-			r.Package = json.RawMessage(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[]}`)
+			r.Package = json.RawMessage(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[]}`)
 		}},
 		{"tags object", func(r *WriteRequest) { r.Tags = json.RawMessage(`{}`) }},
 	}
@@ -547,30 +591,13 @@ func TestVersionListPropagatesExactTotalsAndNotFound(t *testing.T) {
 	}
 }
 
-func TestPublishUsesRepositoryContractAndReturnedVersionID(t *testing.T) {
-	f := &fakeStore{plugins: map[string]*model.Plugin{
-		"plugin-1": {ID: "plugin-1", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p"},
-	}}
-	version, err := fixedService(f).Publish(context.Background(), testCaller, "plugin-1", PublishRequest{Version: "1.0.0", Placements: []PlacementRequest{{PlacementCode: "home", Visible: true}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if version.ID != "version-new" || string(version.Manifest) != `{"stored":true}` || f.publishParams.PluginID != "plugin-1" || f.publishParams.CreatedBy != testCaller.UID || len(f.publishParams.Placements) != 1 {
-		t.Fatalf("version=%#v params=%#v", version, f.publishParams)
-	}
-}
-
-func TestRepositoryConflictsAndInvalidPlacementsMapToServiceErrors(t *testing.T) {
+func TestDeleteConflictMapsToServiceError(t *testing.T) {
 	f := &fakeStore{plugins: map[string]*model.Plugin{
 		"plugin-1": {ID: "plugin-1", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID)},
 	}}
 	f.err = pluginrepo.ErrConflict
 	if err := fixedService(f).Delete(context.Background(), testCaller, "plugin-1"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("Delete conflict = %v, want ErrConflict", err)
-	}
-	f.err = pluginrepo.ErrInvalidPlacement
-	if _, err := fixedService(f).Publish(context.Background(), testCaller, "plugin-1", PublishRequest{Version: "1.0.0"}); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("Publish invalid placement = %v, want ErrInvalidRequest", err)
 	}
 }
 
@@ -599,6 +626,23 @@ func TestUpdateAcceptsRelationIDAndMatchingSourceWireID(t *testing.T) {
 	}
 	if v.RelationResult == nil {
 		t.Fatal("missing relation result")
+	}
+}
+
+// TestUpdateWithoutVersionKeepsCurrentVersion pins that a metadata edit which
+// omits the optional version does NOT reset an imported plugin's declared
+// current_version to the "1.0.0" default — every existing client omits the field.
+func TestUpdateWithoutVersionKeepsCurrentVersion(t *testing.T) {
+	ver, verID := "2.4.0", "ver-1"
+	f := &fakeStore{plugins: map[string]*model.Plugin{
+		"plugin-1": {ID: "plugin-1", Name: "Example Plugin", Type: model.PluginTypeExpert, OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID), CurrentVersion: &ver, CurrentVersionID: &verID},
+	}}
+	req := validRequest() // carries no Version
+	if _, err := fixedService(f).Update(context.Background(), testCaller, "plugin-1", req); err != nil {
+		t.Fatal(err)
+	}
+	if f.update == nil || f.update.CurrentVersion == nil || *f.update.CurrentVersion != ver {
+		t.Fatalf("current_version not preserved on version-less update: %#v", f.update)
 	}
 }
 
@@ -728,5 +772,19 @@ func TestValidRelationTypeMirrorsLibEndpointMatrix(t *testing.T) {
 		if validRelationType(tt.relation, tt.source, tt.target) {
 			t.Fatalf("%s %s->%s accepted", tt.relation, tt.source, tt.target)
 		}
+	}
+}
+
+// TestCreateStampsNewCurrentVersionID pins that a snapshotting create returns the
+// new plugin_versions id on the response plugin, so the write response's
+// current_version_id matches the DB (and a subsequent GET) rather than being nil.
+func TestCreateStampsNewCurrentVersionID(t *testing.T) {
+	f := &fakeStore{plugins: map[string]*model.Plugin{}}
+	detail, err := fixedService(f).Create(context.Background(), testCaller, validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Plugin.CurrentVersionID == nil || *detail.Plugin.CurrentVersionID != "ver-snap" {
+		t.Fatalf("create response current_version_id = %v, want ver-snap", detail.Plugin.CurrentVersionID)
 	}
 }

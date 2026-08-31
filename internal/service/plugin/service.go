@@ -55,8 +55,6 @@ type Store interface {
 	Delete(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
 	DeleteGraph(context.Context, pluginrepo.Scope, string, string, string, string, *string) error
 	ListVersions(context.Context, pluginrepo.Scope, string, int, int) ([]model.PluginVersion, int64, error)
-	VersionExists(context.Context, pluginrepo.Scope, string, string) (bool, error)
-	Publish(context.Context, pluginrepo.Scope, pluginrepo.PublishParams) (*model.PluginVersion, error)
 	CountMemberRelations(context.Context, []string) (map[string]int, error)
 	CountDeclaredRelations(context.Context, string) (int, error)
 	ListTags(context.Context, pluginrepo.Scope, pluginrepo.TagListFilter) ([]model.TagFilter, error)
@@ -159,6 +157,14 @@ type WriteRequest struct {
 	Manifest   json.RawMessage
 	Package    json.RawMessage
 	Relations  []RelationRequest
+	// Version is the caller-declared current-version label written to
+	// plugins.current_version. Empty defaults to "1.0.0". It is independent of the
+	// per-save history label (plugin_versions.version stays an auto-increment int).
+	Version string
+	// Changelog is the optional note recorded on the version snapshot this write
+	// appends. The tenant upsert path leaves it nil; skill import carries the
+	// uploaded changelog through to the snapshot.
+	Changelog *string
 }
 
 type RelationRequest struct {
@@ -171,19 +177,6 @@ type RelationRequest struct {
 	Type           string
 	SortOrder      int
 	Data           json.RawMessage
-}
-
-type PublishRequest struct {
-	Version    string
-	Changelog  *string
-	Placements []PlacementRequest
-}
-
-type PlacementRequest struct {
-	PlacementCode string
-	CategoryID    *string
-	Visible       bool
-	SortOrder     int
 }
 
 func scope(c Caller) pluginrepo.Scope { return pluginrepo.Scope{CallerUID: c.UID, SpaceID: c.SpaceID} }
@@ -384,7 +377,8 @@ func (s *Service) Create(ctx context.Context, caller Caller, req WriteRequest) (
 // reserves the ID up front — it is baked into the SKILL.md frontmatter and used
 // to namespace the spilled attachment object keys — so the persisted row must
 // carry that same ID rather than minting a second one, or the shipped id, the
-// object namespace, and the row would all disagree.
+// object namespace, and the row would all disagree. Every create records a
+// plugin_versions snapshot — a save IS a version.
 func (s *Service) createWithID(ctx context.Context, caller Caller, req WriteRequest, reservedID string) (*Detail, error) {
 	if err := validateCaller(caller); err != nil {
 		return nil, err
@@ -402,9 +396,20 @@ func (s *Service) createWithID(ctx context.Context, caller Caller, req WriteRequ
 		rels[i].SourcePluginID = p.ID
 	}
 	audit := s.audit(caller, p.ID, "create", nil, p, now)
-	sync, err := s.repo.Create(ctx, scope(caller), mutation(*p, rels, audit))
+	m := mutation(*p, rels, audit)
+	m.SnapshotVersion = true
+	m.Changelog = req.Changelog
+	// Every create auto-attaches the default visible placement so the new plugin
+	// surfaces in scene-scoped market lists (including "mine") without a separate
+	// publish call — the same auto-placement AdminCreate uses. This is what lets
+	// the publish endpoint go away: create is now self-sufficient for visibility.
+	m.Placements = []model.PluginPlacement{defaultMarketPlacement(p.CategoryID)}
+	sync, err := s.repo.Create(ctx, scope(caller), m)
 	if err != nil {
 		return nil, mapStoreError(err)
+	}
+	if sync != nil && sync.NewVersionID != "" {
+		p.CurrentVersionID = &sync.NewVersionID
 	}
 	if sync != nil && sync.Relations != nil {
 		rels = sync.Relations
@@ -413,6 +418,13 @@ func (s *Service) createWithID(ctx context.Context, caller Caller, req WriteRequ
 }
 
 func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, req WriteRequest) (*Detail, error) {
+	return s.update(ctx, caller, pluginID, req)
+}
+
+// update is the shared content-write path for the tenant Update and the
+// skill-import reupload. Every save records a plugin_versions snapshot — a save
+// IS a version — so there is no snapshot toggle.
+func (s *Service) update(ctx context.Context, caller Caller, pluginID string, req WriteRequest) (*Detail, error) {
 	if err := validateCaller(caller); err != nil {
 		return nil, err
 	}
@@ -437,11 +449,23 @@ func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, re
 		return nil, ErrInvalidRequest
 	}
 	now := s.now()
+	// A fetch-edit-save client echoes back the GET package, whose storage
+	// attachments no longer carry an inline key (it lives in the host sidecar).
+	// Re-inject the stored key for unchanged storage content so the round-trip is
+	// not rejected by splitStorageKeys.
+	req.Package = reinjectUpdateStorageKeys(req.Package, old.Package, old.AttachmentKeys)
 	p, rels, err := s.buildWrite(ctx, caller, storageID, req, now, false)
 	if err != nil {
 		return nil, err
 	}
 	p.CreatedAt, p.CurrentVersionID = old.CreatedAt, old.CurrentVersionID
+	// A metadata edit that omits `version` must keep the existing current-version
+	// label — buildWrite otherwise defaults an omitted version to "1.0.0", which
+	// would silently reset a plugin imported as e.g. "2.4.0" on its first save.
+	// Mirrors AdminUpdate / container reupload, which also carry old.CurrentVersion.
+	if strings.TrimSpace(req.Version) == "" {
+		p.CurrentVersion = old.CurrentVersion
+	}
 	// Creation provenance is immutable; keep the original creator identity.
 	p.CreatorName, p.CreatedByType = old.CreatorName, old.CreatedByType
 	p.CreatedByBotUID, p.CreatedByBotName = old.CreatedByBotUID, old.CreatedByBotName
@@ -449,9 +473,15 @@ func (s *Service) Update(ctx context.Context, caller Caller, pluginID string, re
 		rels[i].SourcePluginID = storageID
 	}
 	audit := s.audit(caller, storageID, "update", old, p, now)
-	sync, err := s.repo.Update(ctx, scope(caller), mutation(*p, rels, audit))
+	m := mutation(*p, rels, audit)
+	m.SnapshotVersion = true
+	m.Changelog = req.Changelog
+	sync, err := s.repo.Update(ctx, scope(caller), m)
 	if err != nil {
 		return nil, mapStoreError(err)
+	}
+	if sync != nil && sync.NewVersionID != "" {
+		p.CurrentVersionID = &sync.NewVersionID
 	}
 	if sync != nil && sync.Relations != nil {
 		rels = sync.Relations
@@ -527,35 +557,6 @@ func (s *Service) ListVersions(ctx context.Context, caller Caller, pluginID stri
 	return items, total, mapStoreError(err)
 }
 
-func (s *Service) Publish(ctx context.Context, caller Caller, pluginID string, req PublishRequest) (*model.PluginVersion, error) {
-	if validateCaller(caller) != nil || !validVersion(req.Version) {
-		return nil, ErrInvalidRequest
-	}
-	storageID, err := parseStorageID(pluginID)
-	if err != nil {
-		return nil, err
-	}
-	now := s.now()
-	placements, err := s.buildPlacements(storageID, req.Placements, now)
-	if err != nil {
-		return nil, err
-	}
-	params := pluginrepo.PublishParams{
-		PluginID:     storageID,
-		Version:      strings.TrimSpace(req.Version),
-		CreatedBy:    caller.UID,
-		OperatorName: caller.Name,
-		RequestID:    caller.RequestID,
-		Changelog:    trimOptional(req.Changelog),
-		Placements:   placements,
-	}
-	version, err := s.repo.Publish(ctx, scope(caller), params)
-	if err != nil {
-		return nil, mapStoreError(err)
-	}
-	return version, nil
-}
-
 func (s *Service) buildWrite(ctx context.Context, c Caller, pluginID string, req WriteRequest, now time.Time, admin bool) (*model.Plugin, []model.PluginRelation, error) {
 	name := strings.TrimSpace(req.Name)
 	if !validName(name) || !validPluginType(req.Type) || !validVisibility(req.Visibility, c.IsSystemAdmin) {
@@ -569,13 +570,21 @@ func (s *Service) buildWrite(ctx context.Context, c Caller, pluginID string, req
 	if !validIcon(icon) {
 		return nil, nil, ErrInvalidRequest
 	}
+	// current_version is caller-declared: use the submitted version, defaulting to
+	// "1.0.0" when none is passed. Reject a malformed non-empty label.
+	currentVersion := strings.TrimSpace(req.Version)
+	if currentVersion == "" {
+		currentVersion = defaultCurrentVersion
+	} else if !validVersion(currentVersion) {
+		return nil, nil, ErrInvalidRequest
+	}
 	toolCount := 0
 	if req.Type == model.PluginTypeConnector {
 		toolCount = ConnectorToolCount(docs.Package)
 	}
 	spaceID := c.SpaceID
 	createdBy, botUID, botName := provenance(c)
-	p := &model.Plugin{ID: pluginID, Name: name, Type: req.Type, CategoryID: trimOptional(req.CategoryID), Tags: docs.Tags, Publisher: strings.TrimSpace(req.Publisher), OwnerUID: c.UID, SpaceID: &spaceID, Visibility: req.Visibility, CreatorName: c.Name, CreatedByType: createdBy, CreatedByBotUID: botUID, CreatedByBotName: botName, Icon: icon, IconURL: s.resolveIcon(ctx, icon), ToolCount: toolCount, Manifest: docs.Manifest, Package: docs.Package, ManifestHash: docs.ManifestHash, PluginHash: docs.PluginHash, Status: 1, CreatedAt: now, UpdatedAt: now}
+	p := &model.Plugin{ID: pluginID, Name: name, Type: req.Type, CategoryID: trimOptional(req.CategoryID), Tags: docs.Tags, Publisher: strings.TrimSpace(req.Publisher), OwnerUID: c.UID, SpaceID: &spaceID, Visibility: req.Visibility, CreatorName: c.Name, CreatedByType: createdBy, CreatedByBotUID: botUID, CreatedByBotName: botName, Icon: icon, IconURL: s.resolveIcon(ctx, icon), ToolCount: toolCount, Manifest: docs.Manifest, Package: docs.Package, AttachmentKeys: docs.AttachmentKeys, ManifestHash: docs.ManifestHash, PluginHash: docs.PluginHash, CurrentVersion: &currentVersion, Status: 1, CreatedAt: now, UpdatedAt: now}
 	rels, err := s.buildRelations(ctx, c, admin, p, req.Relations, now)
 	if err != nil {
 		return nil, nil, err
@@ -627,31 +636,6 @@ func (s *Service) buildRelations(ctx context.Context, c Caller, admin bool, sour
 			return nil, err
 		}
 		out = append(out, model.PluginRelation{ID: relationID, SourcePluginID: source.ID, SourcePluginType: source.Type, TargetPluginID: targetID, TargetPluginType: target.Type, Type: typ, SortOrder: r.SortOrder, Data: data, Status: 1, CreatedBy: c.UID, CreatedAt: now, UpdatedAt: now})
-	}
-	return out, nil
-}
-
-func (s *Service) buildPlacements(pluginID string, in []PlacementRequest, now time.Time) ([]model.PluginPlacement, error) {
-	if len(in) > maxPlacements {
-		return nil, ErrInvalidRequest
-	}
-	out := make([]model.PluginPlacement, 0, len(in))
-	seen := map[string]struct{}{}
-	for _, x := range in {
-		code := strings.TrimSpace(x.PlacementCode)
-		if !validPlacementCode(code) {
-			return nil, ErrInvalidRequest
-		}
-		category := trimOptional(x.CategoryID)
-		key := code + "\x00"
-		if category != nil {
-			key += *category
-		}
-		if _, ok := seen[key]; ok {
-			return nil, ErrInvalidRequest
-		}
-		seen[key] = struct{}{}
-		out = append(out, model.PluginPlacement{ID: s.id(), PlacementCode: code, PluginID: pluginID, CategoryID: category, Visible: x.Visible, SortOrder: x.SortOrder, CreatedAt: now, UpdatedAt: now})
 	}
 	return out, nil
 }

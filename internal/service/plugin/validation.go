@@ -5,11 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"time"
 
 	"errors"
 	"fmt"
-	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
+	libplugin "github.com/Mininglamp-OSS/octo-plugin-lib/plugin"
 	"io"
 	"net/url"
 	"regexp"
@@ -20,20 +19,22 @@ import (
 )
 
 const (
-	maxJSONBytes  = 1 << 20 // current-state and snapshot JSON are metadata, not artifacts
-	maxNameBytes  = 160
-	maxTags       = 100
-	maxTagBytes   = 128
-	maxRelations  = 200
-	maxPlacements = 100
-	maxListLimit  = 100
-	maxListTags   = 20 // bound on AND-combined tag filters per list query
-	maxIconBytes  = 512
+	maxJSONBytes = 1 << 20 // current-state and snapshot JSON are metadata, not artifacts
+	maxNameBytes = 160
+	maxTags      = 100
+	maxTagBytes  = 128
+	maxRelations = 200
+	maxListLimit = 100
+	maxListTags  = 20 // bound on AND-combined tag filters per list query
+	maxIconBytes = 512
 )
+
+// defaultCurrentVersion is the current-version label stamped on a write that
+// declares no version of its own (e.g. connectors, which have no version field).
+const defaultCurrentVersion = "1.0.0"
 
 var (
 	versionPattern    = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$`)
-	placementPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,127}$`)
 	relationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 	// iconKeyPattern identifies storage-object-key shaped icons that the read
 	// path resolves to presigned URLs (legacy skill icons are object keys).
@@ -103,20 +104,16 @@ func validName(v string) bool {
 	return v != "" && utf8.ValidString(v) && len(v) <= maxNameBytes && !strings.ContainsRune(v, '\x00')
 }
 
-func validVersion(v string) bool       { return versionPattern.MatchString(strings.TrimSpace(v)) }
-func validPlacementCode(v string) bool { return placementPattern.MatchString(v) }
-func validRelationID(v string) bool    { return relationIDPattern.MatchString(v) }
+func validVersion(v string) bool    { return versionPattern.MatchString(strings.TrimSpace(v)) }
+func validRelationID(v string) bool { return relationIDPattern.MatchString(v) }
 
 // relationEndpointProbe* are fixed well-formed identities so the octo-plugin-
-// lib endpoint validator (which also checks IDs, self-reference, and
-// timestamps on the full Relation object) can be reused as the single source
-// of the relation-type endpoint matrix.
-var (
-	relationProbeStamp = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-)
-
+// lib endpoint validator (which also checks the source/target IDs and
+// self-reference on the Relation object) can be reused as the single source of
+// the relation-type endpoint matrix. The 2.0 contract Relation carries no
+// relation_id or timestamps, so the probe supplies only the endpoint IDs and
+// type that ValidateRelation still inspects.
 const (
-	relationProbeID     = "00000000-0000-8000-8000-000000000001"
 	relationProbeSource = "00000000-0000-8000-8000-000000000002"
 	relationProbeTarget = "00000000-0000-8000-8000-000000000003"
 )
@@ -127,12 +124,9 @@ const (
 // libplugin.ValidateRelationEndpoints.
 func validRelationType(relation string, source, target model.PluginType) bool {
 	probe := libplugin.Relation{
-		RelationID:     relationProbeID,
 		SourcePluginID: relationProbeSource,
 		TargetPluginID: relationProbeTarget,
 		RelationType:   libplugin.RelationType(relation),
-		CreatedAt:      relationProbeStamp,
-		UpdatedAt:      relationProbeStamp,
 	}
 	return libplugin.ValidateRelationEndpoints(probe, libplugin.Type(source), libplugin.Type(target)) == nil
 }

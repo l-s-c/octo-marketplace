@@ -32,7 +32,6 @@ type Service interface {
 	Update(context.Context, pluginsvc.Caller, string, pluginsvc.WriteRequest) (*pluginsvc.Detail, error)
 	Delete(context.Context, pluginsvc.Caller, string) error
 	ListVersions(context.Context, pluginsvc.Caller, string, int, int) ([]model.PluginVersion, int64, error)
-	Publish(context.Context, pluginsvc.Caller, string, pluginsvc.PublishRequest) (*model.PluginVersion, error)
 	Install(context.Context, pluginsvc.Caller, string, pluginsvc.InstallParams) (*pluginsvc.InstallOutcome, error)
 	Import(context.Context, pluginsvc.Caller, pluginsvc.ImportParams) (*pluginsvc.Detail, error)
 	SkillMarkdown(context.Context, pluginsvc.Caller, string) (string, error)
@@ -68,7 +67,6 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	plugins.POST("/upsert", h.Upsert)
 	plugins.POST("/delete", h.Delete)
 	plugins.GET("/versions", h.ListVersions)
-	plugins.POST("/publish", h.Publish)
 	plugins.POST("/install", h.Install)
 	plugins.POST("/import", h.Import)
 	plugins.GET("/skill_md", h.SkillMarkdown)
@@ -93,6 +91,7 @@ type pluginWriteRequest struct {
 	Publisher    string                 `json:"publisher,omitempty"`
 	Icon         string                 `json:"icon,omitempty"`
 	Visibility   model.PluginVisibility `json:"visibility"`
+	Version      string                 `json:"version,omitempty"`
 	ManifestJSON json.RawMessage        `json:"manifest_json" swaggertype:"object"`
 	PluginJSON   json.RawMessage        `json:"plugin_json" swaggertype:"object"`
 }
@@ -107,21 +106,7 @@ func (r upsertRequest) serviceRequest() pluginsvc.WriteRequest {
 	for i, x := range r.Relations {
 		relations[i] = pluginsvc.RelationRequest{ID: x.RelationID, SourcePluginID: x.SourcePluginID, TargetPluginID: x.TargetPluginID, Type: x.RelationType, SortOrder: x.SortOrder, Data: x.Data}
 	}
-	return pluginsvc.WriteRequest{Name: r.Plugin.PluginName, Type: r.Plugin.PluginType, CategoryID: r.Plugin.CategoryID, Tags: rawJSON(r.Plugin.Tags), Publisher: r.Plugin.Publisher, Icon: r.Plugin.Icon, Visibility: r.Plugin.Visibility, Manifest: r.Plugin.ManifestJSON, Package: r.Plugin.PluginJSON, Relations: relations}
-}
-
-type placementRequest struct {
-	PlacementCode string  `json:"placement_code"`
-	CategoryID    *string `json:"category_id,omitempty"`
-	IsVisible     bool    `json:"is_visible"`
-	SortOrder     int     `json:"sort_order"`
-}
-
-type publishRequest struct {
-	PluginID   string             `json:"plugin_id"`
-	Version    string             `json:"version"`
-	Changelog  *string            `json:"changelog,omitempty"`
-	Placements []placementRequest `json:"placements,omitempty"`
+	return pluginsvc.WriteRequest{Name: r.Plugin.PluginName, Type: r.Plugin.PluginType, CategoryID: r.Plugin.CategoryID, Tags: rawJSON(r.Plugin.Tags), Publisher: r.Plugin.Publisher, Icon: r.Plugin.Icon, Visibility: r.Plugin.Visibility, Version: r.Plugin.Version, Manifest: r.Plugin.ManifestJSON, Package: r.Plugin.PluginJSON, Relations: relations}
 }
 
 type deleteRequest struct {
@@ -225,12 +210,15 @@ type relationResultResponse struct {
 	Deleted []string `json:"deleted"`
 }
 
+// versionResponse is the metadata-only projection of one history row. It
+// deliberately omits the full manifest/package bytes: the versions LIST would
+// otherwise expose every intermediate/rolled-back save's complete content of a
+// visible (incl. system) plugin. Callers get the label, hashes, changelog and
+// timestamp per row; full content is fetched from the plugin detail.
 type versionResponse struct {
 	VersionID    string           `json:"version_id"`
 	PluginID     string           `json:"plugin_id"`
 	Version      string           `json:"version"`
-	Manifest     json.RawMessage  `json:"manifest" swaggertype:"object"`
-	Package      json.RawMessage  `json:"package" swaggertype:"object"`
 	ManifestHash string           `json:"manifest_hash"`
 	PluginHash   string           `json:"plugin_hash"`
 	Relations    []map[string]any `json:"relations"`
@@ -430,7 +418,7 @@ func (h *Handler) Delete(c *gin.Context) {
 
 // ListVersions godoc
 // @Summary List plugin versions
-// @Description List immutable published versions of a visible Plugin using offset pagination.
+// @Description List a visible Plugin's version history (one immutable snapshot per save, newest first) using offset pagination. Each row is metadata only (label, hashes, changelog, timestamp); full manifest/package content is fetched from the plugin detail, so intermediate/rolled-back saves are not exposed in bulk.
 // @Tags plugin
 // @ID plugin.version.list
 // @Accept json
@@ -467,46 +455,6 @@ func (h *Handler) ListVersions(c *gin.Context) {
 		out[i] = versionDTO(x)
 	}
 	apiresponse.Offset(c, out, int(total), page, size)
-}
-
-// Publish godoc
-// @Summary Publish plugin version
-// @Description Create an immutable Plugin snapshot and atomically replace its marketplace placements.
-// @Tags plugin
-// @ID plugin.publish
-// @Accept json
-// @Produce json
-// @Security Bearer
-// @Param body body publishRequest true "Plugin ID, version, and placements"
-// @Success 201 {object} apiresponse.Data[versionResponse]
-// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
-// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
-// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
-// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
-// @Failure 409 {object} apiresponse.Error "CONFLICT"
-// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
-// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
-// @Router /plugins/publish [post]
-func (h *Handler) Publish(c *gin.Context) {
-	caller, ok := caller(c)
-	if !ok {
-		unauthorized(c)
-		return
-	}
-	var req publishRequest
-	if !decode(c, &req) {
-		return
-	}
-	placements := make([]pluginsvc.PlacementRequest, len(req.Placements))
-	for i, x := range req.Placements {
-		placements[i] = pluginsvc.PlacementRequest{PlacementCode: x.PlacementCode, CategoryID: x.CategoryID, Visible: x.IsVisible, SortOrder: x.SortOrder}
-	}
-	v, err := h.svc.Publish(c.Request.Context(), caller, req.PluginID, pluginsvc.PublishRequest{Version: req.Version, Changelog: req.Changelog, Placements: placements})
-	if err != nil {
-		writeServiceError(c, err, "plugin.publish")
-		return
-	}
-	c.JSON(http.StatusCreated, apiresponse.Data[versionResponse]{Data: versionDTO(*v)})
 }
 
 // ListCategories godoc
@@ -739,7 +687,7 @@ func detailDTO(d *pluginsvc.Detail) detailResponse {
 	return out
 }
 func versionDTO(x model.PluginVersion) versionResponse {
-	return versionResponse{VersionID: x.ID, PluginID: x.PluginID, Version: x.Version, Manifest: x.Manifest, Package: x.Package, ManifestHash: x.ManifestHash, PluginHash: x.PluginHash, Relations: versionRelationSlice(x.Relations), Changelog: x.Changelog, CreatedBy: x.CreatedBy, CreatedAt: x.CreatedAt}
+	return versionResponse{VersionID: x.ID, PluginID: x.PluginID, Version: x.Version, ManifestHash: x.ManifestHash, PluginHash: x.PluginHash, Relations: versionRelationSlice(x.Relations), Changelog: x.Changelog, CreatedBy: x.CreatedBy, CreatedAt: x.CreatedAt}
 }
 
 func rawJSON(value any) json.RawMessage {

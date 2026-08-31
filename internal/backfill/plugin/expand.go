@@ -19,13 +19,14 @@ import (
 	"sort"
 	"time"
 
-	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
+	libplugin "github.com/Mininglamp-OSS/octo-plugin-lib/plugin"
 )
 
 // SkillExpander turns a legacy skill package into the canonical attachment-tree
 // package, reporting whether it changed. *pluginsvc.Service satisfies it.
 type SkillExpander interface {
-	ExpandSkillPackage(ctx context.Context, spaceID, pluginID string, pkg json.RawMessage) (json.RawMessage, bool, error)
+	ExpandSkillPackage(ctx context.Context, spaceID, pluginID string, pkg, keys json.RawMessage) (json.RawMessage, json.RawMessage, bool, error)
+	WouldTruncateSkillPackage(spaceID, pluginID string, pkg, keys json.RawMessage) bool
 }
 
 type ExpandCounts struct {
@@ -183,7 +184,7 @@ func (r *Runner) pluginTypesAndSpaces(ctx context.Context) (types, spaces map[st
 }
 
 func (r *Runner) expandPlugins(ctx context.Context, exp SkillExpander, apply bool, spaces map[string]string, p *expandPlan) error {
-	rows, err := r.db.QueryContext(ctx, `SELECT plugin_id, manifest_json, plugin_json, plugin_hash FROM plugins WHERE plugin_type='skill'`)
+	rows, err := r.db.QueryContext(ctx, `SELECT plugin_id, manifest_json, plugin_json, attachment_keys_json, plugin_hash FROM plugins WHERE plugin_type='skill'`)
 	if err != nil {
 		return err
 	}
@@ -191,11 +192,12 @@ func (r *Runner) expandPlugins(ctx context.Context, exp SkillExpander, apply boo
 	type work struct {
 		id, oldHash   string
 		manifest, pkg []byte
+		keys          []byte
 	}
 	var todo []work
 	for rows.Next() {
 		var w work
-		if err := rows.Scan(&w.id, &w.manifest, &w.pkg, &w.oldHash); err != nil {
+		if err := rows.Scan(&w.id, &w.manifest, &w.pkg, &w.keys, &w.oldHash); err != nil {
 			return err
 		}
 		if !hasLegacyPointer(w.pkg) {
@@ -211,14 +213,14 @@ func (r *Runner) expandPlugins(ctx context.Context, exp SkillExpander, apply boo
 			p.actions = append(p.actions, expandAction{count: func(c *ExpandCounts) *int { return &c.Plugins }})
 			continue
 		}
-		newPkg, newHash, ok := r.expandRow(ctx, exp, spaces[w.id], w.id, "plugins", w.manifest, w.pkg, p)
+		newPkg, newKeys, newHash, ok := r.expandRow(ctx, exp, spaces[w.id], w.id, "plugins", w.manifest, w.pkg, w.keys, p)
 		if !ok {
 			continue
 		}
 		p.actions = append(p.actions, expandAction{
 			count: func(c *ExpandCounts) *int { return &c.Plugins },
-			query: `UPDATE plugins SET plugin_json=?, plugin_hash=? WHERE plugin_id=? AND plugin_hash=?`,
-			args:  []any{string(newPkg), newHash, w.id, w.oldHash},
+			query: `UPDATE plugins SET plugin_json=?, attachment_keys_json=?, plugin_hash=? WHERE plugin_id=? AND plugin_hash=?`,
+			args:  []any{string(newPkg), nullableJSON(newKeys), newHash, w.id, w.oldHash},
 			guard: true,
 		})
 	}
@@ -226,7 +228,7 @@ func (r *Runner) expandPlugins(ctx context.Context, exp SkillExpander, apply boo
 }
 
 func (r *Runner) expandVersions(ctx context.Context, exp SkillExpander, apply bool, types, spaces map[string]string, p *expandPlan) error {
-	rows, err := r.db.QueryContext(ctx, `SELECT version_id, plugin_id, manifest_json, plugin_json, plugin_hash FROM plugin_versions`)
+	rows, err := r.db.QueryContext(ctx, `SELECT version_id, plugin_id, manifest_json, plugin_json, attachment_keys_json, plugin_hash FROM plugin_versions`)
 	if err != nil {
 		return err
 	}
@@ -234,11 +236,12 @@ func (r *Runner) expandVersions(ctx context.Context, exp SkillExpander, apply bo
 	type work struct {
 		id, pluginID, oldHash string
 		manifest, pkg         []byte
+		keys                  []byte
 	}
 	var todo []work
 	for rows.Next() {
 		var w work
-		if err := rows.Scan(&w.id, &w.pluginID, &w.manifest, &w.pkg, &w.oldHash); err != nil {
+		if err := rows.Scan(&w.id, &w.pluginID, &w.manifest, &w.pkg, &w.keys, &w.oldHash); err != nil {
 			return err
 		}
 		if types[w.pluginID] != "skill" || !hasLegacyPointer(w.pkg) {
@@ -254,14 +257,14 @@ func (r *Runner) expandVersions(ctx context.Context, exp SkillExpander, apply bo
 			p.actions = append(p.actions, expandAction{count: func(c *ExpandCounts) *int { return &c.Versions }})
 			continue
 		}
-		newPkg, newHash, ok := r.expandRow(ctx, exp, spaces[w.pluginID], w.pluginID, "plugin_versions", w.manifest, w.pkg, p)
+		newPkg, newKeys, newHash, ok := r.expandRow(ctx, exp, spaces[w.pluginID], w.pluginID, "plugin_versions", w.manifest, w.pkg, w.keys, p)
 		if !ok {
 			continue
 		}
 		p.actions = append(p.actions, expandAction{
 			count: func(c *ExpandCounts) *int { return &c.Versions },
-			query: `UPDATE plugin_versions SET plugin_json=?, plugin_hash=? WHERE version_id=? AND plugin_hash=?`,
-			args:  []any{string(newPkg), newHash, w.id, w.oldHash},
+			query: `UPDATE plugin_versions SET plugin_json=?, attachment_keys_json=?, plugin_hash=? WHERE version_id=? AND plugin_hash=?`,
+			args:  []any{string(newPkg), nullableJSON(newKeys), newHash, w.id, w.oldHash},
 			guard: true,
 		})
 	}
@@ -322,15 +325,55 @@ func (r *Runner) expandAudits(ctx context.Context, exp SkillExpander, apply bool
 			oldAfter = *w.afterHash
 		}
 		expandable := len(w.pkg) > 0 && hasLegacyPointer(w.pkg)
+		// Audit rows carry no sidecar (keys == nil), and repackage stripped the
+		// inline storage_uri, so a snapshot whose real files live in a managed
+		// archive/object can no longer be resolved — ExpandSkillPackage would
+		// collapse it to a SKILL.md stub (irreversible truncation of an immutable
+		// record). Probe the actual resolvability (not a path-shape) and, when it
+		// would truncate, leave the snapshot unexpanded. This is a permanent,
+		// data-preserving skip (audit packages are never dereferenced for bytes),
+		// so it is recorded at the non-gating "info" level rather than blocking the
+		// rollout gate; see docs/plugin-backfill.md.
+		wouldTruncate := expandable && exp.WouldTruncateSkillPackage(spaces[w.pluginID], w.pluginID, w.pkg, nil)
 		if !apply {
-			if expandable {
+			if wouldTruncate {
+				p.issues = append(p.issues, Issue{"info", "audit_unexpandable", "plugin_audit_logs", w.id, "snapshot's archive/object key is unresolvable without a sidecar; left unexpanded to preserve the immutable audit record"})
+			} else if expandable {
 				p.actions = append(p.actions, expandAction{count: func(c *ExpandCounts) *int { return &c.Audits }})
+			}
+			continue
+		}
+		if wouldTruncate {
+			p.issues = append(p.issues, Issue{"info", "audit_unexpandable", "plugin_audit_logs", w.id, "snapshot's archive/object key is unresolvable without a sidecar; left unexpanded to preserve the immutable audit record"})
+			// The snapshot stays unexpanded, but its before_hash must still be
+			// repaired to the predecessor's rewritten after_hash — otherwise the
+			// chain breaks at an expanded→skipped boundary (the previous row was
+			// rehashed while this row's before_hash still points at its OLD after).
+			// Repair before_hash ONLY; plugin_snapshot_json and this row's own
+			// (unchanged) after_hash are left untouched, and that after_hash remains
+			// the link for the next row via lastHash below.
+			if oldBefore != "" {
+				if previous, seen := lastHash[w.pluginID]; seen && previous != "" && previous != oldBefore {
+					p.actions = append(p.actions, expandAction{
+						count: func(c *ExpandCounts) *int { return &c.Audits },
+						query: `UPDATE plugin_audit_logs SET before_hash=? WHERE audit_log_id=?`,
+						args:  []any{hashColumn(previous, beforeWasNull), w.id},
+					})
+				}
+			}
+			// A delete audit carries a NULL after_hash — it must NOT become the
+			// chain link for the following row (mirrors the guard below).
+			if oldAfter != "" {
+				lastHash[w.pluginID] = oldAfter
 			}
 			continue
 		}
 		newPkg, changed := w.pkg, false
 		if expandable {
-			expanded, didChange, err := exp.ExpandSkillPackage(ctx, spaces[w.pluginID], w.pluginID, w.pkg)
+			// Audit snapshots have no sidecar column and are never dereferenced for
+			// object bytes, so the split keys are intentionally discarded — the
+			// snapshot is only stripped to stay 2.0-valid and rehashed for the chain.
+			expanded, _, didChange, err := exp.ExpandSkillPackage(ctx, spaces[w.pluginID], w.pluginID, w.pkg, nil)
 			if err != nil {
 				p.issues = append(p.issues, Issue{"skip", "expand_failed", "plugin_audit_logs", w.id, err.Error()})
 				lastHash[w.pluginID] = oldAfter
@@ -379,21 +422,29 @@ func (r *Runner) expandAudits(ctx context.Context, exp SkillExpander, apply bool
 // expandRow runs the expander for one plugins/plugin_versions row and recomputes
 // the lib hash. It returns ok=false (recording an issue) when the package fails
 // to expand.
-func (r *Runner) expandRow(ctx context.Context, exp SkillExpander, spaceID, pluginID, source string, manifest, pkg []byte, p *expandPlan) (newPkg []byte, newHash string, ok bool) {
-	expanded, changed, err := exp.ExpandSkillPackage(ctx, spaceID, pluginID, pkg)
+func (r *Runner) expandRow(ctx context.Context, exp SkillExpander, spaceID, pluginID, source string, manifest, pkg, keys []byte, p *expandPlan) (newPkg []byte, newKeys []byte, newHash string, ok bool) {
+	// Fail-closed on a live row whose archive/object key cannot be resolved even
+	// with its sidecar: ExpandSkillPackage would collapse it to a SKILL.md stub,
+	// destroying the live skill's files. Unlike the audit case this is a live-data
+	// problem the operator must remediate, so it gates ("skip"); see the runbook.
+	if exp.WouldTruncateSkillPackage(spaceID, pluginID, pkg, keys) {
+		p.issues = append(p.issues, Issue{"skip", "expand_would_truncate", source, pluginID, "archive/object key unresolvable; skipped to avoid truncating the live skill to a SKILL.md stub"})
+		return nil, nil, "", false
+	}
+	expanded, splitKeys, changed, err := exp.ExpandSkillPackage(ctx, spaceID, pluginID, pkg, keys)
 	if err != nil {
 		p.issues = append(p.issues, Issue{"skip", "expand_failed", source, pluginID, err.Error()})
-		return nil, "", false
+		return nil, nil, "", false
 	}
 	if !changed {
-		return nil, "", false
+		return nil, nil, "", false
 	}
 	hash, err := libplugin.ComputePluginHash(manifest, expanded)
 	if err != nil {
 		p.issues = append(p.issues, Issue{"skip", "expand_failed", source, pluginID, err.Error()})
-		return nil, "", false
+		return nil, nil, "", false
 	}
-	return expanded, hash, true
+	return expanded, splitKeys, hash, true
 }
 
 // hasLegacyPointer reports whether a package still carries a skill/ref.json or

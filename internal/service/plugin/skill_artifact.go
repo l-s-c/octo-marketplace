@@ -246,7 +246,7 @@ func (s *Service) openSkillPackage(ctx context.Context, sc pluginrepo.Scope, plu
 // skill/ref.json. Expanded and freshly imported skills carry neither and fall
 // through to attachment-tree reconstruction.
 func (s *Service) legacyZipKey(p *model.Plugin, ref skillRefDocument) (string, bool) {
-	if managed, ok := storageAttachmentKey(p.Package, "skill/package.zip"); ok && p.SpaceID != nil && validReferencedObjectKey(managed, *p.SpaceID) {
+	if managed, ok := storageAttachmentKey(p, "skill/package.zip"); ok && p.SpaceID != nil && validReferencedObjectKey(managed, *p.SpaceID) {
 		return managed, true
 	}
 	if trustedArtifactKey(ref.zipKey(), p.SpaceID) {
@@ -259,7 +259,7 @@ func (s *Service) legacyZipKey(p *model.Plugin, ref skillRefDocument) (string, b
 // legacy roots. It is used ONLY by ExpandSkillPackage (the server-driven
 // expand-skills migration), never on a caller-facing request.
 func (s *Service) migrationZipKey(p *model.Plugin, ref skillRefDocument) (string, bool) {
-	if managed, ok := storageAttachmentKey(p.Package, "skill/package.zip"); ok && p.SpaceID != nil && validReferencedObjectKey(managed, *p.SpaceID) {
+	if managed, ok := storageAttachmentKey(p, "skill/package.zip"); ok && p.SpaceID != nil && validReferencedObjectKey(managed, *p.SpaceID) {
 		return managed, true
 	}
 	if migrationArtifactKey(ref.zipKey(), p.SpaceID) {
@@ -283,14 +283,22 @@ func (s *Service) writeSkillZip(ctx context.Context, p *model.Plugin, attachment
 	zw := zip.NewWriter(w)
 	entries := 0
 	var total int64
+	// Storage attachments carry their object key in the row's sidecar map (the
+	// 2.0 package no longer holds storage_uri inline), resolved here by path. A
+	// row not yet migrated to the sidecar falls back to the inline storage_uri.
+	keys := attachmentKeyMap(p.AttachmentKeys)
 	for _, a := range sorted {
 		if a.Path == "skill/ref.json" || a.Path == "skill/package.zip" {
 			continue
 		}
+		storageKey := keys[a.Path]
+		if storageKey == "" {
+			storageKey = a.StorageURI
+		}
 		// Validate a storage key BEFORE creating the entry (Q11'): an untrusted or
 		// cross-Space reference is skipped entirely rather than left as a silently
 		// empty file in the delivered archive.
-		if a.ContentType != "raw" && (p.SpaceID == nil || !validReferencedObjectKey(a.StorageURI, *p.SpaceID)) {
+		if a.ContentType != "raw" && (p.SpaceID == nil || !validReferencedObjectKey(storageKey, *p.SpaceID)) {
 			continue
 		}
 		if entries >= maxSkillZipEntries {
@@ -318,7 +326,7 @@ func (s *Service) writeSkillZip(ctx context.Context, p *model.Plugin, attachment
 		if remaining := s.maxArchiveBytes - total; remaining < limit {
 			limit = remaining
 		}
-		body, err := s.storage.GetObject(ctx, a.StorageURI)
+		body, err := s.storage.GetObject(ctx, storageKey)
 		if err != nil {
 			return err
 		}

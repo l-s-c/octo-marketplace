@@ -3,7 +3,9 @@ package plugin
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"sort"
+	"strconv"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 )
@@ -17,6 +19,14 @@ type Mutation struct {
 	OperatorName string
 	RequestID    string
 	Remark       *string
+	// SnapshotVersion, when set, appends one immutable plugin_versions row for this
+	// Plugin inside the write transaction and points current_version_id at it,
+	// setting current_version to the caller-declared label, so every save
+	// (create / edit / container reupload) records a full version snapshot. Only
+	// top-level nodes set it; embedded children version with their container.
+	// Changelog is the optional note stored on that snapshot.
+	SnapshotVersion bool
+	Changelog       *string
 }
 
 // RelationSync reports the outcome of synchronizing a Plugin's one-level
@@ -28,6 +38,11 @@ type RelationSync struct {
 	Updated   []string
 	Deleted   []string
 	Relations []model.PluginRelation
+	// NewVersionID is the id of the plugin_versions row this write snapshotted and
+	// advanced current_version_id to (empty when the write did not snapshot). The
+	// service stamps it back onto the returned plugin so the write response's
+	// current_version_id matches the DB and a subsequent GET.
+	NewVersionID string
 }
 
 // Create atomically inserts current state, one-level relations, and an audit event.
@@ -65,25 +80,84 @@ func (r *Repo) Create(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	if err = insertPlacements(ctx, tx, r.id, now, p.ID, m.Placements); err != nil {
 		return nil, err
 	}
+	var newVersionID string
+	if m.SnapshotVersion {
+		if newVersionID, err = snapshotVersion(ctx, tx, r.id, now, p, m.Relations, m.Changelog, m.OperatorID); err != nil {
+			return nil, err
+		}
+	}
 	if err = insertAudit(ctx, tx, r.id(), now, p, "create", m, "", p.PluginHash); err != nil {
 		return nil, err
 	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
-	return &RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: m.Relations}, nil
+	return &RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: m.Relations, NewVersionID: newVersionID}, nil
+}
+
+// jsonColumn maps an optional JSON document to a nullable SQL column value: NULL
+// when empty (so attachment_keys_json stays NULL for rows without spilled
+// storage attachments), the raw bytes as a string otherwise.
+func jsonColumn(raw []byte) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	return string(raw)
 }
 
 // insertPlugin writes one current-state plugin row. Callers hold the
 // transaction and have already locked the category and relation targets.
 func insertPlugin(ctx context.Context, tx *sql.Tx, now interface{}, p model.Plugin) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO plugins (plugin_id,plugin_name,plugin_type,is_embedded,category_id,tags_json,publisher,owner_uid,space_id,visibility,
-creator_name,created_by_type,created_by_bot_uid,created_by_bot_name,icon,tool_count,manifest_json,plugin_json,manifest_hash,plugin_hash,current_version_id,current_version,status,created_at,updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Type, p.IsEmbedded, p.CategoryID, string(p.Tags), p.Publisher, p.OwnerUID, p.SpaceID, p.Visibility, p.CreatorName, p.CreatedByType, p.CreatedByBotUID, p.CreatedByBotName, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.CurrentVersionID, p.CurrentVersion, p.Status, now, now)
+creator_name,created_by_type,created_by_bot_uid,created_by_bot_name,icon,tool_count,manifest_json,plugin_json,attachment_keys_json,manifest_hash,plugin_hash,current_version_id,current_version,status,created_at,updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Type, p.IsEmbedded, p.CategoryID, string(p.Tags), p.Publisher, p.OwnerUID, p.SpaceID, p.Visibility, p.CreatorName, p.CreatedByType, p.CreatedByBotUID, p.CreatedByBotName, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), jsonColumn(p.AttachmentKeys), p.ManifestHash, p.PluginHash, p.CurrentVersionID, p.CurrentVersion, p.Status, now, now)
 	if err != nil {
 		return wrapped("create", err)
 	}
 	return nil
+}
+
+// snapshotVersion appends one immutable plugin_versions row capturing p's current
+// content plus the given relation set, then points the plugin's current_version_id
+// at that new snapshot and sets current_version to the caller-declared label
+// (p.CurrentVersion, defaulting to "1.0.0"). The history row's own version column
+// is a per-plugin auto-increment sequence (1, 2, 3 ...) — distinct from the
+// current_version LABEL — computed under the transaction: for Update the plugin
+// row is already FOR UPDATE-locked, and a fresh Create has no prior snapshot, so
+// the COUNT is race-free. relations is marshaled as a []model.PluginRelation, and
+// nil becomes an empty JSON array to satisfy the relations_json ARRAY check.
+// attachment_keys_json mirrors the current row's storage-attachment sidecar.
+// Callers hold the transaction.
+func snapshotVersion(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, p model.Plugin, relations []model.PluginRelation, changelog *string, createdBy string) (string, error) {
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_versions WHERE plugin_id=?`, p.ID).Scan(&count); err != nil {
+		return "", wrapped("count versions", err)
+	}
+	seq := strconv.Itoa(count + 1)
+	if relations == nil {
+		relations = []model.PluginRelation{}
+	}
+	relationJSON, err := json.Marshal(relations)
+	if err != nil {
+		return "", err
+	}
+	versionID := newID()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO plugin_versions (version_id,plugin_id,version,manifest_json,plugin_json,attachment_keys_json,manifest_hash,plugin_hash,relations_json,changelog,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		versionID, p.ID, seq, string(p.Manifest), string(p.Package), jsonColumn(p.AttachmentKeys), p.ManifestHash, p.PluginHash, string(relationJSON), changelog, createdBy, now); err != nil {
+		return "", wrapped("snapshot version", err)
+	}
+	// current_version is the caller-declared label; fall back to "1.0.0" so the
+	// pointer is never left NULL (the service normally sets p.CurrentVersion).
+	currentVersion := "1.0.0"
+	if p.CurrentVersion != nil && *p.CurrentVersion != "" {
+		currentVersion = *p.CurrentVersion
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE plugins SET current_version_id=?,current_version=?,updated_at=? WHERE plugin_id=? AND deleted_at IS NULL`, versionID, currentVersion, now, p.ID); err != nil {
+		return "", wrapped("advance current version", err)
+	}
+	// The new history row is now the current version; return its id so the write
+	// response carries the same pointer the DB (and a subsequent GET) will show.
+	return versionID, nil
 }
 
 // CreateGraph atomically inserts several current-state plugins, their one-level
@@ -149,6 +223,15 @@ func (r *Repo) CreateGraph(ctx context.Context, scope Scope, nodes []Mutation) (
 			return nil, err
 		}
 		syncs[i] = &RelationSync{Created: created, Updated: []string{}, Deleted: []string{}, Relations: nodes[i].Relations}
+	}
+	// Snapshot every flagged top node now that its relations exist, so a container
+	// import records the top's initial version. Embedded children are not flagged.
+	for i := range nodes {
+		if nodes[i].SnapshotVersion {
+			if syncs[i].NewVersionID, err = snapshotVersion(ctx, tx, r.id, now, nodes[i].Plugin, nodes[i].Relations, nodes[i].Changelog, nodes[i].OperatorID); err != nil {
+				return nil, err
+			}
+		}
 	}
 	// Phase 3: append one create audit per plugin.
 	for i := range nodes {
@@ -286,15 +369,13 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 	if scope.Admin {
 		updWhere, updTail = `WHERE plugin_id=? AND deleted_at IS NULL`, []any{topPlugin.ID}
 	}
-	updArgs := append([]any{topPlugin.Name, topPlugin.Type, topPlugin.CategoryID, string(topPlugin.Tags), topPlugin.Publisher, topPlugin.Visibility, topPlugin.Icon, topPlugin.ToolCount, string(topPlugin.Manifest), string(topPlugin.Package), topPlugin.ManifestHash, topPlugin.PluginHash, topPlugin.Status, now}, updTail...)
-	if _, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,icon=?,tool_count=?,manifest_json=?,plugin_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
+	updArgs := append([]any{topPlugin.Name, topPlugin.Type, topPlugin.CategoryID, string(topPlugin.Tags), topPlugin.Publisher, topPlugin.Visibility, topPlugin.Icon, topPlugin.ToolCount, string(topPlugin.Manifest), string(topPlugin.Package), jsonColumn(topPlugin.AttachmentKeys), topPlugin.ManifestHash, topPlugin.PluginHash, topPlugin.Status, now}, updTail...)
+	if _, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,icon=?,tool_count=?,manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
 `+updWhere, updArgs...); err != nil {
 		return nil, wrapped("rebuild", err)
 	}
-	if topPlugin.CategoryID != nil {
-		if _, err = tx.ExecContext(ctx, `UPDATE plugin_placements SET category_id=?,updated_at=? WHERE plugin_id=?`, topPlugin.CategoryID, now, topPlugin.ID); err != nil {
-			return nil, wrapped("rebuild placements", err)
-		}
+	if err = syncDefaultPlacement(ctx, tx, r.id, now, topPlugin.ID, topPlugin.CategoryID); err != nil {
+		return nil, err
 	}
 	// Phase 4: resync the top plugin's relations to the new children. Every new
 	// edge carries an empty ID so syncRelations inserts it and soft-deletes the
@@ -310,6 +391,13 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 	// they stop surfacing anywhere, with one delete audit each.
 	for _, id := range oldChildIDs {
 		if err = softDeleteRebuiltChild(ctx, tx, r.id, scope, now, id, top); err != nil {
+			return nil, err
+		}
+	}
+	// Snapshot the rebuilt top as a new history version (its content was just
+	// swapped) and advance current_version_id/current_version onto it.
+	if top.SnapshotVersion {
+		if sync.NewVersionID, err = snapshotVersion(ctx, tx, r.id, now, topPlugin, top.Relations, top.Changelog, top.OperatorID); err != nil {
 			return nil, err
 		}
 	}
@@ -403,26 +491,49 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	if scope.Admin {
 		updWhere, updTail = `WHERE plugin_id=? AND deleted_at IS NULL`, []any{p.ID}
 	}
-	updArgs := append([]any{p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.Visibility, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), p.ManifestHash, p.PluginHash, p.Status, now}, updTail...)
-	_, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,icon=?,tool_count=?,manifest_json=?,plugin_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
+	updArgs := append([]any{p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.Visibility, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), jsonColumn(p.AttachmentKeys), p.ManifestHash, p.PluginHash, p.Status, now}, updTail...)
+	_, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,icon=?,tool_count=?,manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
 `+updWhere, updArgs...)
 	if err != nil {
 		return nil, wrapped("update", err)
 	}
 	// Placements filter list pages by their own category copy; keep it in sync
-	// with the current-state category so an updated Plugin doesn't keep
-	// filtering under its old category until the next publish. A nil category
-	// on the update leaves placement categories alone — publish owns clearing
-	// per-placement configuration.
-	if p.CategoryID != nil {
-		_, err = tx.ExecContext(ctx, `UPDATE plugin_placements SET category_id=?,updated_at=? WHERE plugin_id=?`, p.CategoryID, now, p.ID)
-		if err != nil {
-			return nil, wrapped("update placements", err)
-		}
+	// with the current-state category on every update — including clearing it to
+	// NULL when the plugin's category is cleared — so the scene-scoped market
+	// never keeps filtering a plugin under a category it no longer has. (With
+	// publish removed, the update owns placement category configuration; the
+	// plugins row's own category_id is written unconditionally just above, so the
+	// placement simply tracks it.)
+	if err = syncDefaultPlacement(ctx, tx, r.id, now, p.ID, p.CategoryID); err != nil {
+		return nil, err
 	}
 	sync, err := syncRelations(ctx, tx, r.id, now, p.ID, m.OperatorID, m.Relations)
 	if err != nil {
 		return nil, err
+	}
+	// A save is a version — but a save that changes NOTHING is not. Snapshot when
+	// any component a version row records differs from the row under lock: the
+	// content hashes, the caller-declared label (written only inside
+	// snapshotVersion — the main UPDATE above does not touch current_version), the
+	// relation graph (syncRelations reports adds/updates/deletes), the attachment
+	// sidecar (the managed object keys are stripped before hashing, so a same-path
+	// key swap leaves the hashes equal), or a submitted changelog. Only a
+	// byte-identical resubmit with no relation/sidecar change and no changelog is
+	// skipped — the anti-bloat no-op — so a client cannot append an unbounded run
+	// of identical version rows, while a version-, relation-, sidecar-, or
+	// changelog-only save is still recorded and its label/graph/keys/changelog
+	// persisted. A skipped no-op keeps its existing current_version_id (seeded
+	// from the old row by the service).
+	contentUnchanged := p.PluginHash == before.PluginHash && p.ManifestHash == before.ManifestHash
+	labelUnchanged := (p.CurrentVersion == nil) == (before.CurrentVersion == nil) &&
+		(p.CurrentVersion == nil || *p.CurrentVersion == *before.CurrentVersion)
+	relationsChanged := len(sync.Created) > 0 || len(sync.Updated) > 0 || len(sync.Deleted) > 0
+	sidecarUnchanged := sameAttachmentKeys(p.AttachmentKeys, before.AttachmentKeys)
+	hasChangelog := m.Changelog != nil && *m.Changelog != ""
+	if m.SnapshotVersion && (!contentUnchanged || !labelUnchanged || relationsChanged || !sidecarUnchanged || hasChangelog) {
+		if sync.NewVersionID, err = snapshotVersion(ctx, tx, r.id, now, p, m.Relations, m.Changelog, m.OperatorID); err != nil {
+			return nil, err
+		}
 	}
 	if err = insertAudit(ctx, tx, r.id(), now, p, "update", m, before.PluginHash, p.PluginHash); err != nil {
 		return nil, err
@@ -774,11 +885,11 @@ func insertRelationRow(ctx context.Context, tx *sql.Tx, now interface{}, source,
 	return nil
 }
 
-// insertPlacements writes the current-state placements a create attaches. Unlike
-// Publish (which registers categories against plugin_category_placements before
-// inserting), the admin auto-placement is intentional and must not fail on an
-// unregistered category — a plain visible placement is enough to surface the
-// plugin in the market list. Tenant callers pass no placements (nil → no-op).
+// insertPlacements writes the current-state placements a create attaches. The
+// auto-placement (tenant and admin create both pass one default visible
+// placement) is intentional and must not fail on an unregistered category — a
+// plain visible placement is enough to surface the plugin in the market list. A
+// caller passing no placements (nil) is a no-op.
 func insertPlacements(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, pluginID string, placements []model.PluginPlacement) error {
 	for _, x := range placements {
 		id := x.ID
@@ -887,4 +998,59 @@ func insertAudit(ctx context.Context, tx *sql.Tx, auditID string, now interface{
 	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO plugin_audit_logs (audit_log_id,plugin_id,action,operator_id,operator_name,request_id,before_hash,after_hash,manifest_snapshot_json,plugin_snapshot_json,remark,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, auditID, p.ID, action, m.OperatorID, m.OperatorName, m.RequestID, bh, ah, manifest, pkg, m.Remark, now)
 	return wrapped("append audit", err)
+}
+
+// sameAttachmentKeys reports whether two attachment sidecars hold the same
+// path→object-key map, tolerant of nil / empty / JSON key ordering. The managed
+// keys are stripped before the package is hashed, so a same-path key swap leaves
+// plugin_hash/manifest_hash unchanged; the version-snapshot dedup consults this
+// so a sidecar-only save still records a version rather than silently moving the
+// live row's keys away from the snapshot current_version_id points at.
+func sameAttachmentKeys(a, b json.RawMessage) bool {
+	ma, mb := decodeSidecarMap(a), decodeSidecarMap(b)
+	if len(ma) != len(mb) {
+		return false
+	}
+	for k, v := range ma {
+		if bv, ok := mb[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+func decodeSidecarMap(raw json.RawMessage) map[string]string {
+	m := map[string]string{}
+	if len(raw) == 0 {
+		return m
+	}
+	_ = json.Unmarshal(raw, &m)
+	return m
+}
+
+// syncDefaultPlacement keeps a plugin listable across a save. Market list pages
+// INNER JOIN the "default" placement, and after publish-removal no non-create
+// path inserts one — so a plugin created before auto-placement (e.g. an old
+// tenant create that never published) would be permanently filtered out on its
+// next edit. Insert the default placement when the plugin has none (self-healing,
+// carrying the current category), otherwise sync the existing placement's
+// category to the current one (including clearing it to NULL). The id is consumed
+// only on the insert path. Only the default placement is managed; publish-era
+// multi-scene placements are gone.
+func syncDefaultPlacement(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, pluginID string, categoryID *string) error {
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM plugin_placements WHERE plugin_id=? AND placement_code=?)`, pluginID, "default").Scan(&exists); err != nil {
+		return wrapped("check placement", err)
+	}
+	if !exists {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO plugin_placements (placement_id,placement_code,plugin_id,category_id,visible,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+			newID(), "default", pluginID, categoryID, true, 0, now, now); err != nil {
+			return wrapped("insert default placement", err)
+		}
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE plugin_placements SET category_id=?,updated_at=? WHERE plugin_id=?`, categoryID, now, pluginID); err != nil {
+		return wrapped("update placements", err)
+	}
+	return nil
 }

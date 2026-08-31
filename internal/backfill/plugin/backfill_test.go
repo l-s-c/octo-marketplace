@@ -109,20 +109,22 @@ func assertCompliantPluginDocuments(t *testing.T, plugin plugRow) {
 	if err := json.Unmarshal([]byte(plugin.manifest), &manifestValue); err != nil {
 		t.Fatalf("plugin %q manifest: %v", plugin.id, err)
 	}
-	if manifestValue.Schema != "cowork-plugin-manifest-1.0.json" || manifestValue.PluginName != plugin.name || manifestValue.PluginType != plugin.typ || manifestValue.Labels == nil || manifestValue.Examples == nil {
+	if manifestValue.Schema != "cowork-plugin-manifest-2.0.json" || manifestValue.PluginName != plugin.name || manifestValue.PluginType != plugin.typ || manifestValue.Labels == nil || manifestValue.Examples == nil {
 		t.Fatalf("plugin %q manifest is not compliant: %#v", plugin.id, manifestValue)
 	}
 	var packageValue pluginPackage
 	if err := json.Unmarshal([]byte(plugin.pkg), &packageValue); err != nil {
 		t.Fatalf("plugin %q package: %v", plugin.id, err)
 	}
-	if packageValue.Schema != "cowork-plugin-package-1.0.json" || len(packageValue.Attachments) == 0 {
+	if packageValue.Schema != "cowork-plugin-package-2.0.json" || len(packageValue.Attachments) == 0 {
 		t.Fatalf("plugin %q package is not compliant: %#v", plugin.id, packageValue)
 	}
 	paths := make([]string, 0, len(packageValue.Attachments))
 	for _, attachment := range packageValue.Attachments {
 		paths = append(paths, attachment.Path)
-		if attachment.ContentType != "raw" || attachment.ContentSize != len([]byte(attachment.RawContent)) || attachment.ContentHash != hashJSON([]byte(attachment.RawContent)) {
+		// The 2.0 contract forbids a derived content_size/content_hash on raw
+		// content; the migrated documents are all raw here.
+		if attachment.ContentType != "raw" || attachment.ContentSize != nil || attachment.ContentHash != "" {
 			t.Fatalf("plugin %q attachment invalid: %#v", plugin.id, attachment)
 		}
 		// Contract layout: the manifest lives only in the manifest_json

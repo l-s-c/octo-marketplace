@@ -289,11 +289,11 @@ func scanPluginSummary(s interface{ Scan(...any) error }) (*model.Plugin, error)
 func scanPluginRow(s interface{ Scan(...any) error }, includePackage, includeMetrics bool) (*model.Plugin, error) {
 	var p model.Plugin
 	var category, space, botUID, botName, version, versionName sql.NullString
-	var tags, manifest, pkg []byte
+	var tags, manifest, pkg, attachKeys []byte
 	var deleted sql.NullTime
 	dest := []any{&p.ID, &p.Name, &p.Type, &p.IsEmbedded, &category, &tags, &p.Publisher, &p.OwnerUID, &space, &p.Visibility, &p.CreatorName, &p.CreatedByType, &botUID, &botName, &p.Icon, &p.ToolCount, &manifest}
 	if includePackage {
-		dest = append(dest, &pkg)
+		dest = append(dest, &pkg, &attachKeys)
 	}
 	dest = append(dest, &p.ManifestHash, &p.PluginHash, &version, &versionName, &p.Status, &p.CreatedAt, &p.UpdatedAt, &deleted)
 	if includeMetrics {
@@ -315,6 +315,7 @@ func scanPluginRow(s interface{ Scan(...any) error }, includePackage, includeMet
 	p.Manifest = cloneJSON(manifest)
 	if includePackage {
 		p.Package = cloneJSON(pkg)
+		p.AttachmentKeys = cloneJSON(attachKeys)
 	}
 	return &p, nil
 }

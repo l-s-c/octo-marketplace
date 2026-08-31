@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
+	libplugin "github.com/Mininglamp-OSS/octo-plugin-lib/plugin"
 )
 
 func attachmentJSON(path, mime, content string) string {
@@ -20,11 +21,11 @@ func attachmentJSON(path, mime, content string) string {
 
 func TestTransformPackageRenamesExpertEntriesAndDropsManifest(t *testing.T) {
 	manifest := []byte(`{"plugin_name":"专家","name":"expert-a","description":"d"}`)
-	pkg := []byte(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+	pkg := []byte(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
 		attachmentJSON("expert/instruction.md", "text/markdown", "do work") + `,` +
 		attachmentJSON("expert/mcp.json", "application/json", `{"mcpServers":{}}`) + `,` +
 		attachmentJSON("manifest.json", "application/json", "{}") + `]}`)
-	out, changed, err := transformPackage(pkg, "expert", manifest)
+	out, _, changed, err := transformPackage(pkg, "expert", manifest)
 	if err != nil || !changed {
 		t.Fatalf("changed=%v err=%v", changed, err)
 	}
@@ -33,18 +34,18 @@ func TestTransformPackageRenamesExpertEntriesAndDropsManifest(t *testing.T) {
 		strings.Contains(text, "expert/instruction.md") || strings.Contains(text, "manifest.json") {
 		t.Fatalf("out=%s", text)
 	}
-	if _, again, err := transformPackage(out, "expert", manifest); err != nil || again {
+	if _, _, again, err := transformPackage(out, "expert", manifest); err != nil || again {
 		t.Fatalf("second pass changed=%v err=%v", again, err)
 	}
 }
 
 func TestTransformPackageCollapsesTeamToSingleAgentsFile(t *testing.T) {
 	manifest := []byte(`{"plugin_name":"产品研发专家团","name":"team-a","description":"跨职能协作"}`)
-	pkg := []byte(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+	pkg := []byte(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
 		attachmentJSON("AGENTS.md", "text/markdown", "# 旧版无依赖节") + `,` +
 		attachmentJSON("manifest.json", "application/json", "{}") + `,` +
 		attachmentJSON("team/config.json", "application/json", `{"leader":"Alice","strategies":["先澄清目标","再评估风险"],"dependencies":{"blocking":["需求文档"],"recommended":["设计稿"]},"permission":"open"}`) + `]}`)
-	out, changed, err := transformPackage(pkg, "expert_team", manifest)
+	out, _, changed, err := transformPackage(pkg, "expert_team", manifest)
 	if err != nil || !changed {
 		t.Fatalf("changed=%v err=%v", changed, err)
 	}
@@ -70,7 +71,7 @@ func TestTransformPackageCollapsesTeamToSingleAgentsFile(t *testing.T) {
 	if !strings.Contains(want, "### 依赖") || !strings.Contains(want, "### 权限") {
 		t.Fatalf("renderer missing sections: %q", want)
 	}
-	if _, again, err := transformPackage(out, "expert_team", manifest); err != nil || again {
+	if _, _, again, err := transformPackage(out, "expert_team", manifest); err != nil || again {
 		t.Fatalf("second pass changed=%v err=%v", again, err)
 	}
 }
@@ -78,11 +79,11 @@ func TestTransformPackageCollapsesTeamToSingleAgentsFile(t *testing.T) {
 func TestTransformPackageConvertsConnectorConfig(t *testing.T) {
 	manifest := []byte(`{"plugin_name":"Jira","name":"jira","description":"d"}`)
 	config := `{"config":{"url":"https://mcp.example.com/mcp","env":{"REGION":""},"envUserSupplied":["TOKEN"],"authType":"bearer","serverName":"jira"},"transport":"streamable-http"}`
-	pkg := []byte(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+	pkg := []byte(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
 		attachmentJSON("connector/config.json", "application/json", config) + `,` +
 		attachmentJSON("connector/tools.json", "application/json", `[{"name":"a"}]`) + `,` +
 		attachmentJSON("manifest.json", "application/json", "{}") + `]}`)
-	out, changed, err := transformPackage(pkg, "connector", manifest)
+	out, _, changed, err := transformPackage(pkg, "connector", manifest)
 	if err != nil || !changed {
 		t.Fatalf("changed=%v err=%v", changed, err)
 	}
@@ -96,22 +97,95 @@ func TestTransformPackageConvertsConnectorConfig(t *testing.T) {
 	if !strings.Contains(text, `\"TOKEN\":\"${TOKEN}\"`) || !strings.Contains(text, `\"Authorization\":\"${AUTHORIZATION}\"`) {
 		t.Fatalf("placeholders missing: %s", text)
 	}
-	if _, again, err := transformPackage(out, "connector", manifest); err != nil || again {
+	if _, _, again, err := transformPackage(out, "connector", manifest); err != nil || again {
 		t.Fatalf("second pass changed=%v err=%v", again, err)
 	}
 }
 
 func TestTransformPackageStripsManifestFromSkillOnly(t *testing.T) {
 	manifest := []byte(`{"plugin_name":"S","name":"s","description":"d"}`)
-	withManifest := []byte(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+	withManifest := []byte(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
 		attachmentJSON("SKILL.md", "text/markdown", "# doc") + `,` +
 		attachmentJSON("manifest.json", "application/json", "{}") + `]}`)
-	out, changed, err := transformPackage(withManifest, "skill", manifest)
+	out, _, changed, err := transformPackage(withManifest, "skill", manifest)
 	if err != nil || !changed || strings.Contains(string(out), "manifest.json") {
 		t.Fatalf("changed=%v err=%v out=%s", changed, err, out)
 	}
 	// Already-contract skill packages round-trip untouched.
-	if _, again, err := transformPackage(out, "skill", manifest); err != nil || again {
+	if _, _, again, err := transformPackage(out, "skill", manifest); err != nil || again {
+		t.Fatalf("second pass changed=%v err=%v", again, err)
+	}
+}
+
+// TestTransformPackageSplitsStorageURI locks the migration of a flat-tree row
+// that carries a storage attachment with an inline storage_uri (no legacy
+// pointer, so the expand phase never touches it): repackage must strip
+// storage_uri from the 2.0 package and return it in the sidecar map, or the row
+// would be rejected by DecodePackage and left unmigrated with a NULL sidecar.
+func TestTransformPackageSplitsStorageURI(t *testing.T) {
+	manifest := []byte(`{"plugin_name":"S","name":"s","description":"d"}`)
+	key := "plugins/space-a/attachments/skill-x-deadbeefdeadbeef.bin"
+	pkg := []byte(`{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+		attachmentJSON("SKILL.md", "text/markdown", "# doc") + `,` +
+		`{"path":"assets/logo.bin","content_type":"storage","mime_type":"application/octet-stream","content_size":10,"content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","storage_uri":"` + key + `"}]}`)
+	out, keys, changed, err := transformPackage(pkg, "skill", manifest)
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	if strings.Contains(string(out), "storage_uri") {
+		t.Fatalf("storage_uri not stripped from package: %s", out)
+	}
+	var m map[string]string
+	if err := json.Unmarshal(keys, &m); err != nil || m["assets/logo.bin"] != key {
+		t.Fatalf("sidecar keys = %s (err %v)", keys, err)
+	}
+	// The stripped package is a valid 2.0 document.
+	if err := decodablePackage(out, "skill"); err != nil {
+		t.Fatalf("stripped package rejected by lib: %v", err)
+	}
+	// A row already split (no storage_uri) yields no keys, so the pass must not
+	// overwrite an existing sidecar with NULL.
+	_, keys2, _, err := transformPackage(out, "skill", manifest)
+	if err != nil || keys2 != nil {
+		t.Fatalf("second pass keys=%s err=%v", keys2, err)
+	}
+}
+
+// TestTransformManifestMigratesSchemaSoLibAccepts is the empirical probe for the
+// manifest-migration blocker: a stored 1.0 manifest is rejected by the 2.0 lib,
+// and transformManifest bumps it so the pair validates. Mirrors the reviewer's
+// DecodeManifest probe rather than trusting inspection.
+func TestTransformManifestMigratesSchemaSoLibAccepts(t *testing.T) {
+	const id = "00000000-0000-4000-8000-000000000001"
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	manifest := []byte(`{"$schema":"cowork-plugin-manifest-1.0.json","plugin_name":"S","plugin_type":"skill","name":"s","description":"d","labels":[],"examples":[]}`)
+	pkg := []byte(`{"$schema":"cowork-plugin-package-2.0.json","attachments":[{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# doc"}]}`)
+
+	validate := func(m []byte) error {
+		cm, _ := libplugin.CanonicalJSON(m)
+		cp, _ := libplugin.CanonicalJSON(pkg)
+		ph, _ := libplugin.ComputePluginHash(m, pkg)
+		return libplugin.ValidatePlugin(libplugin.Plugin{
+			PluginID: id, PluginName: "S", PluginType: libplugin.TypeSkill,
+			ManifestJSON: cm, PluginJSON: cp, PluginHash: ph,
+			Status: libplugin.StatusActive, CreatedAt: ts, UpdatedAt: ts,
+		})
+	}
+
+	// Reproduce the bug: the un-migrated 1.0 manifest is rejected.
+	if err := validate(manifest); err == nil {
+		t.Fatal("expected the 1.0 manifest to be rejected by the 2.0 lib")
+	}
+	// The fix: transformManifest bumps the schema and the pair now validates.
+	newManifest, changed, err := transformManifest(manifest)
+	if err != nil || !changed {
+		t.Fatalf("transformManifest changed=%v err=%v", changed, err)
+	}
+	if err := validate(newManifest); err != nil {
+		t.Fatalf("migrated manifest still rejected: %v", err)
+	}
+	// Idempotent: a 2.0 manifest is left untouched.
+	if _, again, err := transformManifest(newManifest); err != nil || again {
 		t.Fatalf("second pass changed=%v err=%v", again, err)
 	}
 }
@@ -127,8 +201,8 @@ func repackageRunner(t *testing.T) (*Runner, sqlmock.Sqlmock, func()) {
 
 func oldExpertPkg(t *testing.T) (string, string) {
 	t.Helper()
-	manifest := `{"plugin_name":"专家","name":"expert-a","description":"d"}`
-	pkg := `{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
+	manifest := `{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"专家","name":"expert-a","description":"d"}`
+	pkg := `{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
 		attachmentJSON("expert/instruction.md", "text/markdown", "do work") + `,` +
 		attachmentJSON("expert/mcp.json", "application/json", `{"mcpServers":{}}`) + `,` +
 		attachmentJSON("manifest.json", "application/json", "{}") + `]}`
@@ -173,9 +247,11 @@ func TestRepackagePluginsGuardsUpdateWithOldHash(t *testing.T) {
 func TestRepackagePluginsRewritesHashEvenWithoutContentChange(t *testing.T) {
 	r, mock, done := repackageRunner(t)
 	defer done()
-	manifest := `{"plugin_name":"S","name":"s","description":"d"}`
-	pkg := `{"$schema":"cowork-plugin-package-1.0.json","attachments":[` +
-		attachmentJSON("SKILL.md", "text/markdown", "# doc") + `]}`
+	manifest := `{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"S","name":"s","description":"d"}`
+	// An already-migrated 2.0 package: raw attachment without content_size/hash, so
+	// repackage finds no content change and only the stale-hash row is rewritten.
+	pkg := `{"$schema":"cowork-plugin-package-2.0.json","attachments":[` +
+		`{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# doc"}]}`
 	libHash, err := libplugin.ComputePluginHash([]byte(manifest), []byte(pkg))
 	if err != nil {
 		t.Fatal(err)
@@ -242,7 +318,7 @@ func TestRepackageAuditsLeavesConsistentContractRowsAlone(t *testing.T) {
 	r, mock, done := repackageRunner(t)
 	defer done()
 	manifest, oldPkg := oldExpertPkg(t)
-	newPkg, _, err := transformPackage([]byte(oldPkg), "expert", []byte(manifest))
+	newPkg, _, _, err := transformPackage([]byte(oldPkg), "expert", []byte(manifest))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,4 +398,41 @@ func TestTransformVersionRelationsRewritesSnapshotEntries(t *testing.T) {
 	if _, again, err := transformVersionRelations(out, "team-1"); err != nil || again {
 		t.Fatalf("second pass changed=%v err=%v", again, err)
 	}
+}
+
+// TestTransformSchemaInjectsAbsentAndRejectsUnknown pins P1-5: an absent $schema
+// is injected (so the row is migrated + validated, not rehashed unvalidated), a
+// 1.0 id upgrades, an already-2.0 doc is a manifest no-op, and an unrecognized
+// generation is refused rather than silently downgraded to 2.0.
+func TestTransformSchemaInjectsAbsentAndRejectsUnknown(t *testing.T) {
+	// Manifest: absent -> injected (changed).
+	out, changed, err := transformManifest([]byte(`{"name":"s","plugin_name":"S","description":"d"}`))
+	if err != nil || !changed {
+		t.Fatalf("absent manifest: changed=%v err=%v", changed, err)
+	}
+	if s, _ := jsonField(out, "$schema"); s != "cowork-plugin-manifest-2.0.json" {
+		t.Fatalf("absent manifest not injected: %s", out)
+	}
+	// Manifest: unrecognized generation -> error.
+	if _, _, err := transformManifest([]byte(`{"$schema":"cowork-plugin-manifest-3.0.json","name":"s"}`)); err == nil {
+		t.Fatal("unrecognized manifest $schema should error, not downgrade")
+	}
+	// Package: absent -> injected (changed).
+	_, _, pchanged, err := transformPackage([]byte(`{"attachments":[`+attachmentJSON("SKILL.md", "text/markdown", "# d")+`]}`), "skill", []byte(`{"$schema":"cowork-plugin-manifest-2.0.json","name":"s"}`))
+	if err != nil || !pchanged {
+		t.Fatalf("absent package: changed=%v err=%v", pchanged, err)
+	}
+	// Package: unrecognized generation -> error.
+	if _, _, _, err := transformPackage([]byte(`{"$schema":"cowork-plugin-package-3.0.json","attachments":[]}`), "skill", []byte(`{}`)); err == nil {
+		t.Fatal("unrecognized package $schema should error, not downgrade")
+	}
+}
+
+func jsonField(raw []byte, key string) (string, bool) {
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return "", false
+	}
+	s, ok := m[key].(string)
+	return s, ok
 }

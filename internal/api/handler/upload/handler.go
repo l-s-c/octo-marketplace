@@ -92,6 +92,13 @@ func (h *Handler) SetDevBotMode(enabled bool) {
 func (h *Handler) RegisterAdmin(r *gin.Engine, adminAuth *middleware.AdminAuthenticator) {
 	admin := r.Group("/api/v1/admin", adminAuth.Handler(middleware.RoleMarketAdmin))
 	admin.POST("/skill_uploads", h.InitUpload)
+	// Admin twin of the tenant /skill_icon_uploads. InitIconUpload mints a random
+	// UUID object prefix server-side (icons/<uuid>/<sanitized-name>) and does not
+	// derive the key from any caller identity or Space, so no X-Space-Id is needed;
+	// the RoleMarketAdmin gate above is the only authorization. Lets the admin
+	// console upload skill icons the same way it uploads connector icons
+	// (/admin/mcp_icon_uploads).
+	admin.POST("/skill_icon_uploads", h.InitIconUpload)
 	admin.POST("/skill_uploads/:skill_upload_id/parse", h.TriggerParse)
 	admin.GET("/skill_parse_tasks/:skill_parse_task_id", h.PollParse)
 	admin.GET("/skills/:skill_id/download", h.AdminDownload)

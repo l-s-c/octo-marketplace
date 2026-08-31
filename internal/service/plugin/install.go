@@ -322,7 +322,7 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, budge
 			ref.Files = legacy.Files
 		}
 	}
-	if key, ok := storageAttachmentKey(p.Package, "skill/package.zip"); ok {
+	if key, ok := storageAttachmentKey(p, "skill/package.zip"); ok {
 		// Same own-Space scoping as skill/ref.json above (Q5): the managed zip key
 		// is honored only inside this plugin's own prefix, matching legacyZipKey /
 		// migrationZipKey, so a forged or cross-Space key is never handed to the
@@ -359,6 +359,7 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, budge
 	// plugin_json packs thousands of storage attachments. The shared budget.bytes
 	// byte budget additionally caps aggregate resident bytes across the install.
 	processed := 0
+	keys := attachmentKeyMap(p.AttachmentKeys)
 	for _, a := range decodePackageAttachments(p.Package) {
 		if a.Path == "SKILL.md" {
 			continue
@@ -378,7 +379,11 @@ func (s *Service) skillRefFromPlugin(ctx context.Context, p *model.Plugin, budge
 		// object is not pulled in full only to be discarded (P1-3); readStorageText
 		// reads at most limit+1 and reports too-large rather than truncating (B2),
 		// and verifies the recorded content_hash/content_size before use.
-		if content, ok := s.readStorageText(ctx, p.SpaceID, a.StorageURI, budget.bytes, a.ContentSize, a.ContentHash); ok {
+		storageKey := keys[a.Path]
+		if storageKey == "" {
+			storageKey = a.StorageURI
+		}
+		if content, ok := s.readStorageText(ctx, p.SpaceID, storageKey, budget.bytes, a.ContentSize, a.ContentHash); ok {
 			ref.SupportingFiles = append(ref.SupportingFiles, model.SkillFile{Path: a.Path, Content: content})
 			budget.bytes -= int64(len(content))
 		}
@@ -466,6 +471,18 @@ func manifestDescription(manifest json.RawMessage) string {
 	}
 	_ = json.Unmarshal(manifest, &doc)
 	return doc.Description
+}
+
+// manifestName reads the display name (`name`) out of a stored manifest. Used
+// to preserve an existing skill's curated display name on a package-only
+// reupload rather than resetting it to the freshly-parsed package's machine
+// name.
+func manifestName(manifest json.RawMessage) string {
+	var doc struct {
+		Name string `json:"name"`
+	}
+	_ = json.Unmarshal(manifest, &doc)
+	return doc.Name
 }
 
 // trackTimeout bounds the best-effort install counter bump; see the expert

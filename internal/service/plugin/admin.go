@@ -174,6 +174,7 @@ func (s *Service) AdminCreate(ctx context.Context, caller Caller, req WriteReque
 	}
 	audit := s.audit(caller, p.ID, "create", nil, p, s.now())
 	m := mutation(*p, rels, audit)
+	m.SnapshotVersion = true
 	// Admin creates auto-attach a default visible placement so the plugin surfaces
 	// in the tenant market immediately (the market always lists the "default"
 	// placement); publish is not required. The placement copies the plugin's
@@ -182,6 +183,9 @@ func (s *Service) AdminCreate(ctx context.Context, caller Caller, req WriteReque
 	sync, err := s.repo.Create(ctx, adminScope(caller), m)
 	if err != nil {
 		return nil, mapStoreError(err)
+	}
+	if sync != nil && sync.NewVersionID != "" {
+		p.CurrentVersionID = &sync.NewVersionID
 	}
 	return &Detail{Plugin: p, Relations: rels, RelationResult: relationResult(sync)}, nil
 }
@@ -219,12 +223,21 @@ func (s *Service) AdminUpdate(ctx context.Context, caller Caller, pluginID strin
 	if old.SpaceID != nil {
 		effSpace = *old.SpaceID
 	}
+	// Fetch-edit-save: re-inject stored keys for unchanged storage attachments the
+	// GET response returned keyless, so the round-trip is not rejected on write.
+	req.Package = reinjectUpdateStorageKeys(req.Package, old.Package, old.AttachmentKeys)
 	p, rels, err := s.adminEffectiveWrite(ctx, caller, storageID, req, old.Visibility, effSpace)
 	if err != nil {
 		return nil, err
 	}
 	p.CreatedAt, p.CurrentVersionID = old.CreatedAt, old.CurrentVersionID
-	p.CurrentVersion = old.CurrentVersion // keep the published version label, not just its id
+	// Keep the stored version label only when the admin edit omits a version; a
+	// submitted version is applied (buildWrite already set it), mirroring the
+	// tenant update — otherwise an admin edit that sends a new version returns 200
+	// while silently not applying it.
+	if strings.TrimSpace(req.Version) == "" {
+		p.CurrentVersion = old.CurrentVersion
+	}
 	p.CreatorName, p.CreatedByType = old.CreatorName, old.CreatedByType
 	p.CreatedByBotUID, p.CreatedByBotName = old.CreatedByBotUID, old.CreatedByBotName
 	p.SpaceID = old.SpaceID   // preserve the row's existing Space on update
@@ -238,9 +251,17 @@ func (s *Service) AdminUpdate(ctx context.Context, caller Caller, pluginID strin
 		rels[i].SourcePluginID = storageID
 	}
 	audit := s.audit(caller, storageID, "update", old, p, s.now())
-	sync, err := s.repo.Update(ctx, adminScope(caller), mutation(*p, rels, audit))
+	m := mutation(*p, rels, audit)
+	m.SnapshotVersion = true
+	sync, err := s.repo.Update(ctx, adminScope(caller), m)
 	if err != nil {
 		return nil, mapStoreError(err)
+	}
+	// The snapshot advanced current_version_id; stamp the new row id onto the
+	// response so it agrees with the DB (a follow-up GET must not contradict it),
+	// mirroring the tenant update path.
+	if sync != nil && sync.NewVersionID != "" {
+		p.CurrentVersionID = &sync.NewVersionID
 	}
 	return &Detail{Plugin: p, Relations: rels, RelationResult: relationResult(sync)}, nil
 }

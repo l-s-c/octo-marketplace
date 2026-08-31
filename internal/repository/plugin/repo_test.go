@@ -70,7 +70,7 @@ func TestCreateCommitsCurrentRelationsAndAuditTogether(t *testing.T) {
 	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT p.plugin_type,p.is_embedded FROM plugins p .* FOR UPDATE`).WithArgs("target-id", "space", "caller").WillReturnRows(sqlmock.NewRows([]string{"plugin_type", "is_embedded"}).AddRow(model.PluginTypeSkill, false))
-	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("plugin-id", "Name", model.PluginTypeExpert, false, nil, "[]", "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "", 0, "{}", "{}", "sha256:m", "sha256:p", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("plugin-id", "Name", model.PluginTypeExpert, false, nil, "[]", "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "", 0, "{}", "{}", nil, "sha256:m", "sha256:p", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO plugin_relations`).WithArgs("relation-id", "plugin-id", "target-id", "expert_skill", 0, "{}", 1, "caller", now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-id", "plugin-id", "create", "caller", "Caller", "request-id", nil, "sha256:p", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
@@ -106,6 +106,342 @@ func TestCreateAttachesVisiblePlacementInSameTx(t *testing.T) {
 	_, err := r.Create(context.Background(), Scope{CallerUID: "caller", SpaceID: "space"}, Mutation{
 		Plugin:     model.Plugin{ID: "plugin-id", Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`)},
 		Placements: []model.PluginPlacement{{PlacementCode: "default", Visible: true, SortOrder: 0}},
+		OperatorID: "caller",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCreateSnapshotsVersionWhenFlagged locks the per-save version history: a
+// create with SnapshotVersion appends a plugin_versions row with an
+// auto-increment history label (first snapshot -> "1") and points
+// current_version_id at it, stamping current_version (defaulting to "1.0.0").
+func TestCreateSnapshotsVersionWhenFlagged(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 27, 8, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"version-id", "audit-id"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO plugins`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugin_versions WHERE plugin_id=\?`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(`INSERT INTO plugin_versions`).
+		WithArgs("version-id", "plugin-id", "1", "{}", "{}", nil, "sha256:m", "sha256:p", "[]", nil, "caller", now).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`UPDATE plugins SET current_version_id=\?,current_version=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("version-id", "1.0.0", now, "plugin-id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	_, err := r.Create(context.Background(), Scope{CallerUID: "caller", SpaceID: "space"}, Mutation{
+		Plugin:          model.Plugin{ID: "plugin-id", Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p", Status: 1},
+		OperatorID:      "caller",
+		SnapshotVersion: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateSnapshotsIncrementingVersion locks that an edit snapshots the next
+// sequential history label off the existing version count (2 prior -> "3") and
+// points current_version_id at it, stamping current_version (default "1.0.0").
+func TestUpdateSnapshotsIncrementingVersion(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"version-id", "audit-id"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("plugin-id", scope.CallerUID, scope.SpaceID).WillReturnRows(ownedPluginRow("plugin-id", scope, now))
+	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}))
+	mock.ExpectExec(`UPDATE plugins SET plugin_name=`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
+	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugin_versions WHERE plugin_id=\?`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
+	mock.ExpectExec(`INSERT INTO plugin_versions`).
+		WithArgs("version-id", "plugin-id", "3", "{}", "{}", nil, "sha256:m2", "sha256:p2", "[]", nil, "caller", now).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`UPDATE plugins SET current_version_id=\?,current_version=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("version-id", "1.0.0", now, "plugin-id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	_, err := r.Update(context.Background(), scope, Mutation{
+		Plugin:          model.Plugin{ID: "plugin-id", Type: model.PluginTypeExpert, Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m2", PluginHash: "sha256:p2", Status: 1},
+		OperatorID:      "caller",
+		SnapshotVersion: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateSkipsSnapshotWhenContentUnchanged locks the anti-bloat guard: a
+// SnapshotVersion update whose manifest/plugin hashes both match the row under
+// lock writes NO plugin_versions row (and no current_version pointer bump), so a
+// client cannot append unbounded identical version rows by resubmitting the same
+// body. The plugins UPDATE + audit still run.
+func TestUpdateSkipsSnapshotWhenContentUnchanged(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	r.id = func() string { return "audit-id" }
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("plugin-id", scope.CallerUID, scope.SpaceID).WillReturnRows(ownedPluginRow("plugin-id", scope, now))
+	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}))
+	mock.ExpectExec(`UPDATE plugins SET plugin_name=`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
+	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}))
+	// No COUNT / INSERT plugin_versions / current_version UPDATE — the content is
+	// byte-identical to the locked row, so the snapshot is skipped.
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	sync, err := r.Update(context.Background(), scope, Mutation{
+		Plugin:          model.Plugin{ID: "plugin-id", Type: model.PluginTypeExpert, Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p", Status: 1},
+		OperatorID:      "caller",
+		SnapshotVersion: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sync.NewVersionID != "" {
+		t.Fatalf("no-op update recorded a new version id %q — content was unchanged", sync.NewVersionID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateSnapshotsOnLabelOnlyChange locks that a version-label-only change
+// (identical content, a new current_version) is NOT deduped: it must snapshot so
+// the new label is persisted (current_version is written only inside
+// snapshotVersion).
+func TestUpdateSnapshotsOnLabelOnlyChange(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"version-id", "audit-id"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	mock.ExpectBegin()
+	// The locked row carries current_version "1.0.0" (ownedPluginRow leaves it
+	// NULL, so override via a custom row is unnecessary — the mutation submits a
+	// non-nil label, which differs from the NULL stored one).
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("plugin-id", scope.CallerUID, scope.SpaceID).WillReturnRows(ownedPluginRow("plugin-id", scope, now))
+	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}))
+	mock.ExpectExec(`UPDATE plugins SET plugin_name=`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
+	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}))
+	// Same content hashes as the locked row, but a new label ⇒ snapshot fires.
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugin_versions WHERE plugin_id=\?`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectExec(`INSERT INTO plugin_versions`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`UPDATE plugins SET current_version_id=\?,current_version=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("version-id", "2.0.0", now, "plugin-id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	label := "2.0.0"
+	_, err := r.Update(context.Background(), scope, Mutation{
+		Plugin:          model.Plugin{ID: "plugin-id", Type: model.PluginTypeExpert, Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p", CurrentVersion: &label, Status: 1},
+		OperatorID:      "caller",
+		SnapshotVersion: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateSnapshotsOnChangelogOnly locks that a changelog-only save (identical
+// content and label) still snapshots — the changelog lives only in the version
+// row, so deduping it would silently discard the submitted note.
+func TestUpdateSnapshotsOnChangelogOnly(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"version-id", "audit-id"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("plugin-id", scope.CallerUID, scope.SpaceID).WillReturnRows(ownedPluginRow("plugin-id", scope, now))
+	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}))
+	mock.ExpectExec(`UPDATE plugins SET plugin_name=`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
+	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}))
+	// Identical content and label, but a changelog is present ⇒ snapshot fires.
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugin_versions WHERE plugin_id=\?`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectExec(`INSERT INTO plugin_versions`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`UPDATE plugins SET current_version_id=\?,current_version=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("version-id", "1.0.0", now, "plugin-id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	changelog := "fixed a typo"
+	_, err := r.Update(context.Background(), scope, Mutation{
+		Plugin:          model.Plugin{ID: "plugin-id", Type: model.PluginTypeExpert, Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p", Status: 1},
+		OperatorID:      "caller",
+		Changelog:       &changelog,
+		SnapshotVersion: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateSnapshotsOnRelationOnly locks that a relation-only save (identical
+// content and label, but a new edge) snapshots — relations_json lives in the
+// version row, so deduping it would lose the graph transition from history.
+func TestUpdateSnapshotsOnRelationOnly(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"relation-new", "version-id", "audit-id"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("plugin-id", scope.CallerUID, scope.SpaceID).WillReturnRows(ownedPluginRow("plugin-id", scope, now))
+	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}))
+	mock.ExpectQuery(`SELECT p.plugin_type,p.is_embedded FROM plugins p .* FOR UPDATE`).
+		WithArgs("target-1", "space", "caller").WillReturnRows(sqlmock.NewRows([]string{"plugin_type", "is_embedded"}).AddRow(model.PluginTypeSkill, false))
+	mock.ExpectExec(`UPDATE plugins SET plugin_name=`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
+	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}))
+	mock.ExpectExec(`INSERT INTO plugin_relations`).
+		WithArgs("relation-new", "plugin-id", "target-1", "expert_skill", 0, nil, 1, "caller", now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	// Identical content and label, but the relation graph changed ⇒ snapshot fires.
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugin_versions WHERE plugin_id=\?`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectExec(`INSERT INTO plugin_versions`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`UPDATE plugins SET current_version_id=\?,current_version=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("version-id", "1.0.0", now, "plugin-id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	_, err := r.Update(context.Background(), scope, Mutation{
+		Plugin: model.Plugin{ID: "plugin-id", Type: model.PluginTypeExpert, Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p", Status: 1},
+		Relations: []model.PluginRelation{
+			{TargetPluginID: "target-1", Type: "expert_skill", Status: 1},
+		},
+		OperatorID:      "caller",
+		SnapshotVersion: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateSnapshotsOnSidecarOnly locks that an attachment-sidecar-only save
+// (identical content hashes and label, but a different path→object-key map)
+// snapshots — the managed keys are stripped before hashing, so deduping on hashes
+// alone would silently move the live row's keys away from the snapshot that
+// current_version_id points at.
+func TestUpdateSnapshotsOnSidecarOnly(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"version-id", "audit-id"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	mock.ExpectBegin()
+	// ownedPluginRow carries a NULL sidecar; the mutation submits a non-empty one.
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
+		WithArgs("plugin-id", scope.CallerUID, scope.SpaceID).WillReturnRows(ownedPluginRow("plugin-id", scope, now))
+	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}))
+	mock.ExpectExec(`UPDATE plugins SET plugin_name=`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
+	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM plugin_versions WHERE plugin_id=\?`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectExec(`INSERT INTO plugin_versions`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`UPDATE plugins SET current_version_id=\?,current_version=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("version-id", "1.0.0", now, "plugin-id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	_, err := r.Update(context.Background(), scope, Mutation{
+		Plugin:          model.Plugin{ID: "plugin-id", Type: model.PluginTypeExpert, Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`), AttachmentKeys: []byte(`{"assets/logo.bin":"plugins/space/attachments/logo-abc.bin"}`), ManifestHash: "sha256:m", PluginHash: "sha256:p", Status: 1},
+		OperatorID:      "caller",
+		SnapshotVersion: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCreateSkipsSnapshotWhenNotFlagged locks that a create with SnapshotVersion
+// unset writes no plugin_versions row.
+func TestCreateSkipsSnapshotWhenNotFlagged(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	r.id = func() string { return "audit-id" }
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO plugins`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	_, err := r.Create(context.Background(), Scope{CallerUID: "caller", SpaceID: "space"}, Mutation{
+		Plugin:     model.Plugin{ID: "plugin-id", Tags: []byte(`[]`), Manifest: []byte(`{}`), Package: []byte(`{}`)},
 		OperatorID: "caller",
 	})
 	if err != nil {
@@ -295,7 +631,7 @@ func TestUpdateExemptsOwnEmbeddedChildFromAdoptionGuard(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("expert-1", scope.CallerUID, scope.SpaceID).
-		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-1", "Expert", model.PluginTypeExpert, 0, nil, []byte(`[]`), "", "caller", "space", model.PluginVisibilitySpace, "Creator", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:before", nil, nil, 1, now, now, nil))
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-1", "Expert", model.PluginTypeExpert, 0, nil, []byte(`[]`), "", "caller", "space", model.PluginVisibilitySpace, "Creator", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:m", "sha256:before", nil, nil, 1, now, now, nil))
 	// The live-target set the exemption is built from: the top already owns the edge
 	// to the embedded skill.
 	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).
@@ -305,6 +641,8 @@ func TestUpdateExemptsOwnEmbeddedChildFromAdoptionGuard(t *testing.T) {
 		WithArgs("skill-emb", "space", "caller").
 		WillReturnRows(sqlmock.NewRows([]string{"plugin_type", "is_embedded"}).AddRow(model.PluginTypeSkill, true))
 	mock.ExpectExec(`UPDATE plugins SET`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
+	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations\s+WHERE source_plugin_id=\? AND deleted_at IS NULL ORDER BY relation_id FOR UPDATE`).
 		WithArgs("expert-1").
 		WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}).
@@ -338,7 +676,7 @@ func TestUpdateRejectsAdoptingForeignEmbeddedChild(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("expert-1", scope.CallerUID, scope.SpaceID).
-		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-1", "Expert", model.PluginTypeExpert, 0, nil, []byte(`[]`), "", "caller", "space", model.PluginVisibilitySpace, "Creator", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:before", nil, nil, 1, now, now, nil))
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-1", "Expert", model.PluginTypeExpert, 0, nil, []byte(`[]`), "", "caller", "space", model.PluginVisibilitySpace, "Creator", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:m", "sha256:before", nil, nil, 1, now, now, nil))
 	// The source owns no live edges, so the foreign embedded target is not exempt.
 	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).
 		WithArgs("expert-1").WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}))
@@ -360,7 +698,7 @@ func TestUpdateRejectsAdoptingForeignEmbeddedChild(t *testing.T) {
 }
 
 func pluginTestColumns() []string {
-	return []string{"plugin_id", "plugin_name", "plugin_type", "is_embedded", "category_id", "tags_json", "publisher", "owner_uid", "space_id", "visibility", "creator_name", "created_by_type", "created_by_bot_uid", "created_by_bot_name", "icon", "tool_count", "manifest_json", "plugin_json", "manifest_hash", "plugin_hash", "current_version_id", "current_version", "status", "created_at", "updated_at", "deleted_at"}
+	return []string{"plugin_id", "plugin_name", "plugin_type", "is_embedded", "category_id", "tags_json", "publisher", "owner_uid", "space_id", "visibility", "creator_name", "created_by_type", "created_by_bot_uid", "created_by_bot_name", "icon", "tool_count", "manifest_json", "plugin_json", "attachment_keys_json", "manifest_hash", "plugin_hash", "current_version_id", "current_version", "status", "created_at", "updated_at", "deleted_at"}
 }
 
 func TestUpdateSynchronizesRelationsToTargetState(t *testing.T) {
@@ -375,11 +713,13 @@ func TestUpdateSynchronizesRelationsToTargetState(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("plugin-id", scope.CallerUID, scope.SpaceID).
-		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("plugin-id", "Plugin", model.PluginTypeExpert, 0, nil, []byte(`[]`), "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:before", nil, nil, 1, now, now, nil))
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("plugin-id", "Plugin", model.PluginTypeExpert, 0, nil, []byte(`[]`), "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:m", "sha256:before", nil, nil, 1, now, now, nil))
 	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}).AddRow("target-0").AddRow("target-1"))
 	mock.ExpectQuery(`SELECT p.plugin_type,p.is_embedded FROM plugins p .* FOR UPDATE`).WithArgs("target-1", "space", "caller").WillReturnRows(sqlmock.NewRows([]string{"plugin_type", "is_embedded"}).AddRow(model.PluginTypeSkill, false))
 	mock.ExpectQuery(`SELECT p.plugin_type,p.is_embedded FROM plugins p .* FOR UPDATE`).WithArgs("target-2", "space", "caller").WillReturnRows(sqlmock.NewRows([]string{"plugin_type", "is_embedded"}).AddRow(model.PluginTypeSkill, false))
 	mock.ExpectExec(`UPDATE plugins SET`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
+	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations\s+WHERE source_plugin_id=\? AND deleted_at IS NULL ORDER BY relation_id FOR UPDATE`).
 		WithArgs("plugin-id").
 		WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}).
@@ -425,10 +765,12 @@ func TestUpdateRejectsUnknownSubmittedRelationID(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("plugin-id", scope.CallerUID, scope.SpaceID).
-		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("plugin-id", "Plugin", model.PluginTypeExpert, 0, nil, []byte(`[]`), "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:before", nil, nil, 1, now, now, nil))
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("plugin-id", "Plugin", model.PluginTypeExpert, 0, nil, []byte(`[]`), "pub", "caller", "space", model.PluginVisibilityPrivate, "Creator", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:m", "sha256:before", nil, nil, 1, now, now, nil))
 	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}))
 	mock.ExpectQuery(`SELECT p.plugin_type,p.is_embedded FROM plugins p .* FOR UPDATE`).WithArgs("target-1", "space", "caller").WillReturnRows(sqlmock.NewRows([]string{"plugin_type", "is_embedded"}).AddRow(model.PluginTypeSkill, false))
 	mock.ExpectExec(`UPDATE plugins SET`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
+	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations\s+WHERE source_plugin_id=\? AND deleted_at IS NULL ORDER BY relation_id FOR UPDATE`).
 		WithArgs("plugin-id").
 		WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}))
@@ -446,7 +788,7 @@ func TestUpdateRejectsUnknownSubmittedRelationID(t *testing.T) {
 	}
 }
 
-func TestUpdateSyncsPlacementCategoryOnlyWhenSet(t *testing.T) {
+func TestUpdateSyncsPlacementCategory(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
 	r := New(db)
@@ -465,6 +807,7 @@ func TestUpdateSyncsPlacementCategoryOnlyWhenSet(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"category_id"}).AddRow(category))
 	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}))
 	mock.ExpectExec(`UPDATE plugins SET`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
 	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).
 		WithArgs(category, now, "plugin-id").
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -475,6 +818,86 @@ func TestUpdateSyncsPlacementCategoryOnlyWhenSet(t *testing.T) {
 	mock.ExpectCommit()
 
 	_, err := r.Update(context.Background(), scope, Mutation{Plugin: model.Plugin{ID: "plugin-id", Name: "Plugin", Type: model.PluginTypeExpert, CategoryID: &category, Tags: []byte(`[]`), Visibility: model.PluginVisibilityPrivate, Manifest: []byte(`{}`), Package: []byte(`{}`), Status: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateInsertsDefaultPlacementWhenMissing is the placement-orphan
+// regression: a save on a plugin with no default placement row (e.g. an old
+// tenant create that never published — publish-removal left no other path to
+// insert one) inserts the default placement so the plugin becomes market-listable
+// again, rather than an update-only that matches nothing and leaves it invisible.
+func TestUpdateInsertsDefaultPlacementWhenMissing(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 22, 8, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	ids := []string{"placement-id", "audit-id"}
+	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	category := "cat-1"
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\?.*FOR UPDATE`).
+		WithArgs("plugin-id", scope.CallerUID, scope.SpaceID).WillReturnRows(ownedPluginRow("plugin-id", scope, now))
+	mock.ExpectQuery(`SELECT category_id FROM plugin_categories WHERE category_id=\?.*FOR UPDATE`).
+		WithArgs(category, model.PluginTypeExpert).WillReturnRows(sqlmock.NewRows([]string{"category_id"}).AddRow(category))
+	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}))
+	mock.ExpectExec(`UPDATE plugins SET`).WillReturnResult(sqlmock.NewResult(0, 1))
+	// No default placement exists ⇒ insert it (self-heal), do not update.
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).
+		WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(0))
+	mock.ExpectExec(`INSERT INTO plugin_placements \(placement_id,placement_code,plugin_id,category_id,visible,sort_order,created_at,updated_at\)`).
+		WithArgs("placement-id", "default", "plugin-id", category, true, 0, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations`).
+		WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	_, err := r.Update(context.Background(), scope, Mutation{Plugin: model.Plugin{ID: "plugin-id", Name: "Plugin", Type: model.PluginTypeExpert, CategoryID: &category, Tags: []byte(`[]`), Visibility: model.PluginVisibilityPrivate, Manifest: []byte(`{}`), Package: []byte(`{}`), Status: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateClearsPlacementCategoryWhenCleared locks that an update with no
+// category (an explicit clear) NULLs the placement's category too — with publish
+// gone, the update owns placement configuration, so the scene-scoped market
+// stops filtering the plugin under its old category.
+func TestUpdateClearsPlacementCategoryWhenCleared(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	now := time.Date(2026, 8, 22, 8, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	r.id = func() string { return "audit-id" }
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.owner_uid=\? AND p.space_id=\?.*FOR UPDATE`).
+		WithArgs("plugin-id", scope.CallerUID, scope.SpaceID).
+		WillReturnRows(ownedPluginRow("plugin-id", scope, now))
+	// nil category: no plugin_categories lock query is issued.
+	mock.ExpectQuery(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs("plugin-id").WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}))
+	mock.ExpectExec(`UPDATE plugins SET`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
+	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).
+		WithArgs(nil, now, "plugin-id").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations`).
+		WithArgs("plugin-id").
+		WillReturnRows(sqlmock.NewRows([]string{"relation_id", "target_plugin_id", "relation_type", "sort_order", "relation_json", "status"}))
+	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	_, err := r.Update(context.Background(), scope, Mutation{Plugin: model.Plugin{ID: "plugin-id", Name: "Plugin", Type: model.PluginTypeExpert, CategoryID: nil, Tags: []byte(`[]`), Visibility: model.PluginVisibilityPrivate, Manifest: []byte(`{}`), Package: []byte(`{}`), Status: 1}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,8 +925,8 @@ func TestCreateGraphInsertsAllPluginsBeforeRelationsAndCommitsAtomically(t *test
 
 	mock.ExpectBegin()
 	// Phase 1: both plugin rows inserted first.
-	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-id", "S", model.PluginTypeSkill, false, nil, "[]", "", "admin", "", model.PluginVisibilityPublic, "Root", "human", nil, nil, "", 0, "{}", "{}", "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("expert-id", "E", model.PluginTypeExpert, false, nil, "[]", "", "admin", "", model.PluginVisibilityPublic, "Root", "human", nil, nil, "", 0, "{}", "{}", "sha256:em", "sha256:ep", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-id", "S", model.PluginTypeSkill, false, nil, "[]", "", "admin", "", model.PluginVisibilityPublic, "Root", "human", nil, nil, "", 0, "{}", "{}", nil, "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("expert-id", "E", model.PluginTypeExpert, false, nil, "[]", "", "admin", "", model.PluginVisibilityPublic, "Root", "human", nil, nil, "", 0, "{}", "{}", nil, "sha256:em", "sha256:ep", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	// Phase 2: the expert's relation target (the just-inserted skill) is locked
 	// cross-Space (admin) and the edge inserted.
 	mock.ExpectQuery(`SELECT p.plugin_type,p.is_embedded FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL AND 1=1 FOR UPDATE`).WithArgs("skill-id").WillReturnRows(sqlmock.NewRows([]string{"plugin_type", "is_embedded"}).AddRow(model.PluginTypeSkill, false))
@@ -581,7 +1004,7 @@ func TestCreateGraphRejectsDuplicatePluginIDs(t *testing.T) {
 	space := ""
 	p := model.Plugin{ID: "dup", Name: "S", Type: model.PluginTypeSkill, Tags: []byte(`[]`), OwnerUID: "admin", SpaceID: &space, Visibility: model.PluginVisibilityPublic, CreatorName: "Root", CreatedByType: "human", Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:m", PluginHash: "sha256:p", Status: 1}
 	mock.ExpectBegin()
-	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("dup", "S", model.PluginTypeSkill, false, nil, "[]", "", "admin", "", model.PluginVisibilityPublic, "Root", "human", nil, nil, "", 0, "{}", "{}", "sha256:m", "sha256:p", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("dup", "S", model.PluginTypeSkill, false, nil, "[]", "", "admin", "", model.PluginVisibilityPublic, "Root", "human", nil, nil, "", 0, "{}", "{}", nil, "sha256:m", "sha256:p", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectRollback()
 	if _, err := r.CreateGraph(context.Background(), Scope{CallerUID: "admin", Admin: true}, []Mutation{{Plugin: p}, {Plugin: p}}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("err = %v, want ErrConflict", err)
@@ -615,7 +1038,7 @@ func TestRebuildGraphSwapsChildrenPreservesTopAndSoftDeletesOld(t *testing.T) {
 	// Phase 0: lock + prove the top exists (admin: no owner/space predicate).
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("expert-9").
-		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-9", "E", model.PluginTypeExpert, 0, nil, []byte(`["ops"]`), "", "owner-1", "", model.PluginVisibilityPublic, "Orig", "human", nil, nil, "icons/e.png", 0, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:pold", nil, nil, 1, now, now, nil))
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-9", "E", model.PluginTypeExpert, 0, nil, []byte(`["ops"]`), "", "owner-1", "", model.PluginVisibilityPublic, "Orig", "human", nil, nil, "icons/e.png", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:m", "sha256:pold", nil, nil, 1, now, now, nil))
 	// In-tx child derivation: AFTER the top FOR UPDATE lock, the previous embedded
 	// child set is read from the committed graph (an expert's is_embedded expert_skill
 	// targets) — never a caller-supplied stale list. The DB's is_embedded=1 join is
@@ -629,9 +1052,11 @@ func TestRebuildGraphSwapsChildrenPreservesTopAndSoftDeletesOld(t *testing.T) {
 	// re-stamped from the locked top (`before`: owner-1), not the caller's pre-parse
 	// System/admin stamping — the P2-1 locked-snapshot guard. A legacy `public`
 	// locked visibility is normalized to `system` (NormalizeLegacyVisibility).
-	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-new", "S2", model.PluginTypeSkill, true, nil, "[]", "", "owner-1", "", model.PluginVisibilitySystem, "Root", "human", nil, nil, "", 0, "{}", "{}", "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-new", "S2", model.PluginTypeSkill, true, nil, "[]", "", "owner-1", "", model.PluginVisibilitySystem, "Root", "human", nil, nil, "", 0, "{}", "{}", nil, "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	// Phase 3: update the top row in place (id/owner/space/created_at untouched).
 	mock.ExpectExec(`UPDATE plugins SET plugin_name=.*WHERE plugin_id=\? AND deleted_at IS NULL`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
+	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).WillReturnResult(sqlmock.NewResult(0, 1))
 	// Phase 4: resync the top's relations to the new child.
 	mock.ExpectQuery(`SELECT p.plugin_type,p.is_embedded FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL AND 1=1 FOR UPDATE`).WithArgs("skill-new").WillReturnRows(sqlmock.NewRows([]string{"plugin_type", "is_embedded"}).AddRow(model.PluginTypeSkill, false))
 	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations\s+WHERE source_plugin_id=\? AND deleted_at IS NULL ORDER BY relation_id FOR UPDATE`).
@@ -643,7 +1068,7 @@ func TestRebuildGraphSwapsChildrenPreservesTopAndSoftDeletesOld(t *testing.T) {
 	// Phase 5: soft-delete the previous child + its outgoing relations, delete audit.
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("skill-old").
-		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("skill-old", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "admin", "", model.PluginVisibilitySystem, "Root", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:som", "sha256:sop", nil, nil, 1, now, now, nil))
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("skill-old", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "admin", "", model.PluginVisibilitySystem, "Root", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:som", "sha256:sop", nil, nil, 1, now, now, nil))
 	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-old").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-old").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-del", "skill-old", "delete", "admin", "Root", "req", "sha256:sop", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
@@ -753,7 +1178,7 @@ func TestDeleteGraphSoftDeletesTopAndEmbeddedChildren(t *testing.T) {
 	// Lock + prove the top exists (admin: no owner/space predicate).
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("expert-9").
-		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-9", "E", model.PluginTypeExpert, 0, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilityPublic, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:ptop", nil, nil, 1, now, now, nil))
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-9", "E", model.PluginTypeExpert, 0, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilityPublic, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:m", "sha256:ptop", nil, nil, 1, now, now, nil))
 	// No live incoming relation to the top.
 	mock.ExpectQuery(`SELECT r.relation_id FROM plugin_relations r.*r.target_plugin_id=\?.*FOR UPDATE`).
 		WithArgs("expert-9").WillReturnRows(sqlmock.NewRows([]string{"relation_id"}))
@@ -772,7 +1197,7 @@ func TestDeleteGraphSoftDeletesTopAndEmbeddedChildren(t *testing.T) {
 	// The embedded child: lock, soft-delete + its relations, delete audit.
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("skill-emb").
-		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("skill-emb", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilitySystem, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:sm", "sha256:pemb", nil, nil, 1, now, now, nil))
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("skill-emb", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilitySystem, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:sm", "sha256:pemb", nil, nil, 1, now, now, nil))
 	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-emb").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-emb").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-child", "skill-emb", "delete", "admin", "Root", "req", "sha256:pemb", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
@@ -799,7 +1224,7 @@ func TestDeleteGraphRejectsLiveIncomingRelationToTop(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("expert-9").
-		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-9", "E", model.PluginTypeExpert, 0, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilityPublic, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:ptop", nil, nil, 1, now, now, nil))
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-9", "E", model.PluginTypeExpert, 0, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilityPublic, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:m", "sha256:ptop", nil, nil, 1, now, now, nil))
 	mock.ExpectQuery(`SELECT r.relation_id FROM plugin_relations r.*r.target_plugin_id=\?.*FOR UPDATE`).
 		WithArgs("expert-9").WillReturnRows(sqlmock.NewRows([]string{"relation_id"}).AddRow("incoming"))
 	mock.ExpectRollback()
@@ -836,15 +1261,17 @@ func TestRebuildGraphSoftDeletesCurrentChildFromCommittedGraph(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("expert-9").
-		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-9", "E", model.PluginTypeExpert, 0, nil, []byte(`["ops"]`), "", "owner-1", "", model.PluginVisibilityPublic, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:pold", nil, nil, 1, now, now, nil))
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("expert-9", "E", model.PluginTypeExpert, 0, nil, []byte(`["ops"]`), "", "owner-1", "", model.PluginVisibilityPublic, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:m", "sha256:pold", nil, nil, 1, now, now, nil))
 	// The DB — not the caller — decides the child set: it reports skill-current.
 	mock.ExpectQuery(`SELECT r.target_plugin_id FROM plugin_relations r\s+JOIN plugins p ON p.plugin_id=r.target_plugin_id\s+WHERE r.source_plugin_id=\? AND r.relation_type=\? AND r.deleted_at IS NULL\s+AND p.is_embedded=1 AND p.status=1 AND p.deleted_at IS NULL\s+ORDER BY r.sort_order,r.relation_id`).
 		WithArgs("expert-9", "expert_skill").
 		WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}).AddRow("skill-current"))
 	// The child inherits the locked top's owner; its legacy `public` visibility is
 	// normalized to `system` (NormalizeLegacyVisibility) on re-stamp.
-	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-new", "S2", model.PluginTypeSkill, true, nil, "[]", "", "owner-1", "", model.PluginVisibilitySystem, "Root", "human", nil, nil, "", 0, "{}", "{}", "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-new", "S2", model.PluginTypeSkill, true, nil, "[]", "", "owner-1", "", model.PluginVisibilitySystem, "Root", "human", nil, nil, "", 0, "{}", "{}", nil, "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`UPDATE plugins SET plugin_name=.*WHERE plugin_id=\? AND deleted_at IS NULL`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
+	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`SELECT p.plugin_type,p.is_embedded FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL AND 1=1 FOR UPDATE`).WithArgs("skill-new").WillReturnRows(sqlmock.NewRows([]string{"plugin_type", "is_embedded"}).AddRow(model.PluginTypeSkill, false))
 	mock.ExpectQuery(`SELECT relation_id,target_plugin_id,relation_type,sort_order,relation_json,status FROM plugin_relations\s+WHERE source_plugin_id=\? AND deleted_at IS NULL ORDER BY relation_id FOR UPDATE`).
 		WithArgs("expert-9").
@@ -854,7 +1281,7 @@ func TestRebuildGraphSoftDeletesCurrentChildFromCommittedGraph(t *testing.T) {
 	// Phase 5 tears down skill-current (the DB-derived child), never a stale id.
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("skill-current").
-		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("skill-current", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "admin", "", model.PluginVisibilitySystem, "Root", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:som", "sha256:sop", nil, nil, 1, now, now, nil))
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("skill-current", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "admin", "", model.PluginVisibilitySystem, "Root", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:som", "sha256:sop", nil, nil, 1, now, now, nil))
 	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-current").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-current").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-del", "skill-current", "delete", "admin", "Root", "req", "sha256:sop", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
@@ -893,7 +1320,7 @@ func TestDeleteGraphDerivesEmbeddedSquadChildrenUnderLock(t *testing.T) {
 	// Lock + prove the team top exists.
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("team-1").
-		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("team-1", "T", model.PluginTypeExpertTeam, 0, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilityPublic, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:m", "sha256:ptop", nil, nil, 1, now, now, nil))
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("team-1", "T", model.PluginTypeExpertTeam, 0, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilityPublic, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:m", "sha256:ptop", nil, nil, 1, now, now, nil))
 	// No live incoming relation to the top.
 	mock.ExpectQuery(`SELECT r.relation_id FROM plugin_relations r.*r.target_plugin_id=\?.*FOR UPDATE`).
 		WithArgs("team-1").WillReturnRows(sqlmock.NewRows([]string{"relation_id"}))
@@ -912,14 +1339,14 @@ func TestDeleteGraphDerivesEmbeddedSquadChildrenUnderLock(t *testing.T) {
 	// Child member: lock, soft-delete + relations, delete audit.
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("member-1").
-		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("member-1", "M", model.PluginTypeExpert, 1, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilitySystem, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:mm", "sha256:pmem", nil, nil, 1, now, now, nil))
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("member-1", "M", model.PluginTypeExpert, 1, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilitySystem, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:mm", "sha256:pmem", nil, nil, 1, now, now, nil))
 	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "member-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "member-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-member", "member-1", "delete", "admin", "Root", "req", "sha256:pmem", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	// Child member-skill: lock, soft-delete + relations, delete audit.
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
 		WithArgs("mskill-1").
-		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("mskill-1", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilitySystem, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), "sha256:sm", "sha256:pms", nil, nil, 1, now, now, nil))
+		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("mskill-1", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilitySystem, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:sm", "sha256:pms", nil, nil, 1, now, now, nil))
 	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "mskill-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "mskill-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-mskill", "mskill-1", "delete", "admin", "Root", "req", "sha256:pms", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))

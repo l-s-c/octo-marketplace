@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
+	libplugin "github.com/Mininglamp-OSS/octo-plugin-lib/plugin"
 )
 
 const (
@@ -170,7 +170,7 @@ func (r *Runner) repackagePlugins(ctx context.Context, p *repackagePlan) error {
 		if err := rows.Scan(&id, &typ, &manifest, &pkg, &oldHash); err != nil {
 			return err
 		}
-		newPkg, changed, err := transformPackage(pkg, typ, manifest)
+		newPkg, newKeys, changed, err := transformPackage(pkg, typ, manifest)
 		if err != nil {
 			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugins", id, err.Error()})
 			continue
@@ -181,18 +181,40 @@ func (r *Runner) repackagePlugins(ctx context.Context, p *repackagePlan) error {
 				continue
 			}
 		}
-		newHash, err := libplugin.ComputePluginHash(manifest, newPkg)
+		newManifest, mChanged, err := transformManifest(manifest)
 		if err != nil {
 			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugins", id, err.Error()})
 			continue
 		}
-		if !changed && newHash == oldHash {
+		newHash, err := libplugin.ComputePluginHash(newManifest, newPkg)
+		if err != nil {
+			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugins", id, err.Error()})
 			continue
 		}
+		if !changed && !mChanged && newHash == oldHash {
+			continue
+		}
+		// Build the SET list dynamically: manifest_json/manifest_hash only when the
+		// manifest $schema was bumped, and attachment_keys_json only when this pass
+		// split storage keys out (an un-migrated row) — a row already migrated by the
+		// expand phase carries no inline storage_uri, so newKeys is nil and its
+		// existing sidecar must be preserved rather than overwritten with NULL.
+		cols := []string{"plugin_json=?"}
+		args := []any{string(newPkg)}
+		if mChanged {
+			cols = append(cols, "manifest_json=?", "manifest_hash=?")
+			args = append(args, string(newManifest), hashJSON(newManifest))
+		}
+		if newKeys != nil {
+			cols = append(cols, "attachment_keys_json=?")
+			args = append(args, string(newKeys))
+		}
+		cols = append(cols, "plugin_hash=?")
+		args = append(args, newHash, id, oldHash)
 		p.actions = append(p.actions, repackageAction{
 			count: func(c *RepackageCounts) *int { return &c.Plugins },
-			query: `UPDATE plugins SET plugin_json=?, plugin_hash=? WHERE plugin_id=? AND plugin_hash=?`,
-			args:  []any{string(newPkg), newHash, id, oldHash},
+			query: `UPDATE plugins SET ` + strings.Join(cols, ", ") + ` WHERE plugin_id=? AND plugin_hash=?`,
+			args:  args,
 			guard: true,
 		})
 	}
@@ -216,7 +238,7 @@ func (r *Runner) repackageVersions(ctx context.Context, types map[string]string,
 			p.issues = append(p.issues, Issue{"info", "orphan_version", "plugin_versions", id, "no plugin row; snapshot left untouched"})
 			continue
 		}
-		newPkg, changed, err := transformPackage(pkg, typ, manifest)
+		newPkg, newKeys, changed, err := transformPackage(pkg, typ, manifest)
 		if err != nil {
 			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_versions", id, err.Error()})
 			continue
@@ -232,18 +254,37 @@ func (r *Runner) repackageVersions(ctx context.Context, types map[string]string,
 			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_versions", id, err.Error()})
 			continue
 		}
-		newHash, err := libplugin.ComputePluginHash(manifest, newPkg)
+		newManifest, mChanged, err := transformManifest(manifest)
 		if err != nil {
 			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_versions", id, err.Error()})
 			continue
 		}
-		if !changed && !relationsChanged && newHash == oldHash {
+		newHash, err := libplugin.ComputePluginHash(newManifest, newPkg)
+		if err != nil {
+			p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_versions", id, err.Error()})
 			continue
 		}
+		if !changed && !relationsChanged && !mChanged && newHash == oldHash {
+			continue
+		}
+		// See repackagePlugins: manifest_json/manifest_hash only when the manifest
+		// $schema was bumped; attachment_keys_json only when storage keys were split.
+		cols := []string{"plugin_json=?", "relations_json=?"}
+		args := []any{string(newPkg), string(newRelations)}
+		if mChanged {
+			cols = append(cols, "manifest_json=?", "manifest_hash=?")
+			args = append(args, string(newManifest), hashJSON(newManifest))
+		}
+		if newKeys != nil {
+			cols = append(cols, "attachment_keys_json=?")
+			args = append(args, string(newKeys))
+		}
+		cols = append(cols, "plugin_hash=?")
+		args = append(args, newHash, id, oldHash)
 		p.actions = append(p.actions, repackageAction{
 			count: func(c *RepackageCounts) *int { return &c.Versions },
-			query: `UPDATE plugin_versions SET plugin_json=?, relations_json=?, plugin_hash=? WHERE version_id=? AND plugin_hash=?`,
-			args:  []any{string(newPkg), string(newRelations), newHash, id, oldHash},
+			query: `UPDATE plugin_versions SET ` + strings.Join(cols, ", ") + ` WHERE version_id=? AND plugin_hash=?`,
+			args:  args,
 			guard: true,
 		})
 	}
@@ -279,16 +320,20 @@ func (r *Runner) repackageAudits(ctx context.Context, types map[string]string, p
 		if afterHash != nil {
 			oldAfter = *afterHash
 		}
-		newPkg, changed := pkg, false
+		newPkg, pkgChanged := pkg, false
 		if len(pkg) > 0 {
-			transformed, didChange, err := transformPackage(pkg, typ, manifest)
+			// The split storage keys are intentionally discarded here: an audit
+			// snapshot is an immutable historical record that is never dereferenced
+			// for object bytes, so its storage_uri is stripped for 2.0 validity but
+			// no sidecar is kept (audit rows have no attachment_keys_json column).
+			transformed, _, didChange, err := transformPackage(pkg, typ, manifest)
 			if err != nil {
 				p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_audit_logs", id, err.Error()})
 				lastHash[pluginID] = oldAfter
 				continue
 			}
-			newPkg, changed = transformed, didChange
-			if changed {
+			newPkg, pkgChanged = transformed, didChange
+			if pkgChanged {
 				if err := decodablePackage(newPkg, typ); err != nil {
 					p.issues = append(p.issues, Issue{"skip", "repackage_invalid_package", "plugin_audit_logs", id, err.Error()})
 					lastHash[pluginID] = oldAfter
@@ -296,9 +341,20 @@ func (r *Runner) repackageAudits(ctx context.Context, types map[string]string, p
 				}
 			}
 		}
+		newManifest, mChanged := manifest, false
+		if len(manifest) > 0 {
+			tm, mc, err := transformManifest(manifest)
+			if err != nil {
+				p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_audit_logs", id, err.Error()})
+				lastHash[pluginID] = oldAfter
+				continue
+			}
+			newManifest, mChanged = tm, mc
+		}
+		changed := pkgChanged || mChanged
 		snapshotHash := ""
-		if len(newPkg) > 0 && len(manifest) > 0 {
-			computed, err := libplugin.ComputePluginHash(manifest, newPkg)
+		if len(newPkg) > 0 && len(newManifest) > 0 {
+			computed, err := libplugin.ComputePluginHash(newManifest, newPkg)
 			if err != nil {
 				p.issues = append(p.issues, Issue{"skip", "repackage_failed", "plugin_audit_logs", id, err.Error()})
 				lastHash[pluginID] = oldAfter
@@ -325,10 +381,18 @@ func (r *Runner) repackageAudits(ctx context.Context, types map[string]string, p
 		if !changed && newBefore == oldBefore && newAfter == oldAfter {
 			continue
 		}
+		cols := []string{"plugin_snapshot_json=?"}
+		args := []any{nullableJSON(newPkg)}
+		if mChanged {
+			cols = append(cols, "manifest_snapshot_json=?")
+			args = append(args, nullableJSON(newManifest))
+		}
+		cols = append(cols, "before_hash=?", "after_hash=?")
+		args = append(args, hashColumn(newBefore, beforeWasNull), hashColumn(newAfter, afterWasNull), id)
 		p.actions = append(p.actions, repackageAction{
 			count: func(c *RepackageCounts) *int { return &c.Audits },
-			query: `UPDATE plugin_audit_logs SET plugin_snapshot_json=?, before_hash=?, after_hash=? WHERE audit_log_id=?`,
-			args:  []any{nullableJSON(newPkg), hashColumn(newBefore, beforeWasNull), hashColumn(newAfter, afterWasNull), id},
+			query: `UPDATE plugin_audit_logs SET ` + strings.Join(cols, ", ") + ` WHERE audit_log_id=?`,
+			args:  args,
 		})
 	}
 	return rows.Err()
@@ -466,7 +530,13 @@ func decodablePackage(pkg []byte, pluginType string) error {
 	return err
 }
 
-func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, bool, error) {
+// transformManifest normalizes a stored manifest document to the 2.0 contract:
+// it advances the $schema id to cowork-plugin-manifest-2.0.json — the lib's
+// DecodeManifest hard-asserts it, so a manifest left at 1.0 is rejected on every
+// read/validate — and re-canonicalizes. Returns the canonical manifest, whether
+// it changed, and any error. An empty or already-2.0 manifest is returned
+// unchanged so re-runs are no-ops.
+func transformManifest(raw []byte) ([]byte, bool, error) {
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		return raw, false, nil
 	}
@@ -474,7 +544,39 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 	dec.UseNumber()
 	var doc map[string]any
 	if err := dec.Decode(&doc); err != nil {
-		return nil, false, fmt.Errorf("invalid package JSON: %w", err)
+		return nil, false, fmt.Errorf("invalid manifest JSON: %w", err)
+	}
+	// Inject the 2.0 id when absent (DecodeManifest hard-asserts it), upgrade a
+	// 1.0 id, no-op an already-2.0 doc, and REFUSE an unrecognized generation
+	// rather than silently relabeling a future 3.0 down to 2.0.
+	switch s, _ := doc["$schema"].(string); s {
+	case "cowork-plugin-manifest-2.0.json":
+		return raw, false, nil
+	case "", "cowork-plugin-manifest-1.0.json":
+		doc["$schema"] = "cowork-plugin-manifest-2.0.json"
+	default:
+		return nil, false, fmt.Errorf("unrecognized manifest $schema %q", s)
+	}
+	marshaled, err := json.Marshal(doc)
+	if err != nil {
+		return nil, false, err
+	}
+	out, err := libplugin.CanonicalJSON(marshaled)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
+func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, []byte, bool, error) {
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return raw, nil, false, nil
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.UseNumber()
+	var doc map[string]any
+	if err := dec.Decode(&doc); err != nil {
+		return nil, nil, false, fmt.Errorf("invalid package JSON: %w", err)
 	}
 	attachments, _ := doc["attachments"].([]any)
 	changed := false
@@ -496,8 +598,6 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 				"content_type": "raw",
 				"mime_type":    "text/markdown",
 				"raw_content":  content,
-				"content_size": json.Number(fmt.Sprintf("%d", len(content))),
-				"content_hash": hashJSON([]byte(content)),
 			})
 			doc["attachments"] = attachments
 			changed = true
@@ -513,8 +613,6 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 				"content_type": "raw",
 				"mime_type":    "text/markdown",
 				"raw_content":  content,
-				"content_size": json.Number(fmt.Sprintf("%d", len(content))),
-				"content_hash": hashJSON([]byte(content)),
 			})
 			doc["attachments"] = attachments
 			changed = true
@@ -531,8 +629,6 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 				"content_type": "raw",
 				"mime_type":    "text/markdown",
 				"raw_content":  content,
-				"content_size": json.Number(fmt.Sprintf("%d", len(content))),
-				"content_hash": hashJSON([]byte(content)),
 			}
 			if existing := attachmentIndex(attachments, "AGENTS.md"); existing >= 0 {
 				attachments[existing] = entry
@@ -557,29 +653,73 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 				Transport string          `json:"transport"`
 			}
 			if err := json.Unmarshal([]byte(content), &wrapper); err != nil {
-				return nil, false, fmt.Errorf("invalid connector/config.json: %w", err)
+				return nil, nil, false, fmt.Errorf("invalid connector/config.json: %w", err)
 			}
 			mcpDocument, err := connectorMCPDocument(wrapper.Config, wrapper.Transport, meta.name)
 			if err != nil {
-				return nil, false, err
+				return nil, nil, false, err
 			}
 			mcpRaw, err := json.Marshal(mcpDocument)
 			if err != nil {
-				return nil, false, err
+				return nil, nil, false, err
 			}
 			attachments[idx] = map[string]any{
 				"path":         "mcp.json",
 				"content_type": "raw",
 				"mime_type":    "application/json",
 				"raw_content":  string(mcpRaw),
-				"content_size": json.Number(fmt.Sprintf("%d", len(mcpRaw))),
-				"content_hash": hashJSON(mcpRaw),
 			}
 			changed = true
 		}
 	}
+	// Normalize legacy 1.0 shapes to the 2.0 contract the linked lib enforces:
+	// raw attachments must NOT carry a derived content_size/content_hash, and a
+	// storage attachment must NOT carry a host storage_uri (DecodePackage 2.0
+	// rejects unknown fields) — its object key is split into the returned sidecar
+	// so the row's attachment_keys_json can be populated. The $schema id advances
+	// to the 2.0 generation. This runs BEFORE the no-op short-circuit so a row that
+	// needs only normalization (raw size/hash or a storage_uri split, no rename)
+	// is still migrated.
+	keys := map[string]string{}
+	for _, a := range attachments {
+		m, ok := a.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch ct, _ := m["content_type"].(string); ct {
+		case "raw":
+			if _, had := m["content_size"]; had {
+				delete(m, "content_size")
+				changed = true
+			}
+			if _, had := m["content_hash"]; had {
+				delete(m, "content_hash")
+				changed = true
+			}
+		case "storage":
+			if uri, _ := m["storage_uri"].(string); uri != "" {
+				if path, _ := m["path"].(string); path != "" {
+					keys[path] = uri
+				}
+				delete(m, "storage_uri")
+				changed = true
+			}
+		}
+	}
+	// Inject the 2.0 id when absent (DecodePackage hard-asserts it), upgrade a 1.0
+	// id, no-op an already-2.0 doc, and REFUSE an unrecognized generation rather
+	// than silently relabeling a future 3.0 down to 2.0.
+	switch s, _ := doc["$schema"].(string); s {
+	case "cowork-plugin-package-2.0.json":
+		// leave as-is; other transforms above may still have set changed.
+	case "", "cowork-plugin-package-1.0.json":
+		doc["$schema"] = "cowork-plugin-package-2.0.json"
+		changed = true
+	default:
+		return nil, nil, false, fmt.Errorf("unrecognized package $schema %q", s)
+	}
 	if !changed {
-		return raw, false, nil
+		return raw, nil, false, nil
 	}
 	sort.SliceStable(attachments, func(i, j int) bool {
 		left, _ := attachments[i].(map[string]any)
@@ -589,15 +729,23 @@ func transformPackage(raw []byte, pluginType string, manifest []byte) ([]byte, b
 		return lp < rp
 	})
 	doc["attachments"] = attachments
+	var keysJSON []byte
+	if len(keys) > 0 {
+		marshaledKeys, err := json.Marshal(keys)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		keysJSON = marshaledKeys
+	}
 	marshaled, err := json.Marshal(doc)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	out, err := libplugin.CanonicalJSON(marshaled)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
-	return out, true, nil
+	return out, keysJSON, true, nil
 }
 
 // renameAttachment updates the path (content bytes and hash metadata stay). It

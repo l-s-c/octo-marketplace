@@ -79,7 +79,7 @@ func (s *Service) AdminImport(ctx context.Context, caller Caller, p ImportParams
 	// admin conventions below (system on create, preserved on reupload), never by
 	// a caller-supplied visibility.
 	p.Visibility = ""
-	fields, err := resolveImportFields(p, task, true)
+	fields, err := resolveImportFields(p, task, true, oldPlugin)
 	if err != nil {
 		return nil, err
 	}
@@ -135,6 +135,7 @@ func (s *Service) adminImportConsumedTask(ctx context.Context, caller Caller, ta
 		}
 		audit := s.audit(caller, p.ID, "create", nil, p, now)
 		m := mutation(*p, rels, audit)
+		m.SnapshotVersion = true // a save is a version, like every other write surface
 		// Auto-attach a default visible placement so the admin skill surfaces in
 		// the tenant market without a publish, exactly like AdminCreate.
 		m.Placements = []model.PluginPlacement{defaultMarketPlacement(p.CategoryID)}
@@ -142,6 +143,9 @@ func (s *Service) adminImportConsumedTask(ctx context.Context, caller Caller, ta
 		if err != nil {
 			s.deleteObjects(ctx, uploaded...)
 			return nil, mapStoreError(err)
+		}
+		if sync != nil && sync.NewVersionID != "" {
+			p.CurrentVersionID = &sync.NewVersionID
 		}
 		return &Detail{Plugin: p, Relations: rels, RelationResult: relationResult(sync)}, nil
 	}
@@ -153,8 +157,15 @@ func (s *Service) adminImportConsumedTask(ctx context.Context, caller Caller, ta
 		s.deleteObjects(ctx, uploaded...)
 		return nil, err
 	}
-	p.CreatedAt, p.CurrentVersionID = oldPlugin.CreatedAt, oldPlugin.CurrentVersionID
-	p.CurrentVersion = oldPlugin.CurrentVersion // keep the published version label, not just its id
+	p.CreatedAt = oldPlugin.CreatedAt
+	// Seed current_version_id from the old row so a no-op reupload (deduped
+	// snapshot) still returns a valid pointer; a real snapshot overrides it below.
+	p.CurrentVersionID = oldPlugin.CurrentVersionID
+	// Keep the stored version label only when the reupload omits a version; a
+	// submitted version is applied (buildWrite set it), mirroring AdminUpdate.
+	if strings.TrimSpace(req.Version) == "" {
+		p.CurrentVersion = oldPlugin.CurrentVersion
+	}
 	p.CreatorName, p.CreatedByType = oldPlugin.CreatorName, oldPlugin.CreatedByType
 	p.CreatedByBotUID, p.CreatedByBotName = oldPlugin.CreatedByBotUID, oldPlugin.CreatedByBotName
 	p.SpaceID = oldPlugin.SpaceID   // preserve the row's existing Space
@@ -168,10 +179,17 @@ func (s *Service) adminImportConsumedTask(ctx context.Context, caller Caller, ta
 		rels[i].SourcePluginID = updateID
 	}
 	audit := s.audit(caller, updateID, "update", oldPlugin, p, now)
-	sync, err := s.repo.Update(ctx, adminScope(caller), mutation(*p, rels, audit))
+	m := mutation(*p, rels, audit)
+	m.SnapshotVersion = true // a package-only reupload is a new version snapshot
+	sync, err := s.repo.Update(ctx, adminScope(caller), m)
 	if err != nil {
 		s.deleteObjects(ctx, uploaded...)
 		return nil, mapStoreError(err)
+	}
+	// The snapshot advanced current_version_id; stamp the new row id onto the
+	// response so it agrees with the DB, like the other write surfaces.
+	if sync != nil && sync.NewVersionID != "" {
+		p.CurrentVersionID = &sync.NewVersionID
 	}
 	return &Detail{Plugin: p, Relations: rels, RelationResult: relationResult(sync)}, nil
 }

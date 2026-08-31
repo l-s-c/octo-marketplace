@@ -1,0 +1,12 @@
+# Documented breaking-change exception for `oasdiff breaking` (via .oasdiff.yaml).
+#
+# The unified-plugin migration retires POST /plugins/publish — save-is-a-version
+# replaces the explicit publish step. That removal is intentional and coordinated
+# (declared in PR #72, shipped lockstep with the octo-web / octo-admin clients),
+# so it is enumerated here as a documented exception. Any OTHER path removal still
+# fails the gate.
+#
+# (The legacy per-type admin surface — skills/mcps/experts/squads/*_categories/
+# expert_tags — was already retired on main by #69, so it does not appear in the
+# main->HEAD diff and needs no entry here.)
+post /plugins/publish api path removed without deprecation

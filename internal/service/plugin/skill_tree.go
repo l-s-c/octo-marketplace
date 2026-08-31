@@ -15,9 +15,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
-	libplugin "github.com/Mininglamp-OSS/octo-marketplace/internal/plugincontract"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/service/parse"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/storage"
+	libplugin "github.com/Mininglamp-OSS/octo-plugin-lib/plugin"
 )
 
 const (
@@ -131,12 +131,12 @@ func (s *Service) buildSkillAttachmentTree(ctx context.Context, spaceID, pluginI
 		inline := it.isText && (it.isMD || (size <= skillInlineMaxBytes && budget+size <= skillInlineBudgetBytes))
 		sum := sha256.Sum256(it.bytes)
 		att := map[string]any{
-			"path":         it.path,
-			"mime_type":    attachmentMIME(it.path, it.isText),
-			"content_size": int64(size),
-			"content_hash": "sha256:" + hex.EncodeToString(sum[:]),
+			"path":      it.path,
+			"mime_type": attachmentMIME(it.path, it.isText),
 		}
 		if inline {
+			// A raw attachment carries its bytes inline; the 2.0 contract forbids a
+			// derived content_size/content_hash on raw content, so neither is set.
 			att["content_type"] = "raw"
 			att["raw_content"] = string(it.bytes)
 			budget += size
@@ -173,6 +173,8 @@ func (s *Service) buildSkillAttachmentTree(ctx context.Context, spaceID, pluginI
 				spilled = append(spilled, it.path)
 			}
 			att["content_type"] = "storage"
+			att["content_size"] = int64(size)
+			att["content_hash"] = "sha256:" + hex.EncodeToString(sum[:])
 			att["storage_uri"] = key
 		}
 		attachments = append(attachments, att)
@@ -244,7 +246,12 @@ func attachmentMIME(p string, isText bool) string {
 // when no zip exists the package collapses to a single SKILL.md attachment
 // (inline content, or the trusted object_key document). Exported so the
 // storage-aware expand-skills migration can reuse the live write-path logic.
-func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID string, pkg json.RawMessage) (json.RawMessage, bool, error) {
+// ExpandSkillPackage rewrites a legacy skill package into the 2.0 flat
+// attachment tree. It returns the canonical 2.0 package (no storage_uri inline),
+// the host-private path->object-key sidecar for any spilled storage attachments
+// (nil when all-inline), whether anything changed, and an error. The caller
+// persists both the package and the sidecar (attachment_keys_json).
+func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID string, pkg, keys json.RawMessage) (json.RawMessage, json.RawMessage, bool, error) {
 	attachments := decodePackageAttachments(pkg)
 	legacy := false
 	for _, a := range attachments {
@@ -254,22 +261,26 @@ func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID stri
 		}
 	}
 	if !legacy {
-		return pkg, false, nil
+		return pkg, nil, false, nil
 	}
-	p := &model.Plugin{Name: pluginID, SpaceID: &spaceID, Package: pkg}
+	// The repackage phase strips inline storage_uri into the sidecar, so a legacy
+	// skill/package.zip key is resolved from `keys` (attachment_keys_json), not the
+	// package. Thread it onto the working plugin or migrationZipKey finds nothing
+	// and the archive gets rebuilt as a SKILL.md-only stub.
+	p := &model.Plugin{Name: pluginID, SpaceID: &spaceID, Package: pkg, AttachmentKeys: keys}
 	ref := s.skillRef(p)
 
 	var newAtts []map[string]any
 	if key, ok := s.migrationZipKey(p, ref); ok {
 		zipData, err := s.getObjectBytes(ctx, key, s.maxArchiveBytes)
 		if err != nil {
-			return nil, false, err
+			return nil, nil, false, err
 		}
 		// buildSkillAttachmentTree requires a valid Space only if a file must be
 		// uploaded to storage; an all-text package expands without one.
 		atts, _, _, err := s.buildSkillAttachmentTree(ctx, spaceID, pluginID, zipData, nil, nil)
 		if err != nil {
-			return nil, false, err
+			return nil, nil, false, err
 		}
 		newAtts = atts
 	} else {
@@ -289,32 +300,35 @@ func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID stri
 			// fallback here would permanently destroy the real SKILL.md (A3).
 			data, err := s.getObjectBytes(ctx, ref.ObjectKey, s.maxAttachmentBytes)
 			if err != nil {
-				return nil, false, fmt.Errorf("read skill markdown object %s: %w", ref.ObjectKey, err)
+				return nil, nil, false, fmt.Errorf("read skill markdown object %s: %w", ref.ObjectKey, err)
 			}
 			md, ok = string(data), true
 		} else {
 			md, ok = rawAttachmentContent(pkg, "SKILL.md")
 		}
 		if !ok || !utf8.ValidString(md) {
-			return nil, false, ErrNotFound
+			return nil, nil, false, ErrNotFound
 		}
-		sum := sha256.Sum256([]byte(md))
 		newAtts = []map[string]any{{
 			"path":         "SKILL.md",
 			"content_type": "raw",
 			"mime_type":    "text/markdown",
 			"raw_content":  md,
-			"content_size": int64(len(md)),
-			"content_hash": "sha256:" + hex.EncodeToString(sum[:]),
 		}}
 	}
 	raw, err := json.Marshal(map[string]any{"$schema": packageSchema, "attachments": newAtts})
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
-	canonical, err := libplugin.CanonicalJSON(raw)
+	// Split the host object keys out of the built tree so the persisted package is
+	// a valid 2.0 document (no storage_uri) and the keys land in the sidecar.
+	stripped, keys, err := splitStorageKeys(raw, spaceID)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
+	}
+	canonical, err := libplugin.CanonicalJSON(stripped)
+	if err != nil {
+		return nil, nil, false, err
 	}
 	// Validate the expanded package against the full lib package-shape rules
 	// (unique attachment paths, required SKILL.md) before the one-way migration
@@ -323,9 +337,48 @@ func (s *Service) ExpandSkillPackage(ctx context.Context, spaceID, pluginID stri
 	// API would then permanently refuse on the next upsert (P1-4). Fail the row so
 	// expand-skills records a skip instead of writing an unrepairable package.
 	if _, err := libplugin.DecodePackage(libplugin.TypeSkill, canonical); err != nil {
-		return nil, false, fmt.Errorf("expanded skill package rejected by lib: %w", err)
+		return nil, nil, false, fmt.Errorf("expanded skill package rejected by lib: %w", err)
 	}
-	return canonical, true, nil
+	return canonical, keys, true, nil
+}
+
+// WouldTruncateSkillPackage reports whether ExpandSkillPackage, given these keys,
+// would collapse a legacy-pointer package to a SKILL.md-only stub because it
+// cannot resolve the real archive/object — i.e. expanding it would discard the
+// package's files. It mirrors ExpandSkillPackage's own resolution decision
+// (migrationZipKey, then migrationArtifactKey on the ref object) rather than a
+// path-shape heuristic. A package whose pointer resolves, or that carries no real
+// pointer to lose (a genuine inline SKILL.md snapshot), does NOT truncate. Used by
+// the backfill to fail-closed skip audit snapshots that have no resolvable key
+// instead of rebuilding them as a stub.
+func (s *Service) WouldTruncateSkillPackage(spaceID, pluginID string, pkg, keys json.RawMessage) bool {
+	hasZipAttachment := false
+	for _, a := range decodePackageAttachments(pkg) {
+		if a.Path == "skill/package.zip" {
+			hasZipAttachment = true
+			break
+		}
+	}
+	p := &model.Plugin{Name: pluginID, SpaceID: &spaceID, Package: pkg, AttachmentKeys: keys}
+	ref := s.skillRef(p)
+	if _, ok := s.migrationZipKey(p, ref); ok {
+		return false // the managed zip resolves — buildSkillAttachmentTree expands the real files
+	}
+	// The zip pointer did NOT resolve. If there WAS one (a package.zip attachment
+	// or a ref zip key), ExpandSkillPackage takes the SKILL.md-stub else-branch and
+	// drops the archive's other files — so fail closed BEFORE the ObjectKey
+	// shortcut. A resolvable ref.json ObjectKey only supplies the stub's SKILL.md
+	// body; it does NOT recover the lost zip files, so it must not green-light the
+	// row.
+	if hasZipAttachment || ref.zipKey() != "" {
+		return true
+	}
+	if migrationArtifactKey(ref.ObjectKey, p.SpaceID) {
+		return false // no zip to lose; the referenced object is the authoritative SKILL.md
+	}
+	// No zip and no resolvable object: a non-empty (untrusted/unresolvable) object
+	// pointer would be lost to an inline stub; a pure inline snapshot loses nothing.
+	return ref.ObjectKey != ""
 }
 
 // getObjectBytes reads an object fully, capped at limit bytes.
