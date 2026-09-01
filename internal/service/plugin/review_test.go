@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 	pluginrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/plugin"
@@ -883,4 +884,44 @@ func TestSubmitReviewRelationsAreTargetStateButOptional(t *testing.T) {
 			t.Error("an invalid relation reached the repository")
 		}
 	})
+}
+
+// The icon column holds a storage object key for an uploaded icon; handing that
+// to a browser is a 404. It must go through the same resolveIcon path the plugin
+// list uses, on BOTH the list and the detail read.
+func TestReviewIconIsResolvedToADisplayURL(t *testing.T) {
+	store, _ := reviewFixture(t)
+	blobs := &importStorage{objects: map[string][]byte{}}
+	svc := New(store, blobs).WithRuntime(func() string { return "review-new" }, func() time.Time {
+		return time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
+	})
+	store.review.stored.PluginIcon = "icons/demo.png"
+	store.review.stored.PluginJSON = json.RawMessage(reviewPackage)
+	store.review.listItems = []*model.PluginReviewRequest{
+		{ID: "review-1", PluginID: "plugin-1", SpaceID: "space-a", PluginIcon: "icons/demo.png"},
+	}
+	store.review.listTotal = 1
+
+	detail, err := svc.GetReview(context.Background(), reviewAdmin, "review-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.PluginIcon == "icons/demo.png" {
+		t.Fatal("detail plugin_icon is the raw storage key; it will 404 in the browser")
+	}
+	if !strings.HasPrefix(detail.PluginIcon, "https://cdn.invalid/") {
+		t.Fatalf("detail plugin_icon = %q, want a resolved URL", detail.PluginIcon)
+	}
+	items, _, err := svc.ListReviews(context.Background(), reviewAdmin, "space", "", 1, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].PluginIcon == "icons/demo.png" {
+		t.Fatalf("list plugin_icon = %+v; the raw storage key leaked", items)
+	}
+	// An http(s) icon and an empty one pass through untouched.
+	store.review.stored.PluginIcon = "https://cdn.example.com/i.png"
+	if out, err := svc.GetReview(context.Background(), reviewAdmin, "review-1"); err != nil || out.PluginIcon != "https://cdn.example.com/i.png" {
+		t.Fatalf("absolute icon = %q (%v)", out.PluginIcon, err)
+	}
 }
