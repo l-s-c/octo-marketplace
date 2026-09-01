@@ -273,8 +273,9 @@ func TestOctoNotifyDefaults(t *testing.T) {
 
 func TestValidateAPIOctoSecrets(t *testing.T) {
 	const (
-		secretA = "0123456789abcdef0123456789abcdef" // exactly 32 bytes
-		secretB = "fedcba9876543210fedcba9876543210"
+		// Deterministic hex test fixtures — not real credentials.
+		secretA = "0123456789abcdef0123456789abcdef" // gitleaks:allow
+		secretB = "fedcba9876543210fedcba9876543210" // gitleaks:allow
 		short   = "0123456789abcdef"
 	)
 	base := func() Config {
