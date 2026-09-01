@@ -99,11 +99,9 @@ func TestTenantUpdateCannotRaiseVisibility(t *testing.T) {
 			current: model.PluginVisibilityPrivate, requested: model.PluginVisibilityPrivate,
 			wantStore: model.PluginVisibilityPrivate,
 		},
-		{
-			name:    "an approved listing may be edited without delisting itself",
-			current: model.PluginVisibilitySpace, requested: model.PluginVisibilitySpace,
-			wantStore: model.PluginVisibilitySpace,
-		},
+		// A listed plugin cannot be edited through this path at all any more; that
+		// refusal has its own test (TestTenantCannotEditAListedPluginDirectly), and
+		// its typed error is ErrListedRequiresReview rather than ErrInvalidRequest.
 		{
 			name:    "an author may delist their own listed plugin",
 			current: model.PluginVisibilitySpace, requested: model.PluginVisibilityPrivate,
@@ -158,5 +156,53 @@ func TestTenantVisibilityAllowedMatrix(t *testing.T) {
 	// The one transition the whole feature hangs on.
 	if tenantVisibilityAllowed(model.PluginVisibilityPrivate, model.PluginVisibilitySpace) {
 		t.Fatal("private -> space is allowed on the tenant path; the review gate is open")
+	}
+}
+
+// The other half of the upgrade gate: once a plugin is listed, the ordinary write
+// path must refuse it. Hiding the edit button removes the affordance; without
+// this, the bypass is one curl away — same class as the upsert-visibility hole.
+func TestTenantCannotEditAListedPluginDirectly(t *testing.T) {
+	store, svc := visibilityFixture(t, model.PluginVisibilitySpace)
+	req := validRequest()
+	req.Visibility = model.PluginVisibilitySpace
+	req.Publisher = "Someone else"
+	_, err := svc.Update(context.Background(), testCaller, "plugin-1", req)
+	if !errors.Is(err, ErrListedRequiresReview) {
+		t.Fatalf("err = %v, want ErrListedRequiresReview", err)
+	}
+	if store.update != nil {
+		t.Fatal("an unreviewed edit of a listed plugin was PERSISTED")
+	}
+}
+
+// A private draft is still freely editable — that is the whole point of the
+// private-drafts-are-free half of the design.
+func TestTenantMayEditAPrivateDraft(t *testing.T) {
+	store, svc := visibilityFixture(t, model.PluginVisibilityPrivate)
+	req := validRequest()
+	req.Visibility = model.PluginVisibilityPrivate
+	if _, err := svc.Update(context.Background(), testCaller, "plugin-1", req); err != nil {
+		t.Fatalf("editing a private draft was refused: %v", err)
+	}
+	if store.update == nil {
+		t.Fatal("nothing persisted")
+	}
+}
+
+// Delisting is how an author takes their plugin down to work on it, so a combined
+// "delist + edit" call stays allowed: the content lands on a row nobody else sees.
+func TestTenantMayDelistAndEditInOneCall(t *testing.T) {
+	store, svc := visibilityFixture(t, model.PluginVisibilitySpace)
+	req := validRequest()
+	req.Visibility = model.PluginVisibilityPrivate
+	if _, err := svc.Update(context.Background(), testCaller, "plugin-1", req); err != nil {
+		t.Fatalf("delist-and-edit was refused: %v", err)
+	}
+	if store.update == nil {
+		t.Fatal("nothing persisted")
+	}
+	if store.update.Visibility != model.PluginVisibilityPrivate {
+		t.Fatalf("persisted visibility = %q, want private", store.update.Visibility)
 	}
 }

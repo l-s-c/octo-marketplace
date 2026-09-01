@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,6 +41,16 @@ var (
 	// reviewer role. writeServiceError maps it to 403.
 	ErrReviewForbidden = errors.New("review operation not permitted")
 	ErrReasonRequired  = errors.New("reject reason is required")
+	// ErrReviewContentRequired is returned when an upgrade submission carries no
+	// content. Freezing the live row for an already-listed plugin would make the
+	// review theatre: the content is already visible org-wide, and approval would
+	// only mint a version label for something that shipped days ago.
+	ErrReviewContentRequired = errors.New("review submission must carry the reviewed content")
+	// ErrListedRequiresReview is returned when a tenant tries to modify an
+	// already-listed plugin through the ordinary write path. It is a STATE
+	// conflict, not a permission problem — the owner may change this plugin, just
+	// through a review request. Delisting it first (space -> private) also works.
+	ErrListedRequiresReview = errors.New("a listed plugin may only be changed through review")
 )
 
 // ReviewSubmitParams is the user-supplied input for a submit.
@@ -47,6 +58,18 @@ type ReviewSubmitParams struct {
 	PluginID  string
 	Version   string
 	Changelog string
+	// Manifest and Package are the reviewed CONTENT, supplied together or not at
+	// all. REQUIRED when the plugin is already listed (kind=upgrade) and optional
+	// while it is a private draft (kind=first), where the plugin row is nobody
+	// else's business and snapshotting it is honest.
+	Manifest json.RawMessage
+	Package  json.RawMessage
+	// Relations, when non-nil, is the authoritative target state of the reviewed
+	// relation graph, with the same semantics as /plugins/upsert: an empty list
+	// means "no relations". A nil pointer means "not submitted" and inherits the
+	// plugin's live graph, so a client that only edits documents cannot silently
+	// empty an expert team by omitting the field.
+	Relations *[]RelationRequest
 }
 
 // SubmitReview freezes the plugin's current draft content under the applicant's
@@ -79,12 +102,9 @@ func (s *Service) SubmitReview(ctx context.Context, caller Caller, params Review
 	if detail.Plugin.IsEmbedded {
 		return nil, ErrNotFound
 	}
-	snap := pluginrepo.FrozenSnapshot{
-		Manifest:     cloneJSON(detail.Plugin.Manifest),
-		Package:      cloneJSON(detail.Plugin.Package),
-		Relations:    detail.Relations,
-		ManifestHash: detail.Plugin.ManifestHash,
-		PluginHash:   detail.Plugin.PluginHash,
+	snap, err := s.freezeSubmission(ctx, caller, detail, params)
+	if err != nil {
+		return nil, err
 	}
 	now := s.now()
 	req := &model.PluginReviewRequest{
@@ -112,6 +132,87 @@ func (s *Service) SubmitReview(ctx context.Context, caller Caller, params Review
 	s.decorateReview(ctx, stored)
 	s.dispatchReviewCard(caller, stored, detail.Plugin)
 	return stored, nil
+}
+
+// freezeSubmission builds the frozen snapshot a reviewer will decide on.
+//
+// For an already-listed plugin the submission MUST carry its own content.
+// Snapshotting the plugin row instead would make the review theatre: that row is
+// what the org is already reading, so approval would only mint a version label
+// for content that shipped the moment the author saved it. (The complementary
+// half of this rule lives in Service.update, which refuses to let a tenant touch
+// a listed row at all.) While the plugin is a private draft the row is nobody
+// else's business, so snapshotting it is honest and content stays optional.
+//
+// Submitted content goes through the SAME canonicalization an ordinary write
+// uses, so a malformed manifest is a 400 at submit rather than a surprise at
+// approve time. It is validated against the plugin's existing name/type/tags:
+// this endpoint reviews CONTENT, not market metadata.
+func (s *Service) freezeSubmission(ctx context.Context, caller Caller, detail *Detail, params ReviewSubmitParams) (pluginrepo.FrozenSnapshot, error) {
+	plugin := detail.Plugin
+	hasManifest := len(bytes.TrimSpace(params.Manifest)) > 0
+	hasPackage := len(bytes.TrimSpace(params.Package)) > 0
+	if hasManifest != hasPackage {
+		// Half a document set cannot be reviewed, and silently filling the other half
+		// from the live row would reintroduce exactly the no-op above.
+		return pluginrepo.FrozenSnapshot{}, ErrReviewInvalid
+	}
+	if !hasManifest && plugin.Visibility != model.PluginVisibilityPrivate {
+		return pluginrepo.FrozenSnapshot{}, ErrReviewContentRequired
+	}
+
+	snap := pluginrepo.FrozenSnapshot{
+		Manifest:     cloneJSON(plugin.Manifest),
+		Package:      cloneJSON(plugin.Package),
+		Relations:    detail.Relations,
+		ManifestHash: plugin.ManifestHash,
+		PluginHash:   plugin.PluginHash,
+	}
+	if hasManifest {
+		// A fetch-edit-save client echoes back the GET package, whose storage
+		// attachments no longer carry an inline key (it lives in the host sidecar).
+		// Re-inject the stored key for unchanged storage content so the round trip is
+		// not rejected, exactly as Service.update does.
+		pkg := reinjectUpdateStorageKeys(params.Package, plugin.Package, plugin.AttachmentKeys)
+		docs, err := CanonicalizeDocuments(plugin.Name, plugin.Type, plugin.Tags, params.Manifest, pkg, caller.SpaceID)
+		if err != nil {
+			return pluginrepo.FrozenSnapshot{}, err
+		}
+		// The snapshot deliberately does not freeze the storage sidecar (no schema
+		// change), so the frozen package must reference exactly the object keys the
+		// live row already holds — otherwise approve would pair frozen attachment
+		// paths with a sidecar that has no entry for them. Introducing or changing a
+		// storage attachment therefore has to go through the import/reupload path,
+		// which owns object lifecycle.
+		if !sameAttachmentSidecar(docs.AttachmentKeys, plugin.AttachmentKeys) {
+			return pluginrepo.FrozenSnapshot{}, ErrInvalidRequest
+		}
+		snap.Manifest, snap.Package = docs.Manifest, docs.Package
+		snap.ManifestHash, snap.PluginHash = docs.ManifestHash, docs.PluginHash
+	}
+	if params.Relations != nil {
+		rels, err := s.buildRelations(ctx, caller, false, plugin, *params.Relations, s.now())
+		if err != nil {
+			return pluginrepo.FrozenSnapshot{}, err
+		}
+		snap.Relations = rels
+	}
+	return snap, nil
+}
+
+// sameAttachmentSidecar reports whether two storage sidecars hold the same
+// path -> object-key map, tolerant of nil/empty/key ordering.
+func sameAttachmentSidecar(a, b json.RawMessage) bool {
+	ma, mb := attachmentKeyMap(a), attachmentKeyMap(b)
+	if len(ma) != len(mb) {
+		return false
+	}
+	for path, key := range ma {
+		if other, ok := mb[path]; !ok || other != key {
+			return false
+		}
+	}
+	return true
 }
 
 // dispatchReviewCard queues the IM approval card. Everything it does — including

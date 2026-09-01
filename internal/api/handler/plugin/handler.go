@@ -585,7 +585,7 @@ func caller(c *gin.Context) (pluginsvc.Caller, bool) {
 	// rather than taking any single value out of the map is what stops an admin of
 	// Space B from acting as a reviewer while operating in Space A. A missing entry
 	// is a plain member. A system admin outranks any Space role.
-	out.SpaceRole = identity.SpaceRoles[spaceID]
+	out.SpaceRole = identity.SpaceRole(spaceID)
 	if out.IsSystemAdmin && out.SpaceRole < pluginsvc.SpaceRoleOwner {
 		out.SpaceRole = pluginsvc.SpaceRoleOwner
 	}
@@ -657,6 +657,14 @@ func writeServiceError(c *gin.Context, err error, operation string) {
 		validation(c, "body")
 	case errors.Is(err, pluginsvc.ErrReasonRequired):
 		validation(c, "reason")
+	// An upgrade submission with no content: name the field so the client knows
+	// what to send rather than guessing at a generic "body".
+	case errors.Is(err, pluginsvc.ErrReviewContentRequired):
+		apiresponse.Fail(c, http.StatusBadRequest, errcode.BadRequest, "a listed plugin must be submitted with the reviewed content", map[string]any{"field": "manifest_json", "reason": "required"}, "Send manifest_json and plugin_json with the submission.")
+	// A state conflict, not a permission problem: the owner may change this
+	// plugin, but only through a review request (or after delisting it).
+	case errors.Is(err, pluginsvc.ErrListedRequiresReview):
+		apiresponse.Fail(c, http.StatusConflict, errcode.Conflict, "a plugin listed to the organization cannot be edited directly", map[string]any{"conflict_reason": "listed_requires_review"}, "Submit a review request, or set visibility to private first.")
 	// Authorization refusal, distinct from "not found": the caller is in the right
 	// Space and may know the resource exists, they simply lack the reviewer role.
 	// Without this branch a permission error falls through to 500.

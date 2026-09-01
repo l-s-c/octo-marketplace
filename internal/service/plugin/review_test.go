@@ -689,3 +689,198 @@ func TestDecideReviewFromCardLoserSeesCommittedOutcome(t *testing.T) {
 		t.Error("the loser wrote a receipt for a decision it did not make")
 	}
 }
+
+// --- submitted content --------------------------------------------------------
+
+// reviewValidManifest/Package are a canonicalizable document pair for the skill
+// fixture, so submitted content goes through the real write-path validation.
+func reviewValidDocs(name string) (manifest, pkg string) {
+	manifest = `{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"Demo","plugin_type":"skill","name":"demo","description":"` + name + `","labels":[],"examples":[]}`
+	pkg = `{"$schema":"cowork-plugin-package-2.0.json","attachments":[{"path":"SKILL.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# ` + name + `"}]}`
+	return manifest, pkg
+}
+
+// For an already-listed plugin the live row IS what the org reads, so freezing it
+// would make the review a formality over content that already shipped.
+func TestSubmitReviewRequiresContentForAnUpgrade(t *testing.T) {
+	store, svc := reviewFixture(t)
+	store.plugins["plugin-1"].Visibility = model.PluginVisibilitySpace
+	_, err := svc.SubmitReview(context.Background(), reviewApplicant, ReviewSubmitParams{PluginID: "plugin-1", Version: "2.0.0"})
+	if !errors.Is(err, ErrReviewContentRequired) {
+		t.Fatalf("error = %v, want ErrReviewContentRequired", err)
+	}
+	if store.review.insertReq != nil {
+		t.Error("a contentless upgrade reached the repository")
+	}
+}
+
+// A private draft is nobody else's business, so snapshotting the row is honest
+// and content stays optional.
+func TestSubmitReviewAllowsAContentlessFirstListing(t *testing.T) {
+	store, svc := reviewFixture(t)
+	if _, err := svc.SubmitReview(context.Background(), reviewApplicant, ReviewSubmitParams{PluginID: "plugin-1", Version: "1.0.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if store.review.insertSnap.PluginHash != "sha256:p" {
+		t.Fatalf("snapshot = %+v; a contentless first listing snapshots the draft row", store.review.insertSnap)
+	}
+}
+
+// Half a document set cannot be reviewed, and filling the other half from the
+// live row would smuggle unreviewed content into the snapshot.
+func TestSubmitReviewRejectsPartialContent(t *testing.T) {
+	manifest, pkg := reviewValidDocs("v2")
+	for _, tt := range []struct {
+		name             string
+		manifest, pkgStr string
+	}{
+		{name: "manifest only", manifest: manifest},
+		{name: "package only", pkgStr: pkg},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store, svc := reviewFixture(t)
+			store.plugins["plugin-1"].Visibility = model.PluginVisibilitySpace
+			_, err := svc.SubmitReview(context.Background(), reviewApplicant, ReviewSubmitParams{
+				PluginID: "plugin-1", Version: "2.0.0",
+				Manifest: json.RawMessage(tt.manifest), Package: json.RawMessage(tt.pkgStr),
+			})
+			if !errors.Is(err, ErrReviewInvalid) {
+				t.Fatalf("error = %v, want ErrReviewInvalid", err)
+			}
+			if store.review.insertReq != nil {
+				t.Error("a partial submission reached the repository")
+			}
+		})
+	}
+}
+
+// The submitted content is frozen on the REQUEST. Nothing about the plugin row
+// changes at submit time — that is the whole point of the upgrade flow.
+func TestSubmitReviewFreezesSubmittedContentWithoutTouchingThePlugin(t *testing.T) {
+	store, svc := reviewFixture(t)
+	store.plugins["plugin-1"].Visibility = model.PluginVisibilitySpace
+	store.plugins["plugin-1"].Name = "Demo"
+	store.plugins["plugin-1"].Tags = json.RawMessage(`[]`)
+	beforeManifest := string(store.plugins["plugin-1"].Manifest)
+	beforePackage := string(store.plugins["plugin-1"].Package)
+	beforeHash := store.plugins["plugin-1"].PluginHash
+
+	manifest, pkg := reviewValidDocs("v2 body")
+	if _, err := svc.SubmitReview(context.Background(), reviewApplicant, ReviewSubmitParams{
+		PluginID: "plugin-1", Version: "2.0.0",
+		Manifest: json.RawMessage(manifest), Package: json.RawMessage(pkg),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snap := store.review.insertSnap
+	if !strings.Contains(string(snap.Package), "v2 body") {
+		t.Fatalf("snapshot package = %s, want the submitted content", snap.Package)
+	}
+	if snap.PluginHash == beforeHash {
+		t.Fatal("snapshot hash equals the live hash; the submitted content was ignored")
+	}
+	// Submit is read-only on the plugin.
+	if store.update != nil || store.create != nil {
+		t.Fatal("submit wrote to the plugin row")
+	}
+	live := store.plugins["plugin-1"]
+	if string(live.Manifest) != beforeManifest || string(live.Package) != beforePackage || live.PluginHash != beforeHash {
+		t.Fatal("the plugin row changed at submit time; the org would see unreviewed content")
+	}
+}
+
+// A malformed manifest must be a 400 at submit, not a surprise when a reviewer
+// clicks approve.
+func TestSubmitReviewValidatesSubmittedContent(t *testing.T) {
+	_, pkg := reviewValidDocs("v2")
+	for _, tt := range []struct {
+		name             string
+		manifest, pkgStr string
+	}{
+		{name: "manifest is not an object", manifest: `[]`, pkgStr: pkg},
+		{name: "manifest fails the contract", manifest: `{"nonsense":true}`, pkgStr: pkg},
+		{name: "manifest name does not match the plugin row", pkgStr: pkg,
+			manifest: `{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"Something Else","plugin_type":"skill","name":"demo","description":"d","labels":[],"examples":[]}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store, svc := reviewFixture(t)
+			store.plugins["plugin-1"].Visibility = model.PluginVisibilitySpace
+			store.plugins["plugin-1"].Tags = json.RawMessage(`[]`)
+			_, err := svc.SubmitReview(context.Background(), reviewApplicant, ReviewSubmitParams{
+				PluginID: "plugin-1", Version: "2.0.0",
+				Manifest: json.RawMessage(tt.manifest), Package: json.RawMessage(tt.pkgStr),
+			})
+			if err == nil {
+				t.Fatal("malformed content was accepted")
+			}
+			if store.review.insertReq != nil {
+				t.Error("malformed content reached the repository")
+			}
+		})
+	}
+}
+
+// Relations follow target-state semantics when submitted, and are INHERITED when
+// the field is absent — a client editing only documents must not be able to empty
+// an expert team by forgetting the key.
+func TestSubmitReviewRelationsAreTargetStateButOptional(t *testing.T) {
+	space := "space-a"
+	newFixture := func(t *testing.T) (*fakeStore, *Service) {
+		t.Helper()
+		store, svc := reviewFixture(t)
+		store.plugins["plugin-1"].Type = model.PluginTypeExpert
+		store.plugins["plugin-1"].Visibility = model.PluginVisibilitySpace
+		store.plugins["skill-1"] = &model.Plugin{
+			ID: "skill-1", Name: "Bundled", Type: model.PluginTypeSkill,
+			OwnerUID: "user-1", SpaceID: &space, Visibility: model.PluginVisibilityPrivate,
+		}
+		store.relations["plugin-1"] = []model.PluginRelation{
+			{ID: "rel-1", SourcePluginID: "plugin-1", TargetPluginID: "skill-1", Type: "expert_skill", Status: 1},
+		}
+		return store, svc
+	}
+	manifest := `{"$schema":"cowork-plugin-manifest-2.0.json","plugin_name":"Demo","plugin_type":"expert","name":"demo","description":"d","labels":[],"examples":[]}`
+	pkg := `{"$schema":"cowork-plugin-package-2.0.json","attachments":[{"path":"AGENTS.md","content_type":"raw","mime_type":"text/markdown","raw_content":"# demo"}]}`
+
+	t.Run("absent inherits the live graph", func(t *testing.T) {
+		store, svc := newFixture(t)
+		if _, err := svc.SubmitReview(context.Background(), reviewApplicant, ReviewSubmitParams{
+			PluginID: "plugin-1", Version: "2.0.0",
+			Manifest: json.RawMessage(manifest), Package: json.RawMessage(pkg),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		rels := store.review.insertSnap.Relations
+		if len(rels) != 1 || rels[0].TargetPluginID != "skill-1" {
+			t.Fatalf("relations = %+v; an omitted field must inherit the live graph", rels)
+		}
+	})
+	t.Run("explicit empty clears the graph", func(t *testing.T) {
+		store, svc := newFixture(t)
+		empty := []RelationRequest{}
+		if _, err := svc.SubmitReview(context.Background(), reviewApplicant, ReviewSubmitParams{
+			PluginID: "plugin-1", Version: "2.0.0",
+			Manifest: json.RawMessage(manifest), Package: json.RawMessage(pkg),
+			Relations: &empty,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got := store.review.insertSnap.Relations; len(got) != 0 {
+			t.Fatalf("relations = %+v, want empty", got)
+		}
+	})
+	t.Run("an invalid relation is refused", func(t *testing.T) {
+		store, svc := newFixture(t)
+		bad := []RelationRequest{{TargetPluginID: "skill-1", Type: "expert_team_expert"}}
+		if _, err := svc.SubmitReview(context.Background(), reviewApplicant, ReviewSubmitParams{
+			PluginID: "plugin-1", Version: "2.0.0",
+			Manifest: json.RawMessage(manifest), Package: json.RawMessage(pkg),
+			Relations: &bad,
+		}); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("error = %v, want ErrInvalidRequest", err)
+		}
+		if store.review.insertReq != nil {
+			t.Error("an invalid relation reached the repository")
+		}
+	})
+}

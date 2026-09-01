@@ -700,3 +700,123 @@ point; never hand it `string(status)`.
 - Review request bodies use a size-bounded but unknown-field-TOLERANT decoder,
   unlike `/plugins/upsert`'s strict one: the octo-web client is already built and
   shipped against this contract.
+
+## Product amendment (owner, 2026-09-01): an upgrade review must review content
+
+Items 1–16 above stand. This section supersedes the parts of them that assumed
+`SubmitReview` always snapshots the `plugins` row.
+
+### 17. Why the upgrade path was theatre
+
+`POST /plugins/review_requests` originally took only `{plugin_id, version,
+changelog}` and froze whatever was on the `plugins` row. For a plugin already
+listed to the org, that row IS what the org is reading — and a tenant could edit
+it directly through `/plugins/upsert`, visible Space-wide the instant it
+committed. The reviewer therefore approved content that had already shipped, and
+approval only minted a version label. Hiding the edit button in the UI removes
+the affordance, not the bypass: it was one curl away, the same class of hole as
+the upsert-visibility one.
+
+### 18. Submit carries the content; for an upgrade it MUST.
+
+`POST /plugins/review_requests` body:
+
+```jsonc
+{
+  "plugin_id": "…",              // required
+  "version":   "2.0.0",          // required, applicant-typed label
+  "changelog": "…",              // optional, <= 1000 runes
+  "manifest_json": { … },        // see below
+  "plugin_json":   { … },        // see below
+  "relations": [                 // optional; see semantics below
+    {
+      "relation_id":      "rel-1",        // optional: omit to create a new edge
+      "source_plugin_id": "plugin-1",     // optional; must address plugin_id if sent
+      "target_plugin_id": "skill-1",      // required
+      "relation_type":    "expert_skill", // required
+      "sort_order":       0,
+      "data":             { … }           // optional object
+    }
+  ]
+}
+```
+
+- `manifest_json` / `plugin_json` are supplied **together or not at all**; half a
+  pair is a 400. Filling the missing half from the live row would reintroduce
+  exactly the no-op above.
+- **`kind=upgrade` (plugin is `space`): required.** Absent → 400
+  `VALIDATION_ERROR` with `details.field = "manifest_json"`.
+- **`kind=first` (plugin is `private`): optional.** Absent → the draft row is
+  snapshotted, which is honest: while private, that row is nobody else's business.
+- `relations` are FULL OBJECTS in the same shape `/plugins/upsert` already uses —
+  not a list of ids — so the frontend reuses its existing relation serializer.
+  Target-state semantics, also as in upsert: present (even `[]`) replaces the
+  reviewed graph. **ABSENT (the key omitted, or `null`) inherits the plugin's live
+  graph**, so a client that only edits documents cannot silently empty an expert
+  team by forgetting the field. That absent-vs-empty distinction is load-bearing
+  and is pinned by a handler test.
+- Submitted content goes through the SAME canonicalization an ordinary write uses
+  (`CanonicalizeDocuments`), against the plugin's EXISTING name / type / tags —
+  this endpoint reviews content, not market metadata. A malformed manifest is a
+  400 at submit, not a surprise when a reviewer clicks approve.
+- **Submit never writes to `plugins`.** Asserted at both layers: the service test
+  checks the fixture row is unchanged, and the MySQL test reads every content
+  column plus the relation set before and after and requires them identical.
+
+Storage attachments: because the snapshot does not freeze
+`attachment_keys_json` (item 4), the submitted package must reference exactly the
+object keys the live row already holds — `reinjectUpdateStorageKeys` restores them
+for unchanged storage content, and a sidecar that differs afterwards is a 400.
+Introducing or changing a storage attachment therefore goes through the
+import/reupload path, which owns object lifecycle.
+
+Relation graphs: a reviewed graph may add **standalone** catalog targets and drop
+existing edges, but cannot mint new EMBEDDED children — `lockRelationTargets`
+refuses to adopt an embedded child that is not already this source's own, because
+a later container reupload would soft-delete it out from under the adopter. New
+embedded children come only from the container import path.
+
+### 19. A listed plugin cannot be modified through the ordinary write path.
+
+`Service.update` (which backs `/plugins/upsert` AND the tenant re-import) refuses
+outright when `old.visibility == 'space'`, with `ErrListedRequiresReview` →
+**409 CONFLICT**, `details.conflict_reason = "listed_requires_review"`, hint
+"Submit a review request, or set visibility to private first."
+
+409 rather than 403 because it is a STATE conflict, not a permission problem: the
+owner may change this plugin, just not through this door.
+
+**No field is carved out.** Every field a tenant can change through upsert is
+org-visible once the plugin is listed:
+
+| field | why it is org-visible |
+| --- | --- |
+| `manifest_json` / `plugin_json` | the content itself |
+| `plugin_name`, `tags` | `CanonicalizeManifest` requires them to match the manifest, so changing either IS a content change (and both are rendered in the market) |
+| `category_id` | decides which market category the plugin is listed under, and is mirrored onto the placement |
+| `publisher`, `icon` | rendered on the market card |
+| `version` | the label the org sees as the current version |
+
+That leaves nothing that could not affect what the Space reads, so a per-field
+allowlist would be all list and no allow.
+
+**Lowering to `private` in the same call stays allowed.** That is how an author
+takes their plugin down in order to work on it; the content then lands on a row
+nobody else can see. `space → private` alone also still works.
+
+A system admin is exempt, as with the other two clamps: `/api/v1/admin/*` already
+reaches all of this, and `system` rows are not tenant-owned.
+
+Two pre-existing reupload tests
+(`TestImportReuploadPreservesIconWhenOmitted`,
+`TestImportReuploadKeepsStoredVersionWhenOmitted`) used a `space` fixture purely
+as scenery; they now use `private`, which is the state a reupload can actually
+target. `TestReimportPreservesTheExistingVisibility` lost its `space` case for the
+same reason — that outcome is now a refusal with its own test.
+
+### 20. Approve is where the listed content changes, and only there.
+
+Unchanged in shape, but it now genuinely matters for upgrades: the `upgrade`
+branch applies the frozen manifest, package, hashes, version label AND relation
+graph. `TestUpgradeSubmitLeavesTheListedRowUntouchedAndApproveSwapsIt` drives the
+whole sequence against MySQL and fails if either half moves at the wrong time.

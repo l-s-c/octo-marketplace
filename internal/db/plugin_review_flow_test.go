@@ -837,3 +837,104 @@ func TestApprovalIsWhatMakesAPluginVisibleToTheOrg(t *testing.T) {
 		t.Fatal("approval leaked the plugin into another Space")
 	}
 }
+
+// The upgrade flow end to end: submitting content leaves the LISTED row
+// byte-identical (the org keeps reading the old version), and approving swaps
+// documents, hashes, version label and relations together.
+func TestUpgradeSubmitLeavesTheListedRowUntouchedAndApproveSwapsIt(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	seed(t, database, seedPlugin{
+		id: "expert-1", typ: "expert", visibility: "space",
+		currentVersionID: "ver-1", currentVersion: "1.0.0",
+		manifest: `{"plugin_name":"Live v1"}`, pkg: `{"attachments":[{"path":"AGENTS.md","content_type":"raw","raw_content":"live v1"}]}`,
+	})
+	seed(t, database, seedPlugin{id: "skill-old", typ: "skill", visibility: "space", embedded: true})
+	// skill-new is a STANDALONE catalog skill, not an embedded one. lockRelationTargets
+	// refuses to adopt an embedded child that is not already this source's own — a
+	// later container reupload would soft-delete it out from under the adopter — so a
+	// reviewed graph can add standalone targets and drop existing edges, but cannot
+	// mint new embedded children. Those only come from the container import path.
+	seed(t, database, seedPlugin{id: "skill-new", typ: "skill", visibility: "space"})
+	seedRelation(t, database, "rel-old", "expert-1", "skill-old", "expert_skill")
+
+	type liveRow struct {
+		manifest, pkg, mhash, phash, version, visibility string
+	}
+	readLive := func(t *testing.T) liveRow {
+		t.Helper()
+		var row liveRow
+		if err := database.QueryRow(`SELECT manifest_json, plugin_json, manifest_hash, plugin_hash, current_version, visibility
+			FROM plugins WHERE plugin_id='expert-1'`).
+			Scan(&row.manifest, &row.pkg, &row.mhash, &row.phash, &row.version, &row.visibility); err != nil {
+			t.Fatal(err)
+		}
+		return row
+	}
+	before := readLive(t)
+
+	// The submission carries its OWN content and its own membership: skill-old out,
+	// skill-new in.
+	frozen := []model.PluginRelation{{
+		SourcePluginID: "expert-1", TargetPluginID: "skill-new",
+		Type: "expert_skill", SortOrder: 0, Status: 1,
+	}}
+	req := newRequest("expert-1", "2.0.0")
+	if err := repo.InsertReviewRequest(ctx, tenantScope(), req,
+		snapshotOf(`{"plugin_name":"Reviewed v2"}`, `{"attachments":[{"path":"AGENTS.md","content_type":"raw","raw_content":"reviewed v2"}]}`, frozen)); err != nil {
+		t.Fatal(err)
+	}
+	if req.Kind != model.ReviewKindUpgrade {
+		t.Fatalf("kind = %q, want upgrade", req.Kind)
+	}
+	// Nothing about the listed row may move at submit time.
+	if after := readLive(t); after != before {
+		t.Fatalf("submitting an upgrade changed the LIVE row:\nbefore %+v\nafter  %+v", before, after)
+	}
+	var liveTargets int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM plugin_relations WHERE source_plugin_id='expert-1' AND target_plugin_id='skill-new' AND deleted_at IS NULL`).Scan(&liveTargets); err != nil {
+		t.Fatal(err)
+	}
+	if liveTargets != 0 {
+		t.Fatal("submitting an upgrade already applied the reviewed membership")
+	}
+
+	if _, err := repo.ApproveReview(ctx, reviewerScope(), pluginrepo.ApproveReviewParams{
+		ReviewID: req.ID, ReviewerUID: "admin-1", ReviewerName: "Adam",
+	}); err != nil {
+		t.Fatalf("ApproveReview: %v", err)
+	}
+	after := readLive(t)
+	if !containsJSON(after.manifest, "Reviewed v2") {
+		t.Errorf("manifest = %s, want the reviewed content", after.manifest)
+	}
+	if !containsJSON(after.pkg, "reviewed v2") {
+		t.Errorf("plugin_json = %s, want the reviewed content", after.pkg)
+	}
+	if after.mhash != "sha256:frozen-manifest" || after.phash != "sha256:frozen-package" {
+		t.Errorf("hashes = %q/%q, want the frozen ones", after.mhash, after.phash)
+	}
+	if after.version != "2.0.0" {
+		t.Errorf("current_version = %q, want 2.0.0", after.version)
+	}
+	if after.visibility != "space" {
+		t.Errorf("visibility = %q; an upgrade must not change it", after.visibility)
+	}
+	live := map[string]bool{}
+	rows, err := database.Query(`SELECT target_plugin_id FROM plugin_relations WHERE source_plugin_id='expert-1' AND deleted_at IS NULL`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var target string
+		if err := rows.Scan(&target); err != nil {
+			t.Fatal(err)
+		}
+		live[target] = true
+	}
+	if !live["skill-new"] || live["skill-old"] {
+		t.Fatalf("membership after approve = %v, want exactly the reviewed graph", live)
+	}
+}

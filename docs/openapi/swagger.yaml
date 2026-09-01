@@ -1851,8 +1851,17 @@ components:
       properties:
         changelog:
           type: string
+        manifest_json:
+          type: object
         plugin_id:
           type: string
+        plugin_json:
+          type: object
+        relations:
+          items:
+            $ref: '#/components/schemas/internal_api_handler_plugin.relationRequest'
+          type: array
+          uniqueItems: false
         version:
           type: string
       type: object
@@ -5664,10 +5673,14 @@ paths:
       tags:
       - plugin
     post:
-      description: Freezes the plugin's current draft content (documents plus relation
-        graph) under a caller-supplied version label and queues it for Space owner/admin
-        approval. Only the plugin owner may submit, only one request per plugin may
-        be pending, and a version label already published for that plugin is refused.
+      description: Freezes the reviewed content under a caller-supplied version label
+        and queues it for Space owner/admin approval. manifest_json and plugin_json
+        are supplied together and are REQUIRED once the plugin is listed to the org;
+        while it is a private draft they may be omitted and the draft row is snapshotted.
+        Submitting NEVER changes the plugin row — the listed content only changes
+        when a reviewer approves. Only the plugin owner may submit, only one request
+        per plugin may be pending, and a version label already published for that
+        plugin is refused.
       operationId: plugin.review_request.create
       requestBody:
         content:
@@ -5692,7 +5705,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: VALIDATION_ERROR
+          description: 'VALIDATION_ERROR: manifest_json/plugin_json are required for
+            an already-listed plugin'
         '401':
           content:
             application/json:

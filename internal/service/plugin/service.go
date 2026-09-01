@@ -533,8 +533,22 @@ func (s *Service) update(ctx context.Context, caller Caller, pluginID string, re
 	// A system admin is exempt for the same reason as createWithID: `system` rows
 	// are not tenant-owned, and a platform operator already reaches every one of
 	// these transitions through /api/v1/admin.
-	if !caller.IsSystemAdmin && !tenantVisibilityAllowed(old.Visibility, req.Visibility) {
-		return nil, ErrInvalidRequest
+	if !caller.IsSystemAdmin {
+		if !tenantVisibilityAllowed(old.Visibility, req.Visibility) {
+			return nil, ErrInvalidRequest
+		}
+		// And a LISTED plugin may not be modified through this path at all. Every
+		// field a tenant can change here is org-visible — the documents, and through
+		// the manifest the name/description/labels, plus category, publisher and icon
+		// — so an edit that lands here is an unreviewed change to what the whole
+		// Space is reading. Reviewed content arrives through SubmitReview instead.
+		//
+		// Lowering to private in the same call is deliberately still allowed: that is
+		// how an author takes their plugin down in order to work on it, and the
+		// content then lands on a row nobody else can see.
+		if old.Visibility == model.PluginVisibilitySpace && req.Visibility != model.PluginVisibilityPrivate {
+			return nil, ErrListedRequiresReview
+		}
 	}
 	now := s.now()
 	// A fetch-edit-save client echoes back the GET package, whose storage

@@ -77,10 +77,26 @@ type reviewRequestResponse struct {
 	ReadmeContent string `json:"readme_content,omitempty"`
 }
 
+// reviewSubmitRequest is the submit body.
+//
+// manifest_json / plugin_json are the reviewed CONTENT and are supplied together
+// or not at all. They are REQUIRED when the plugin is already listed to the org
+// (kind=upgrade): a listed plugin's live row is what the Space is already
+// reading, so freezing it would make the review a formality over content that
+// already shipped. While the plugin is a private draft they may be omitted and
+// the draft row is snapshotted.
+//
+// relations uses the same target-state shape and semantics as /plugins/upsert:
+// present (even empty) replaces the reviewed graph, ABSENT inherits the plugin's
+// live graph — so a client editing only documents cannot empty an expert team by
+// forgetting the field.
 type reviewSubmitRequest struct {
-	PluginID  string `json:"plugin_id"`
-	Version   string `json:"version"`
-	Changelog string `json:"changelog,omitempty"`
+	PluginID     string             `json:"plugin_id"`
+	Version      string             `json:"version"`
+	Changelog    string             `json:"changelog,omitempty"`
+	ManifestJSON json.RawMessage    `json:"manifest_json,omitempty" swaggertype:"object"`
+	PluginJSON   json.RawMessage    `json:"plugin_json,omitempty" swaggertype:"object"`
+	Relations    *[]relationRequest `json:"relations,omitempty"`
 }
 
 type reviewRejectRequest struct {
@@ -121,7 +137,7 @@ func reviewDTO(r *model.PluginReviewRequest) reviewRequestResponse {
 // SubmitReview submits a plugin for Space visibility review.
 //
 // @Summary Submit a plugin for Space review
-// @Description Freezes the plugin's current draft content (documents plus relation graph) under a caller-supplied version label and queues it for Space owner/admin approval. Only the plugin owner may submit, only one request per plugin may be pending, and a version label already published for that plugin is refused.
+// @Description Freezes the reviewed content under a caller-supplied version label and queues it for Space owner/admin approval. manifest_json and plugin_json are supplied together and are REQUIRED once the plugin is listed to the org; while it is a private draft they may be omitted and the draft row is snapshotted. Submitting NEVER changes the plugin row — the listed content only changes when a reviewer approves. Only the plugin owner may submit, only one request per plugin may be pending, and a version label already published for that plugin is refused.
 // @Tags plugin
 // @ID plugin.review_request.create
 // @Accept json
@@ -129,7 +145,7 @@ func reviewDTO(r *model.PluginReviewRequest) reviewRequestResponse {
 // @Security Bearer
 // @Param payload body reviewSubmitRequest true "Submission"
 // @Success 200 {object} apiresponse.Data[reviewRequestResponse]
-// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
+// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR: manifest_json/plugin_json are required for an already-listed plugin"
 // @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
@@ -147,11 +163,28 @@ func (h *Handler) SubmitReview(c *gin.Context) {
 	if !decodeReviewBody(c, &body) {
 		return
 	}
-	out, err := h.svc.SubmitReview(c.Request.Context(), caller, pluginsvc.ReviewSubmitParams{
+	params := pluginsvc.ReviewSubmitParams{
 		PluginID:  body.PluginID,
 		Version:   body.Version,
 		Changelog: body.Changelog,
-	})
+		Manifest:  body.ManifestJSON,
+		Package:   body.PluginJSON,
+	}
+	if body.Relations != nil {
+		rels := make([]pluginsvc.RelationRequest, 0, len(*body.Relations))
+		for _, r := range *body.Relations {
+			rels = append(rels, pluginsvc.RelationRequest{
+				ID:             r.RelationID,
+				SourcePluginID: r.SourcePluginID,
+				TargetPluginID: r.TargetPluginID,
+				Type:           r.RelationType,
+				SortOrder:      r.SortOrder,
+				Data:           r.Data,
+			})
+		}
+		params.Relations = &rels
+	}
+	out, err := h.svc.SubmitReview(c.Request.Context(), caller, params)
 	if err != nil {
 		writeServiceError(c, err, "plugin_review_request.create")
 		return

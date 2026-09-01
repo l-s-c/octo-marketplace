@@ -294,3 +294,105 @@ func TestApproveReviewReturnsThePlugin(t *testing.T) {
 		t.Errorf("approve id = %q", f.review.approveID)
 	}
 }
+
+// The submit body now carries the reviewed content. This is the exact shape the
+// frontend sends, so it is asserted field by field on the way in.
+func TestSubmitReviewForwardsContentAndRelations(t *testing.T) {
+	f := &fakeService{}
+	f.review.request = reviewRequestFixture()
+	body := `{"plugin_id":"plugin-1","version":"2.0.0","changelog":"notes",` +
+		`"manifest_json":{"plugin_name":"Demo"},` +
+		`"plugin_json":{"attachments":[]},` +
+		`"relations":[{"relation_id":"rel-1","target_plugin_id":"skill-1","relation_type":"expert_skill","sort_order":3,"data":{"k":"v"}}]}`
+	rec := doReview(t, f, http.MethodPost, "/api/v1/plugins/review_requests", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	p := f.review.submitParams
+	if !strings.Contains(string(p.Manifest), "Demo") {
+		t.Errorf("manifest = %s", p.Manifest)
+	}
+	if !strings.Contains(string(p.Package), "attachments") {
+		t.Errorf("package = %s", p.Package)
+	}
+	if p.Relations == nil {
+		t.Fatal("relations were dropped")
+	}
+	rels := *p.Relations
+	if len(rels) != 1 {
+		t.Fatalf("relations = %+v", rels)
+	}
+	if rels[0].ID != "rel-1" || rels[0].TargetPluginID != "skill-1" || rels[0].Type != "expert_skill" || rels[0].SortOrder != 3 {
+		t.Fatalf("relation = %+v", rels[0])
+	}
+	if string(rels[0].Data) != `{"k":"v"}` {
+		t.Errorf("relation data = %s", rels[0].Data)
+	}
+}
+
+// Omitting `relations` must reach the service as a nil pointer (inherit the live
+// graph), while an explicit empty array must reach it as a non-nil empty slice
+// (clear the graph). Collapsing the two would let a document-only edit silently
+// empty an expert team.
+func TestSubmitReviewDistinguishesAbsentFromEmptyRelations(t *testing.T) {
+	t.Run("absent", func(t *testing.T) {
+		f := &fakeService{}
+		f.review.request = reviewRequestFixture()
+		rec := doReview(t, f, http.MethodPost, "/api/v1/plugins/review_requests",
+			`{"plugin_id":"plugin-1","version":"2.0.0","manifest_json":{},"plugin_json":{}}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d", rec.Code)
+		}
+		if f.review.submitParams.Relations != nil {
+			t.Fatal("an absent relations field became an explicit empty graph")
+		}
+	})
+	t.Run("explicit empty", func(t *testing.T) {
+		f := &fakeService{}
+		f.review.request = reviewRequestFixture()
+		rec := doReview(t, f, http.MethodPost, "/api/v1/plugins/review_requests",
+			`{"plugin_id":"plugin-1","version":"2.0.0","manifest_json":{},"plugin_json":{},"relations":[]}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d", rec.Code)
+		}
+		if f.review.submitParams.Relations == nil {
+			t.Fatal("an explicit empty relations array became 'inherit the live graph'")
+		}
+		if len(*f.review.submitParams.Relations) != 0 {
+			t.Fatalf("relations = %+v", *f.review.submitParams.Relations)
+		}
+	})
+}
+
+// The two new sentinels must land on statuses a client can branch on: "send me
+// the content" is a 400 naming the field, "this is listed, go through review" is
+// a 409 with a machine-readable reason.
+func TestListedAndContentRequiredErrorsMapToStatusCodes(t *testing.T) {
+	t.Run("content required", func(t *testing.T) {
+		f := &fakeService{}
+		f.review.submitErr = pluginsvc.ErrReviewContentRequired
+		rec := doReview(t, f, http.MethodPost, "/api/v1/plugins/review_requests", `{"plugin_id":"p","version":"2.0.0"}`)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body.String())
+		}
+		for _, want := range []string{`"code":"VALIDATION_ERROR"`, `"field":"manifest_json"`} {
+			if !strings.Contains(rec.Body.String(), want) {
+				t.Fatalf("body missing %s: %s", want, rec.Body.String())
+			}
+		}
+	})
+	t.Run("listed requires review", func(t *testing.T) {
+		space := "space-a"
+		f := &fakeService{err: pluginsvc.ErrListedRequiresReview, detail: &pluginsvc.Detail{Plugin: &model.Plugin{ID: "plugin-1", SpaceID: &space}}}
+		body := `{"plugin":{"plugin_id":"plugin-1","plugin_name":"Demo","plugin_type":"skill","visibility":"space","tags":[],"manifest_json":{},"plugin_json":{}},"relations":[]}`
+		rec := doReview(t, f, http.MethodPost, "/api/v1/plugins/upsert", body)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409 (%s)", rec.Code, rec.Body.String())
+		}
+		for _, want := range []string{`"code":"CONFLICT"`, `"conflict_reason":"listed_requires_review"`} {
+			if !strings.Contains(rec.Body.String(), want) {
+				t.Fatalf("body missing %s: %s", want, rec.Body.String())
+			}
+		}
+	})
+}
