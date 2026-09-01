@@ -776,3 +776,64 @@ func indexOf(haystack, needle string) int {
 	}
 	return -1
 }
+
+// The end the whole feature exists for: before approval a colleague cannot see
+// the plugin in the market list, and after approval they can — while the author
+// can see it the entire time. Every other test in this file asserts the
+// visibility COLUMN; this one asserts the observable market behaviour the column
+// is supposed to produce, through the same List query the API serves.
+func TestApprovalIsWhatMakesAPluginVisibleToTheOrg(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private", currentVersionID: "ver-1", currentVersion: "0.9.0"})
+
+	author := tenantScope()
+	colleague := pluginrepo.Scope{CallerUID: "user-2", SpaceID: "space-a"}
+	outsider := pluginrepo.Scope{CallerUID: "user-3", SpaceID: "space-b"}
+
+	visibleTo := func(t *testing.T, sc pluginrepo.Scope) bool {
+		t.Helper()
+		items, _, err := repo.List(ctx, sc, pluginrepo.ListFilter{PlacementCode: "default"})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		for _, item := range items {
+			if item.ID == "plugin-1" {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !visibleTo(t, author) {
+		t.Fatal("the author cannot see their own private draft; the draft is unusable")
+	}
+	if visibleTo(t, colleague) {
+		t.Fatal("a private draft is already visible to the org; the review gate is open")
+	}
+
+	req := newRequest("plugin-1", "1.0.0")
+	if err := repo.InsertReviewRequest(ctx, author, req, snapshotOf(`{"plugin_name":"Frozen"}`, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	// A PENDING request must not list it — only an approved one does.
+	if visibleTo(t, colleague) {
+		t.Fatal("a pending request listed the plugin")
+	}
+
+	if _, err := repo.ApproveReview(ctx, reviewerScope(), pluginrepo.ApproveReviewParams{
+		ReviewID: req.ID, ReviewerUID: "admin-1", ReviewerName: "Adam",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !visibleTo(t, colleague) {
+		t.Fatal("an APPROVED plugin is still invisible to the org; approval did nothing")
+	}
+	if !visibleTo(t, author) {
+		t.Fatal("approval hid the plugin from its own author")
+	}
+	if visibleTo(t, outsider) {
+		t.Fatal("approval leaked the plugin into another Space")
+	}
+}
