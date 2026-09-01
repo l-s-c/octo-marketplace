@@ -50,12 +50,19 @@ type RejectReviewParams struct {
 // expert_team the membership graph IS the reviewable content, and freezing only
 // the documents would ship the reviewed manifest alongside whatever the live
 // membership happened to be when the reviewer clicked approve.
+//
+// AttachmentKeys is the frozen storage sidecar. Zip-submitted skill upgrades
+// spill binary/oversize files at submit time to content-addressed keys that
+// the live row does not reference; freezing the sidecar alongside the package
+// means approve can apply the snapshot atomically without depending on the
+// live sidecar still being correct.
 type FrozenSnapshot struct {
-	Manifest     json.RawMessage
-	Package      json.RawMessage
-	Relations    []model.PluginRelation
-	ManifestHash string
-	PluginHash   string
+	Manifest       json.RawMessage
+	Package        json.RawMessage
+	AttachmentKeys json.RawMessage
+	Relations      []model.PluginRelation
+	ManifestHash   string
+	PluginHash     string
 }
 
 // InsertReviewRequest persists a new pending request with its frozen snapshot.
@@ -137,11 +144,11 @@ func (r *Repo) InsertReviewRequest(ctx context.Context, scope Scope, req *model.
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO plugin_review_requests
 		  (review_id,plugin_id,space_id,target_scope,status,kind,version,changelog,
-		   manifest_json,plugin_json,relations_json,manifest_hash,plugin_hash,
+		   manifest_json,plugin_json,attachment_keys_json,relations_json,manifest_hash,plugin_hash,
 		   applicant_uid,applicant_name,submitted_at,created_at,updated_at)
-		  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		req.ID, req.PluginID, req.SpaceID, targetScope, string(model.ReviewStatusPending), string(req.Kind), req.Version, changelog,
-		string(snap.Manifest), string(snap.Package), string(relationsJSON), snap.ManifestHash, snap.PluginHash,
+		string(snap.Manifest), string(snap.Package), jsonColumn(snap.AttachmentKeys), string(relationsJSON), snap.ManifestHash, snap.PluginHash,
 		req.ApplicantUID, req.ApplicantName, req.SubmittedAt, req.CreatedAt, req.UpdatedAt,
 	)
 	if err != nil {
@@ -202,11 +209,11 @@ const reviewSelectBase = `SELECT rr.review_id,rr.plugin_id,rr.space_id,rr.target
         rr.submitted_at,rr.reviewed_at,
         p.plugin_name,p.plugin_type,p.icon,p.current_version`
 
-// reviewSelectSnapshot adds the three large frozen-snapshot columns. Only the
+// reviewSelectSnapshot adds the large frozen-snapshot columns. Only the
 // detail read uses it; the list query must never carry a manifest, package and
 // relation graph per row.
 const reviewSelectSnapshot = `SELECT rr.review_id,rr.plugin_id,rr.space_id,rr.target_scope,rr.status,rr.kind,rr.version,rr.changelog,
-        rr.manifest_json,rr.plugin_json,rr.relations_json,rr.manifest_hash,rr.plugin_hash,
+        rr.manifest_json,rr.plugin_json,rr.attachment_keys_json,rr.relations_json,rr.manifest_hash,rr.plugin_hash,
         rr.applicant_uid,rr.applicant_name,rr.reviewer_uid,rr.reviewer_name,rr.reason,rr.decision_source,
         rr.submitted_at,rr.reviewed_at,
         p.plugin_name,p.plugin_type,p.icon,p.current_version`
@@ -325,19 +332,19 @@ func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewPa
 	defer tx.Rollback()
 
 	var (
-		pluginID, version, kind      string
-		changelog                    sql.NullString
-		manifest, pkg, relationBytes []byte
-		manifestHash, pluginHash     string
+		pluginID, version, kind               string
+		changelog                             sql.NullString
+		manifest, pkg, attKeys, relationBytes []byte
+		manifestHash, pluginHash              string
 	)
 	err = tx.QueryRowContext(ctx,
-		`SELECT rr.plugin_id,rr.version,rr.kind,rr.changelog,rr.manifest_json,rr.plugin_json,rr.relations_json,
+		`SELECT rr.plugin_id,rr.version,rr.kind,rr.changelog,rr.manifest_json,rr.plugin_json,rr.attachment_keys_json,rr.relations_json,
 		        rr.manifest_hash,rr.plugin_hash
 		   FROM plugin_review_requests rr
 		  WHERE rr.review_id=? AND rr.status='pending' AND rr.deleted_at IS NULL
 		    AND rr.space_id=?
 		  FOR UPDATE`, p.ReviewID, scope.SpaceID).
-		Scan(&pluginID, &version, &kind, &changelog, &manifest, &pkg, &relationBytes, &manifestHash, &pluginHash)
+		Scan(&pluginID, &version, &kind, &changelog, &manifest, &pkg, &attKeys, &relationBytes, &manifestHash, &pluginHash)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, classifyMissingPending(ctx, tx, p.ReviewID, scope.SpaceID)
@@ -380,17 +387,17 @@ func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewPa
 	isFirst := model.ReviewKind(kind) == model.ReviewKindFirst && current.Visibility == model.PluginVisibilityPrivate
 	if isFirst {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE plugins SET manifest_json=?,plugin_json=?,manifest_hash=?,plugin_hash=?,visibility=?,updated_at=?
+			`UPDATE plugins SET manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,visibility=?,updated_at=?
 			  WHERE plugin_id=? AND space_id=? AND deleted_at IS NULL`,
-			string(manifest), string(pkg), manifestHash, pluginHash,
+			string(manifest), string(pkg), jsonColumn(attKeys), manifestHash, pluginHash,
 			string(model.PluginVisibilitySpace), now, pluginID, scope.SpaceID); err != nil {
 			return nil, wrapped("apply approved snapshot", err)
 		}
 	} else {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE plugins SET manifest_json=?,plugin_json=?,manifest_hash=?,plugin_hash=?,updated_at=?
+			`UPDATE plugins SET manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,updated_at=?
 			  WHERE plugin_id=? AND space_id=? AND deleted_at IS NULL`,
-			string(manifest), string(pkg), manifestHash, pluginHash, now, pluginID, scope.SpaceID); err != nil {
+			string(manifest), string(pkg), jsonColumn(attKeys), manifestHash, pluginHash, now, pluginID, scope.SpaceID); err != nil {
 			return nil, wrapped("apply approved snapshot", err)
 		}
 	}
@@ -412,11 +419,14 @@ func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewPa
 
 	// Mint the release snapshot through main's own helper: plugin_versions.version
 	// stays the auto-increment counter, and current_version takes the applicant's
-	// label. attachment_keys_json comes from the live row (the snapshot does not
-	// freeze the storage sidecar — see the divergence record).
+	// label. The snapshot carries the FROZEN attachment sidecar (zip-submitted
+	// skill upgrades spill files at submit time whose keys only exist on the
+	// request), so version history resolves correctly for every approved snapshot
+	// rather than inheriting the live row's stale keys.
 	snapshotPlugin := *current
 	snapshotPlugin.Manifest = manifest
 	snapshotPlugin.Package = pkg
+	snapshotPlugin.AttachmentKeys = attKeys
 	snapshotPlugin.ManifestHash = manifestHash
 	snapshotPlugin.PluginHash = pluginHash
 	snapshotPlugin.CurrentVersion = &version
@@ -585,28 +595,31 @@ func classifyMissingPending(ctx context.Context, tx *sql.Tx, reviewID, spaceID s
 }
 
 // RejectReview settles a pending request without touching the plugin: a private
-// draft stays private, an already-listed version stays live.
-func (r *Repo) RejectReview(ctx context.Context, scope Scope, p RejectReviewParams) error {
+// draft stays private, an already-listed version stays live. Returns the frozen
+// attachment sidecar and the live plugin's sidecar so the caller can clean up
+// any objects the submission uploaded that the live row does not reference.
+func (r *Repo) RejectReview(ctx context.Context, scope Scope, p RejectReviewParams) (json.RawMessage, json.RawMessage, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	defer tx.Rollback()
 	var pluginID string
+	var frozenKeys []byte
 	err = tx.QueryRowContext(ctx,
-		`SELECT rr.plugin_id FROM plugin_review_requests rr
+		`SELECT rr.plugin_id, rr.attachment_keys_json FROM plugin_review_requests rr
 		  WHERE rr.review_id=? AND rr.status='pending' AND rr.deleted_at IS NULL
 		    AND rr.space_id=?
-		  FOR UPDATE`, p.ReviewID, scope.SpaceID).Scan(&pluginID)
+		  FOR UPDATE`, p.ReviewID, scope.SpaceID).Scan(&pluginID, &frozenKeys)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return classifyMissingPending(ctx, tx, p.ReviewID, scope.SpaceID)
+			return nil, nil, classifyMissingPending(ctx, tx, p.ReviewID, scope.SpaceID)
 		}
-		return err
+		return nil, nil, err
 	}
 	current, err := getReviewedPluginForUpdate(ctx, tx, scope.SpaceID, pluginID)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	now := p.Now
 	if now.IsZero() {
@@ -621,44 +634,59 @@ func (r *Repo) RejectReview(ctx context.Context, scope Scope, p RejectReviewPara
 		  WHERE review_id=?`,
 		p.ReviewerUID, p.ReviewerName, p.Reason, ds, now, now, p.ReviewID)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	if err := mustAffect(res); err != nil {
-		return err
+		return nil, nil, err
 	}
 	m := Mutation{OperatorID: p.ReviewerUID, OperatorName: p.ReviewerName, RequestID: p.RequestID, Remark: strPtr("decision_source=" + ds)}
 	// before == after: a reject changes nothing about the plugin content, and the
 	// audit row exists to record who refused it and from where.
 	if err := insertAudit(ctx, tx, r.id(), now, *current, "review_reject", m, current.PluginHash, current.PluginHash); err != nil {
-		return err
+		return nil, nil, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	return frozenKeys, current.AttachmentKeys, nil
 }
 
 // CancelReview withdraws the applicant's own pending request.
 //
 // It distinguishes "already decided" (ErrConflict) from "not yours / no such
 // request" (ErrNotFound). Collapsing the two into a 404 tells an applicant whose
-// request was just approved that it vanished.
-func (r *Repo) CancelReview(ctx context.Context, scope Scope, reviewID, callerUID string) error {
+// request was just approved that it vanished. Returns the frozen attachment
+// sidecar and the live plugin's sidecar so the caller can clean up objects the
+// submission uploaded that the live row does not reference.
+func (r *Repo) CancelReview(ctx context.Context, scope Scope, reviewID, callerUID string) (json.RawMessage, json.RawMessage, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	defer tx.Rollback()
 	var status string
+	var frozenKeys []byte
+	var pluginID string
 	err = tx.QueryRowContext(ctx,
-		`SELECT status FROM plugin_review_requests
+		`SELECT status, attachment_keys_json, plugin_id FROM plugin_review_requests
 		  WHERE review_id=? AND space_id=? AND applicant_uid=? AND deleted_at IS NULL FOR UPDATE`,
-		reviewID, scope.SpaceID, callerUID).Scan(&status)
+		reviewID, scope.SpaceID, callerUID).Scan(&status, &frozenKeys, &pluginID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
+			return nil, nil, ErrNotFound
 		}
-		return err
+		return nil, nil, err
 	}
 	if model.ReviewStatus(status) != model.ReviewStatusPending {
-		return ErrConflict
+		return nil, nil, ErrConflict
+	}
+	// Load the live plugin so we can return its sidecar for key-diff cleanup.
+	// The plugin is NOT locked for update here (unlike reject/approve) because
+	// cancel does not modify the plugin row — we only need its current
+	// attachment_keys_json to know which frozen keys are still live.
+	current, err := getReviewedPluginForUpdate(ctx, tx, scope.SpaceID, pluginID)
+	if err != nil {
+		return nil, nil, err
 	}
 	now := r.now()
 	res, err := tx.ExecContext(ctx,
@@ -666,12 +694,15 @@ func (r *Repo) CancelReview(ctx context.Context, scope Scope, reviewID, callerUI
 		  WHERE review_id=? AND applicant_uid=? AND status='pending' AND deleted_at IS NULL AND space_id=?`,
 		now, now, reviewID, callerUID, scope.SpaceID)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	if err := mustAffect(res); err != nil {
-		return ErrConflict
+		return nil, nil, ErrConflict
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	return frozenKeys, current.AttachmentKeys, nil
 }
 
 // --- Card-action receipts ---------------------------------------------------
@@ -713,18 +744,18 @@ func (r *Repo) InsertCardActionReceipt(ctx context.Context, rec *model.CardActio
 func scanReviewRequest(scan func(dest ...any) error, withSnapshot bool) (*model.PluginReviewRequest, error) {
 	rr := &model.PluginReviewRequest{}
 	var (
-		targetScope, st, knd     string
-		cl, rvu, rvn, rsn, ds    sql.NullString
-		rat                      sql.NullTime
-		pn, pt, pi, cv           sql.NullString
-		mh, ph                   string
-		au, an                   string
-		sa                       time.Time
-		manifest, pkg, relations []byte
+		targetScope, st, knd              string
+		cl, rvu, rvn, rsn, ds             sql.NullString
+		rat                               sql.NullTime
+		pn, pt, pi, cv                    sql.NullString
+		mh, ph                            string
+		au, an                            string
+		sa                                time.Time
+		manifest, pkg, attKeys, relations []byte
 	)
 	base := []any{&rr.ID, &rr.PluginID, &rr.SpaceID, &targetScope, &st, &knd, &rr.Version, &cl}
 	if withSnapshot {
-		base = append(base, &manifest, &pkg, &relations)
+		base = append(base, &manifest, &pkg, &attKeys, &relations)
 	}
 	base = append(base, &mh, &ph, &au, &an, &rvu, &rvn, &rsn, &ds, &sa, &rat, &pn, &pt, &pi, &cv)
 	if err := scan(base...); err != nil {
@@ -748,6 +779,7 @@ func scanReviewRequest(scan func(dest ...any) error, withSnapshot bool) (*model.
 	if withSnapshot {
 		rr.ManifestJSON = manifest
 		rr.PluginJSON = pkg
+		rr.AttachmentKeys = attKeys
 		rr.RelationsJSON = relations
 	}
 	if cl.Valid {

@@ -553,7 +553,7 @@ and resolving them as the reviewer 404s every container approval.
 **Not frozen: `attachment_keys_json`.** The storage sidecar stays whatever the
 live row has. A reupload between submit and approve therefore pairs the frozen
 package with the new object keys. Same family as item 7; closing it needs the
-draft/live split.
+draft/live split. **SUPERSEDED by item 22 — the sidecar is frozen now.**
 
 ### 5. Approving a container promotes its embedded children.
 
@@ -726,6 +726,8 @@ the upsert-visibility one.
   "plugin_id": "…",              // required
   "version":   "2.0.0",          // required, applicant-typed label
   "changelog": "…",              // optional, <= 1000 runes
+  "parse_task_id": "…",          // optional, skill-only; see item 21.
+                                 // Mutually exclusive with manifest_json/plugin_json.
   "manifest_json": { … },        // see below
   "plugin_json":   { … },        // see below
   "relations": [                 // optional; see semantics below
@@ -763,12 +765,12 @@ the upsert-visibility one.
   checks the fixture row is unchanged, and the MySQL test reads every content
   column plus the relation set before and after and requires them identical.
 
-Storage attachments: because the snapshot does not freeze
-`attachment_keys_json` (item 4), the submitted package must reference exactly the
+Storage attachments: a **declared-JSON** submission must reference exactly the
 object keys the live row already holds — `reinjectUpdateStorageKeys` restores them
 for unchanged storage content, and a sidecar that differs afterwards is a 400.
-Introducing or changing a storage attachment therefore goes through the
-import/reupload path, which owns object lifecycle.
+Introducing or changing a storage attachment goes through the zip path
+(`parse_task_id`, item 21) or the import/reupload path, which own object
+lifecycle.
 
 Relation graphs: a reviewed graph may add **standalone** catalog targets and drop
 existing edges, but cannot mint new EMBEDDED children — `lockRelationTargets`
@@ -820,3 +822,126 @@ Unchanged in shape, but it now genuinely matters for upgrades: the `upgrade`
 branch applies the frozen manifest, package, hashes, version label AND relation
 graph. `TestUpgradeSubmitLeavesTheListedRowUntouchedAndApproveSwapsIt` drives the
 whole sequence against MySQL and fails if either half moves at the wrong time.
+
+## Product amendment (owner, 2026-09-01): a skill upgrade may be a zip
+
+Items 1–20 stand except where noted below. This section closes the gap item 4 and
+item 18 both left open: a review submission could not introduce or change a
+storage attachment, so the "发布新版本" flow could not accept a re-uploaded zip.
+
+### 21. Submit accepts `parse_task_id`, and materializes the package server-side.
+
+`POST /plugins/review_requests` now takes content one of **three** mutually
+exclusive ways:
+
+| input | who uses it | what happens |
+| --- | --- | --- |
+| `parse_task_id` | skill "发布新版本" with a fresh zip | the package is built server-side from the completed parse task |
+| `manifest_json` + `plugin_json` | connectors, experts, expert teams, and skill text edits with no reupload | declared JSON, canonicalized as in item 18 |
+| neither | `kind=first` only | the private draft row is snapshotted |
+
+`parse_task_id` together with `manifest_json` is a 400
+(`details.field="parse_task_id"`, `reason="mutually_exclusive_with_manifest_json"`).
+The browser picks one door; sending both would leave which one wins to the
+server, and the two produce different sidecars.
+
+The materialization reuses `buildImportedSkillWrite` — the same code
+`/plugins/import` runs — so the zip is size- and SHA-256-verified, frontmatter is
+rewritten, and binary/oversize files are spilled to content-addressed keys in the
+Space's managed prefix through `buildSkillAttachmentTree`. Nothing about archive
+safety is reimplemented on this path.
+
+`parse_task_id` is **skill-only**: a parse task is the product of a skill zip
+upload and nothing else. Supplying one for a connector/expert/expert_team is a
+400 (`reason="only_valid_for_skill_plugins"`).
+
+**Identity is pinned to the live row, not to the zip.** `importFields` is built
+from the existing plugin (`plugin_name`, tags, category, icon), because this
+endpoint reviews CONTENT, not market metadata — the same rule a package-only
+reupload already follows. A zip whose declared name disagrees with the live row is
+rejected up front (`reason="name_mismatch"`) rather than failing later inside
+`CanonicalizeManifest`, where the message would not say which side was wrong.
+
+**Consume before materializing, release on failure.** `MarkParseTaskConsumed` is
+the same optimistic CAS `Import` uses and runs *before* the download, so two
+concurrent submits of one task cannot both proceed. Materialization or insert
+failure then releases the task (best-effort, detached context) and deletes the
+objects the attempt uploaded. A failure *after* the row commits deliberately
+releases nothing: the request is persisted and the keys it references are live.
+`skill_id` is passed as `""` because the "发布新版本" upload is not bound to a
+plugin — binding happens at approve, not submit.
+
+### 22. `attachment_keys_json` IS now frozen. Item 4's last paragraph is superseded.
+
+Migration `20260901-01-plugin-review-attachment-keys.sql` adds a JSON-NULL
+`attachment_keys_json` to `plugin_review_requests`, mirroring
+`plugins.attachment_keys_json` exactly. Without it, approving a zip-submitted
+review would apply a frozen package whose `storage_uri` paths the live row's
+sidecar had no entry for — the reviewer approves one set of bytes and the org
+receives another, or a 404.
+
+The sidecar is now part of the snapshot on every path: the zip path stores the
+keys it just uploaded, the declared-JSON path stores the live row's keys, and the
+draft-snapshot path clones them. `ApproveReview` writes
+`plugins.attachment_keys_json` from the frozen value instead of leaving whatever
+the live row held.
+
+Declared-JSON submissions still may **not** introduce or change a storage
+attachment — that is a 400 (`field="plugin_json"`,
+`reason="storage_attachment_change_requires_zip_upload"`), because a raw upsert
+cannot mint storage content either, and the object lifecycle belongs to the
+import path. The zip path is how storage content changes.
+
+### 23. Validation errors name the field, not `body`.
+
+`ReviewFieldError{Field, Reason, Err}` is a typed error the review service
+returns and `writeServiceError` unwraps with `errors.As` into
+`details: {field, reason}`. Previously every cause — bad version label, overlong
+changelog, half a document pair, an unparseable manifest — collapsed to
+`{"field":"body","reason":"invalid"}`, which told the browser nothing it could
+put next to an input. Reasons in use: `invalid`, `too_long`,
+`manifest_and_package_required_together`,
+`mutually_exclusive_with_manifest_json`, `only_valid_for_skill_plugins`,
+`name_mismatch`, `invalid_or_consumed`, `already_consumed`, `invalid_package`,
+`storage_attachment_change_requires_zip_upload`. The wire code stays the fixed
+`VALIDATION_ERROR`; only `details` gained precision.
+
+`SubmitReview` also declares `413` now, because the zip path can exceed the
+upload bound.
+
+### 24. An unrecognized card decision is a 400 to the DLQ, not a 200 `forbidden`.
+
+`ErrCardBadDecision` splits off from `ErrReviewInvalid`. The distinction is the
+same reliability argument as item 13, one level up:
+
+- **`ErrCardBadDecision`** — a decision value outside `approve`/`deny`, or a
+  missing `event_id`/`operator_uid`/`review_id`. A well-formed card always
+  carries these, so this is permanent protocol drift between marketplace and
+  octo-server. It returns **400**, which octo-server routes to the DLQ where
+  `tools/card-action-dlq` makes it visible. The old behaviour answered
+  `forbidden/pending` — a 200 that octo-server acks and never redelivers — so
+  every admin whose click hit a vocabulary mismatch saw 无权限 and the event was
+  silently destroyed.
+- **`ErrReviewInvalid`** — a handled refusal, e.g. the operator is no longer a
+  reviewer. Still **200** with `{"disposition":"forbidden","state":"pending"}`,
+  because the card should render "no permission" and stop retrying.
+
+### 25. Reject and cancel garbage-collect the submission's objects.
+
+`RejectReview`/`CancelReview` now return `(frozenKeys, liveKeys, error)` — both
+sidecars read inside the decision transaction — and
+`cleanupOrphanedReviewObjects` deletes every frozen key the live row does not
+reference at the same path. Keys both sides share are content-addressed and still
+in use. This runs on a detached context and swallows errors: a storage failure
+must never roll back a committed decision.
+
+IM-sourced rejects deliberately skip the GC. Reaching the frozen sidecar means
+loading the snapshot, which would add a round trip to every IM deny; the orphans
+are content-addressed and deduped across versions, so the leak is bounded.
+
+**A consumed parse task stays consumed after reject or cancel.** Releasing it
+would let the exact bytes a reviewer rejected be resubmitted without a fresh
+upload, and the release is not a CAS against the request, so a quick
+upload-and-resubmit could race it and release the *new* task. Retrying means
+uploading again — which is also what the import path does for a deleted plugin.
+

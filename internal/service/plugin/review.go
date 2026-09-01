@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/notify"
 	pluginrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/plugin"
+	skillrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/skill"
 	"go.uber.org/zap"
 )
 
@@ -51,13 +53,46 @@ var (
 	// conflict, not a permission problem — the owner may change this plugin, just
 	// through a review request. Delisting it first (space -> private) also works.
 	ErrListedRequiresReview = errors.New("a listed plugin may only be changed through review")
+	// ErrReviewFieldConflict is returned when mutually exclusive submit fields are
+	// sent together (e.g. both parse_task_id and manifest_json). It maps to
+	// VALIDATION_ERROR with the conflicting field named.
+	ErrReviewFieldConflict = errors.New("review submission fields conflict")
+	// ErrReviewParseTaskType is returned when parse_task_id is supplied for a
+	// non-skill plugin. Parse tasks exist only for skill zip uploads.
+	ErrReviewParseTaskType = errors.New("parse_task_id is only valid for skill plugins")
+	// ErrReviewNameMismatch is returned when a zip-submitted snapshot carries a
+	// plugin_name that disagrees with the live row. The submission reviews
+	// content, not identity; a rename must go through an upsert after delisting.
+	ErrReviewNameMismatch = errors.New("zip package name does not match the plugin")
 )
+
+// ReviewFieldError is a validation error that names the offending field and
+// reason, so writeServiceError can surface it in details instead of collapsing
+// every cause into {"field":"body","reason":"invalid"}.
+type ReviewFieldError struct {
+	Field  string
+	Reason string
+	Err    error
+}
+
+func (e *ReviewFieldError) Error() string {
+	if e.Err != nil {
+		return e.Field + ": " + e.Err.Error()
+	}
+	return e.Field + ": " + e.Reason
+}
+
+func (e *ReviewFieldError) Unwrap() error { return e.Err }
 
 // ReviewSubmitParams is the user-supplied input for a submit.
 type ReviewSubmitParams struct {
 	PluginID  string
 	Version   string
 	Changelog string
+	// ParseTaskID, when set, materializes the reviewed package server-side from
+	// a completed skill parse task (zip upload). It is mutually exclusive with
+	// Manifest/Package.
+	ParseTaskID string
 	// Manifest and Package are the reviewed CONTENT, supplied together or not at
 	// all. REQUIRED when the plugin is already listed (kind=upgrade) and optional
 	// while it is a private draft (kind=first), where the plugin row is nobody
@@ -81,11 +116,24 @@ func (s *Service) SubmitReview(ctx context.Context, caller Caller, params Review
 	params.PluginID = strings.TrimSpace(params.PluginID)
 	params.Version = strings.TrimSpace(params.Version)
 	params.Changelog = strings.TrimSpace(params.Changelog)
+	params.ParseTaskID = strings.TrimSpace(params.ParseTaskID)
 	if params.PluginID == "" || !validVersion(params.Version) {
-		return nil, ErrReviewInvalid
+		return nil, &ReviewFieldError{Field: "version", Reason: "invalid"}
 	}
 	if utf8.RuneCountInString(params.Changelog) > maxRejectReasonRunes {
-		return nil, ErrReviewInvalid
+		return nil, &ReviewFieldError{Field: "changelog", Reason: "too_long"}
+	}
+	hasManifest := len(bytes.TrimSpace(params.Manifest)) > 0
+	hasPackage := len(bytes.TrimSpace(params.Package)) > 0
+	if hasManifest != hasPackage {
+		return nil, &ReviewFieldError{Field: "manifest_json", Reason: "manifest_and_package_required_together"}
+	}
+	hasParseTask := params.ParseTaskID != ""
+	if hasManifest && hasParseTask {
+		// parse_task_id and manifest_json/package_json are mutually exclusive: the
+		// browser picks one path (zip upload vs declared JSON) and must not send
+		// both silently.
+		return nil, &ReviewFieldError{Field: "parse_task_id", Reason: "mutually_exclusive_with_manifest_json", Err: ErrReviewFieldConflict}
 	}
 	sc := scope(caller)
 	// includeRelations: the membership graph of an expert/expert_team is part of
@@ -102,8 +150,56 @@ func (s *Service) SubmitReview(ctx context.Context, caller Caller, params Review
 	if detail.Plugin.IsEmbedded {
 		return nil, ErrNotFound
 	}
-	snap, err := s.freezeSubmission(ctx, caller, detail, params)
+	if hasParseTask && detail.Plugin.Type != model.PluginTypeSkill {
+		// Parse tasks exist only for skill zip uploads; connectors and experts
+		// carry declared JSON through manifest_json/plugin_json.
+		return nil, &ReviewFieldError{Field: "parse_task_id", Reason: "only_valid_for_skill_plugins", Err: ErrReviewParseTaskType}
+	}
+
+	// For a parse-task submission, consume the task BEFORE materializing (optimistic
+	// lock, same as Import) so two concurrent submits cannot both proceed. The
+	// materialization downloads the zip and uploads spilled objects; if anything
+	// after that fails, the task is released (best-effort) so it remains retryable.
+	// We bind to the plugin ID because MarkParseTaskConsumed uses skill_id as part
+	// of its CAS: initial uploads have skill_id="" (unbound), but for an UPGRADE of
+	// an existing listed plugin the import path would have already consumed the task
+	// against a prior plugin row. For review, the task is produced by the "发布新版本"
+	// UI flow which uploads a fresh zip without binding it to any skill_id (the
+	// binding happens at approve time, not submit), so we pass "" for skill_id to
+	// match how a fresh import does it.
+	var parseTask *skillrepo.ParseTaskRow
+	var uploadedKeys []string
+	var consumedTask bool
+	if hasParseTask {
+		if s.parseTasks == nil || s.storage == nil {
+			return nil, errors.New("plugin import is not configured")
+		}
+		parseTask, err = s.parseTasks.GetParseTask(ctx, params.ParseTaskID)
+		if err != nil {
+			return nil, fmt.Errorf("load parse task: %w", err)
+		}
+		// Ownership, Space, completion, and binding checks collapse to one error so
+		// a caller cannot probe foreign tasks. Same guard as Import.
+		if parseTask == nil || parseTask.OwnerID != caller.UID || parseTask.SpaceID != caller.SpaceID || parseTask.Status != "success" || parseTask.SkillID != "" {
+			return nil, &ReviewFieldError{Field: "parse_task_id", Reason: "invalid_or_consumed", Err: ErrInvalidParseTask}
+		}
+		// Consume first: the optimistic status flip prevents duplicate submission.
+		if err := s.parseTasks.MarkParseTaskConsumed(ctx, parseTask.ID, caller.UID, caller.SpaceID, ""); err != nil {
+			if errors.Is(err, skillrepo.ErrParseTaskAlreadyConsumed) {
+				return nil, &ReviewFieldError{Field: "parse_task_id", Reason: "already_consumed", Err: ErrInvalidParseTask}
+			}
+			return nil, fmt.Errorf("consume parse task: %w", err)
+		}
+		consumedTask = true
+	}
+	// Materialize/build snapshot. If this fails and we consumed a parse task,
+	// release it.
+	snap, err := s.freezeSubmission(ctx, caller, detail, params, parseTask, &uploadedKeys)
 	if err != nil {
+		if consumedTask {
+			_ = s.parseTasks.ReleaseConsumedParseTask(context.WithoutCancel(ctx), parseTask.ID)
+		}
+		s.deleteObjects(ctx, uploadedKeys...)
 		return nil, err
 	}
 	now := s.now()
@@ -123,10 +219,19 @@ func (s *Service) SubmitReview(ctx context.Context, caller Caller, params Review
 		req.Changelog = &params.Changelog
 	}
 	if err := s.repo.InsertReviewRequest(ctx, sc, req, snap); err != nil {
+		// Insert failed — roll back uploaded objects and release the parse task so
+		// the submission is retryable.
+		s.deleteObjects(ctx, uploadedKeys...)
+		if consumedTask {
+			_ = s.parseTasks.ReleaseConsumedParseTask(context.WithoutCancel(ctx), parseTask.ID)
+		}
 		return nil, mapStoreError(err)
 	}
 	stored, err := s.repo.GetReviewRequest(ctx, sc, req.ID, false)
 	if err != nil {
+		// Request was committed but the read-back failed. Do NOT release the parse
+		// task or delete objects — the row is already persisted. The caller will
+		// see a 500 but the data is intact.
 		return nil, mapStoreError(err)
 	}
 	s.decorateReview(ctx, stored)
@@ -144,29 +249,53 @@ func (s *Service) SubmitReview(ctx context.Context, caller Caller, params Review
 // a listed row at all.) While the plugin is a private draft the row is nobody
 // else's business, so snapshotting it is honest and content stays optional.
 //
+// Content arrives one of three ways, enforced as mutually exclusive by the
+// caller:
+//
+//   - parseTask != nil: server-side materialization from a completed skill zip
+//     parse task. Used by the browser "发布新版本" flow for skills, where the
+//     canonical package is built by expanding the uploaded zip (binary/oversize
+//     files spilled to content-addressed keys in this Space's managed prefix).
+//     Returns freshly uploaded object keys in *uploaded so callers can roll back.
+//   - hasManifest: declared JSON (manifest_json + plugin_json together). Used by
+//     connectors, experts, expert teams, and by a skill author who edits content
+//     without re-uploading a zip.
+//   - neither: snapshot the live draft row (private first-submission only).
+//
 // Submitted content goes through the SAME canonicalization an ordinary write
 // uses, so a malformed manifest is a 400 at submit rather than a surprise at
-// approve time. It is validated against the plugin's existing name/type/tags:
-// this endpoint reviews CONTENT, not market metadata.
-func (s *Service) freezeSubmission(ctx context.Context, caller Caller, detail *Detail, params ReviewSubmitParams) (pluginrepo.FrozenSnapshot, error) {
+// approve time. Declared-JSON content is validated against the plugin's existing
+// name/type/tags: this endpoint reviews CONTENT, not market metadata. For a
+// zip-materialized snapshot, the rewritten package's display name is forced to
+// match the live row (same rule as the reupload path) so CanonicalizeManifest
+// agrees and the snapshot is internally coherent — a zip carrying a different
+// name is rejected explicitly rather than failing at approve time.
+func (s *Service) freezeSubmission(ctx context.Context, caller Caller, detail *Detail, params ReviewSubmitParams, parseTask *skillrepo.ParseTaskRow, uploaded *[]string) (pluginrepo.FrozenSnapshot, error) {
 	plugin := detail.Plugin
 	hasManifest := len(bytes.TrimSpace(params.Manifest)) > 0
 	hasPackage := len(bytes.TrimSpace(params.Package)) > 0
+
+	// Zip-materialized path.
+	if parseTask != nil {
+		return s.freezeSubmissionFromParseTask(ctx, caller, detail, params, parseTask, uploaded)
+	}
+
 	if hasManifest != hasPackage {
 		// Half a document set cannot be reviewed, and silently filling the other half
 		// from the live row would reintroduce exactly the no-op above.
-		return pluginrepo.FrozenSnapshot{}, ErrReviewInvalid
+		return pluginrepo.FrozenSnapshot{}, &ReviewFieldError{Field: "manifest_json", Reason: "manifest_and_package_required_together"}
 	}
 	if !hasManifest && plugin.Visibility != model.PluginVisibilityPrivate {
 		return pluginrepo.FrozenSnapshot{}, ErrReviewContentRequired
 	}
 
 	snap := pluginrepo.FrozenSnapshot{
-		Manifest:     cloneJSON(plugin.Manifest),
-		Package:      cloneJSON(plugin.Package),
-		Relations:    detail.Relations,
-		ManifestHash: plugin.ManifestHash,
-		PluginHash:   plugin.PluginHash,
+		Manifest:       cloneJSON(plugin.Manifest),
+		Package:        cloneJSON(plugin.Package),
+		AttachmentKeys: cloneJSON(plugin.AttachmentKeys),
+		Relations:      detail.Relations,
+		ManifestHash:   plugin.ManifestHash,
+		PluginHash:     plugin.PluginHash,
 	}
 	if hasManifest {
 		// A fetch-edit-save client echoes back the GET package, whose storage
@@ -176,18 +305,19 @@ func (s *Service) freezeSubmission(ctx context.Context, caller Caller, detail *D
 		pkg := reinjectUpdateStorageKeys(params.Package, plugin.Package, plugin.AttachmentKeys)
 		docs, err := CanonicalizeDocuments(plugin.Name, plugin.Type, plugin.Tags, params.Manifest, pkg, caller.SpaceID)
 		if err != nil {
-			return pluginrepo.FrozenSnapshot{}, err
+			// CanonicalizeDocuments errors are all ErrInvalidRequest; surface as
+			// manifest_json so the client knows which field to fix.
+			return pluginrepo.FrozenSnapshot{}, &ReviewFieldError{Field: "manifest_json", Reason: "invalid", Err: err}
 		}
-		// The snapshot deliberately does not freeze the storage sidecar (no schema
-		// change), so the frozen package must reference exactly the object keys the
-		// live row already holds — otherwise approve would pair frozen attachment
-		// paths with a sidecar that has no entry for them. Introducing or changing a
-		// storage attachment therefore has to go through the import/reupload path,
-		// which owns object lifecycle.
+		// Declared-JSON submissions may not introduce new storage attachments: the
+		// client cannot mint storage content through a raw upsert (same rule as
+		// /plugins/upsert), and allowing it here would bypass the object-lifecycle
+		// ownership the import path provides. A sidecar change is rejected the same
+		// way Service.update rejects it for listed plugins.
 		if !sameAttachmentSidecar(docs.AttachmentKeys, plugin.AttachmentKeys) {
-			return pluginrepo.FrozenSnapshot{}, ErrInvalidRequest
+			return pluginrepo.FrozenSnapshot{}, &ReviewFieldError{Field: "plugin_json", Reason: "storage_attachment_change_requires_zip_upload"}
 		}
-		snap.Manifest, snap.Package = docs.Manifest, docs.Package
+		snap.Manifest, snap.Package, snap.AttachmentKeys = docs.Manifest, docs.Package, docs.AttachmentKeys
 		snap.ManifestHash, snap.PluginHash = docs.ManifestHash, docs.PluginHash
 	}
 	if params.Relations != nil {
@@ -198,6 +328,92 @@ func (s *Service) freezeSubmission(ctx context.Context, caller Caller, detail *D
 		snap.Relations = rels
 	}
 	return snap, nil
+}
+
+// freezeSubmissionFromParseTask materializes a frozen snapshot from a completed
+// skill parse task by downloading the verified zip, rewriting it under the
+// existing plugin identity, expanding into the flat attachment tree, and
+// canonicalizing through the same machinery the import path uses.
+func (s *Service) freezeSubmissionFromParseTask(ctx context.Context, caller Caller, detail *Detail, params ReviewSubmitParams, task *skillrepo.ParseTaskRow, uploaded *[]string) (pluginrepo.FrozenSnapshot, error) {
+	plugin := detail.Plugin
+
+	// Reuse buildImportedSkillWrite for the heavy lifting: it verifies the zip
+	// (size + SHA-256), rewrites frontmatter, spills binaries to content-addressed
+	// keys in this Space's managed prefix (with safeObjectSegment check and path
+	// normalization enforced by buildSkillAttachmentTree / normalizedArchivePath),
+	// and returns the WriteRequest plus freshly-uploaded keys for rollback.
+	//
+	// We build importFields that pin identity to the existing plugin row, matching
+	// how a package-only reupload preserves the row's name/description/category
+	// rather than resetting them to whatever the zip declares: this submission
+	// reviews CONTENT, not market metadata. The zip's own name is verified to
+	// AGREE with the existing manifest name below (CanonicalizeManifest enforces
+	// it), so a renamed zip is rejected rather than silently applied.
+	desc := ""
+	if d := manifestDescription(plugin.Manifest); d != "" {
+		desc = d
+	}
+	f := &importFields{
+		pluginName:       plugin.Name,
+		name:             manifestName(plugin.Manifest),
+		description:      desc,
+		version:          params.Version,
+		versionSubmitted: true, // the review submit carries an explicit label
+		tags:             decodeTagsJSON(plugin.Tags),
+		visibility:       plugin.Visibility, // ignored: review never changes visibility directly
+		categoryID:       plugin.CategoryID,
+		icon:             plugin.Icon,
+	}
+	// If the zip declares a different machine name than the live row, fail
+	// explicitly. CanonicalizeManifest below would also catch this (it checks
+	// manifest.plugin_name against plugin.Name), but surfacing it here gives a
+	// clearer error than a generic "manifest invalid".
+	zipName := strings.TrimSpace(task.ResultName)
+	if zipName != "" && zipName != f.name {
+		return pluginrepo.FrozenSnapshot{}, &ReviewFieldError{Field: "parse_task_id", Reason: "name_mismatch", Err: ErrReviewNameMismatch}
+	}
+
+	req, _, uploadedKeys, err := s.buildImportedSkillWrite(ctx, caller.SpaceID, plugin.ID, task, f, true)
+	if err != nil {
+		return pluginrepo.FrozenSnapshot{}, err
+	}
+	*uploaded = append(*uploaded, uploadedKeys...)
+
+	// buildImportedSkillWrite built a WriteRequest with its own canonicalized
+	// manifest/package/sidecar using the plugin name/type/tags we passed in.
+	// Verify the result goes through our own CanonicalizeDocuments path too (belt
+	// and suspenders — buildImportWriteRequest already calls CanonicalizeManifest
+	// but buildImportedSkillWrite also uses splitStorageKeys through buildWrite's
+	// CanonicalizeDocuments in the Create/Update flow; here we only built the
+	// WriteRequest).
+	docs, err := CanonicalizeDocuments(plugin.Name, plugin.Type, req.Tags, req.Manifest, req.Package, caller.SpaceID)
+	if err != nil {
+		s.deleteObjects(ctx, uploadedKeys...)
+		*uploaded = (*uploaded)[:0]
+		return pluginrepo.FrozenSnapshot{}, &ReviewFieldError{Field: "parse_task_id", Reason: "invalid_package", Err: err}
+	}
+
+	// Relations: if the submit body included relations, use them; otherwise
+	// inherit the live graph (same semantics as the declared-JSON path).
+	rels := detail.Relations
+	if params.Relations != nil {
+		built, err := s.buildRelations(ctx, caller, false, plugin, *params.Relations, s.now())
+		if err != nil {
+			s.deleteObjects(ctx, uploadedKeys...)
+			*uploaded = (*uploaded)[:0]
+			return pluginrepo.FrozenSnapshot{}, err
+		}
+		rels = built
+	}
+
+	return pluginrepo.FrozenSnapshot{
+		Manifest:       docs.Manifest,
+		Package:        docs.Package,
+		AttachmentKeys: docs.AttachmentKeys,
+		Relations:      rels,
+		ManifestHash:   docs.ManifestHash,
+		PluginHash:     docs.PluginHash,
+	}, nil
 }
 
 // sameAttachmentSidecar reports whether two storage sidecars hold the same
@@ -381,14 +597,23 @@ func (s *Service) RejectReview(ctx context.Context, caller Caller, reviewID, rea
 	if !s.isReviewer(caller) {
 		return ErrReviewForbidden
 	}
-	return mapStoreError(s.repo.RejectReview(ctx, scope(caller), pluginrepo.RejectReviewParams{
+	frozenKeys, liveKeys, err := s.repo.RejectReview(ctx, scope(caller), pluginrepo.RejectReviewParams{
 		ReviewID:       reviewID,
 		ReviewerUID:    caller.UID,
 		ReviewerName:   caller.Name,
 		Reason:         reason,
 		DecisionSource: model.ReviewDecisionSourceWeb,
 		RequestID:      caller.RequestID,
-	}))
+	})
+	if err != nil {
+		return mapStoreError(err)
+	}
+	// Clean up any storage objects the submission uploaded that the live row
+	// does not reference. The commit has already succeeded; this is best-effort
+	// GC on a detached context so a transient storage failure never rolls back
+	// the rejection.
+	s.cleanupOrphanedReviewObjects(context.WithoutCancel(ctx), frozenKeys, liveKeys)
+	return nil
 }
 
 // CancelReview withdraws the applicant's own pending request. It carries no role
@@ -402,7 +627,74 @@ func (s *Service) CancelReview(ctx context.Context, caller Caller, reviewID stri
 	if reviewID == "" {
 		return ErrReviewInvalid
 	}
-	return mapStoreError(s.repo.CancelReview(ctx, scope(caller), reviewID, caller.UID))
+	frozenKeys, liveKeys, err := s.repo.CancelReview(ctx, scope(caller), reviewID, caller.UID)
+	if err != nil {
+		return mapStoreError(err)
+	}
+	// Same cleanup as reject: best-effort on detached context. A frozen key
+	// that appears in the live sidecar is shared and kept; any other key was
+	// uploaded for this submission alone and is now unreachable.
+	s.cleanupOrphanedReviewObjects(context.WithoutCancel(ctx), frozenKeys, liveKeys)
+	// Parse task lifecycle: a task consumed at submit time STAYS consumed after
+	// cancel (and after reject), even though the request did not result in an
+	// approved change. This is the deliberate conservative choice:
+	//
+	//   1. MarkParseTaskConsumed is a CAS on status='success' that prevents the
+	//      same zip from being submitted twice, even against two different
+	//      plugins. Releasing it after cancel would let a rejected zip's bytes
+	//      be re-submitted without a fresh upload, which means the author does
+	//      not see the result of the edits they were asked to make and the
+	//      reviewer has no guarantee the package they rejected is not the one
+	//      that ships.
+	//   2. The alternative (release on reject/cancel) makes the cancellation
+	//      race with a second submission of the same task: a release is not a
+	//      CAS against the request_id, so if the author quickly uploads a new
+	//      zip and submits while the old rejection's cleanup is running, we
+	//      could release the NEW task by mistake.
+	//   3. Object storage cost for the unreferenced zip is bounded by the
+	//      upload TTL (the parse-task cleanup in the skill service already
+	//      garbage-collects file_url objects for consumed/failed tasks). The
+	//      spilled attachment keys are cleaned up above.
+	//
+	// This matches the import path's behavior: a successfully-imported-then-
+	// deleted plugin does not release its parse task either. The author always
+	// uploads a fresh zip to retry.
+	return nil
+}
+
+// cleanupOrphanedReviewObjects deletes object keys in the frozen sidecar that
+// the live (post-decision) plugin row does NOT reference. Called after reject
+// or cancel to clean up files spilled at submit time. Keys that both sides
+// reference are content-addressed and still live; keys only in the frozen
+// snapshot were uploaded for this submission and are now unreachable.
+//
+// Both sidecars are read by the repository inside the decision transaction and
+// handed back afterwards. Reject and cancel leave the plugin row untouched, so
+// liveKeys is the plugin's current sidecar and the comparison never races a
+// concurrent write.
+//
+// This runs on a detached context and errors are silently ignored: a storage
+// failure must not roll back an already-committed decision.
+func (s *Service) cleanupOrphanedReviewObjects(ctx context.Context, frozenKeys json.RawMessage, liveKeys json.RawMessage) {
+	frozen := attachmentKeyMap(frozenKeys)
+	live := attachmentKeyMap(liveKeys)
+	if len(frozen) == 0 {
+		return
+	}
+	var orphaned []string
+	for path, key := range frozen {
+		if key == "" {
+			continue
+		}
+		if liveKey, ok := live[path]; ok && liveKey == key {
+			// Same key referenced by live row — content-addressed, still in use.
+			continue
+		}
+		orphaned = append(orphaned, key)
+	}
+	if len(orphaned) > 0 {
+		s.deleteObjects(ctx, orphaned...)
+	}
 }
 
 // --- card protocol ------------------------------------------------------------
@@ -449,6 +741,18 @@ func cardState(status model.ReviewStatus) string {
 	}
 }
 
+var (
+	// ErrCardBadDecision is returned from DecideReviewFromCard when the decision
+	// value is not one of the handled vocabulary ("approve"/"deny"). It is
+	// distinct from ErrReviewInvalid (which covers missing fields / bad review_id)
+	// because an unrecognized decision represents a permanent protocol drift —
+	// a vocabulary mismatch between this service and octo-server — and must be
+	// surfaced as a malformed payload (400 → DLQ) rather than acked as
+	// "forbidden" (which would render every admin click as 无权限 and stop
+	// retries silently).
+	ErrCardBadDecision = errors.New("unrecognized card decision value")
+)
+
 // DecideReviewFromCard is the IM-callback entry: idempotency, operator
 // re-verification, and the decision itself.
 //
@@ -457,13 +761,26 @@ func cardState(status model.ReviewStatus) string {
 // it into a 5xx. Keeping that distinction is the whole reliability story: a
 // forbidden/conflict/not_found body is acked and never redelivered, so nothing
 // that might succeed later may be reported that way.
+//
+// Missing/invalid review_id, empty event_id or operator_uid are treated as
+// malformed payloads (ErrCardBadDecision) rather than authorization failures,
+// because a well-formed card always carries these fields. A genuinely
+// unrecognized decision value also returns ErrCardBadDecision: the caller maps
+// it to 400 DLQ instead of 200 forbidden.
 func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID, decision, reviewID string) (*CardActionResult, error) {
 	eventID = strings.TrimSpace(eventID)
 	operatorUID = strings.TrimSpace(operatorUID)
 	reviewID = strings.TrimSpace(reviewID)
 	decision = strings.TrimSpace(decision)
-	if eventID == "" || operatorUID == "" || reviewID == "" || (decision != "approve" && decision != "deny") {
-		return nil, ErrReviewInvalid
+	// Field presence: a signed but missing review_id or operator_uid is a
+	// malformed payload, not a permission problem.
+	if eventID == "" || operatorUID == "" || reviewID == "" {
+		return nil, ErrCardBadDecision
+	}
+	if decision != "approve" && decision != "deny" {
+		// Unrecognized decision vocabulary: DLQ the event instead of silently
+		// acking as "forbidden" so protocol drift is loud, not silent.
+		return nil, ErrCardBadDecision
 	}
 	// Idempotency first: a redelivered event must replay the stored answer
 	// verbatim rather than re-running the decision.
@@ -517,7 +834,7 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 		})
 		state = cardStateApproved
 	} else {
-		applyErr = s.repo.RejectReview(ctx, adminScope, pluginrepo.RejectReviewParams{
+		_, _, applyErr = s.repo.RejectReview(ctx, adminScope, pluginrepo.RejectReviewParams{
 			ReviewID:       reviewID,
 			ReviewerUID:    operatorUID,
 			ReviewerName:   operatorUID,
@@ -531,6 +848,11 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 		// (or a web decision) already settled this request. Report the authoritative
 		// terminal state so the card renders correctly, rather than returning 5xx
 		// and having the event retried into the DLQ.
+		// NOTE: IM-side rejects do not GC objects; the frozen keys are only reachable
+		// by loading the snapshot, and doing that inside the card callback adds a
+		// round trip to every IM deny. The web RejectReview handles GC; orphaned
+		// objects from IM rejects are bounded (content-addressed, deduped across
+		// versions) and acceptable.
 		mapped := mapStoreError(applyErr)
 		if errors.Is(mapped, ErrConflict) || errors.Is(mapped, ErrNotFound) {
 			return s.cardConflict(ctx, req), nil
@@ -647,4 +969,15 @@ func frozenReadme(pkg, manifest json.RawMessage) string {
 		}
 	}
 	return manifestDescription(manifest)
+}
+
+// decodeTagsJSON decodes a tags_json column (a JSON array of strings) into a
+// []string. Used when building importFields for a review submission from an
+// existing plugin row.
+func decodeTagsJSON(raw json.RawMessage) []string {
+	var out []string
+	if len(raw) == 0 || json.Unmarshal(raw, &out) != nil {
+		return []string{}
+	}
+	return out
 }

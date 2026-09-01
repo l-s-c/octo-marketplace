@@ -232,7 +232,7 @@ func TestSubmitVersionLabelReuseRules(t *testing.T) {
 	if err := repo.InsertReviewRequest(ctx, tenantScope(), first, snapshotOf(`{"a":1}`, `{"b":2}`, nil)); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.RejectReview(ctx, reviewerScope(), pluginrepo.RejectReviewParams{
+	if _, _, err := repo.RejectReview(ctx, reviewerScope(), pluginrepo.RejectReviewParams{
 		ReviewID: first.ID, ReviewerUID: "admin-1", ReviewerName: "Adam", Reason: "needs docs",
 	}); err != nil {
 		t.Fatal(err)
@@ -244,7 +244,7 @@ func TestSubmitVersionLabelReuseRules(t *testing.T) {
 		t.Fatalf("a rejected label was not reusable: %v", err)
 	}
 	// Cancel it and reuse again.
-	if err := repo.CancelReview(ctx, tenantScope(), second.ID, "user-1"); err != nil {
+	if _, _, err := repo.CancelReview(ctx, tenantScope(), second.ID, "user-1"); err != nil {
 		t.Fatal(err)
 	}
 	third := newRequest("plugin-1", "1.0.0")
@@ -479,7 +479,7 @@ func TestRejectLeavesThePluginUntouched(t *testing.T) {
 	if err := repo.InsertReviewRequest(ctx, tenantScope(), req, snapshotOf(`{"plugin_name":"Frozen"}`, `{"attachments":[]}`, nil)); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.RejectReview(ctx, reviewerScope(), pluginrepo.RejectReviewParams{
+	if _, _, err := repo.RejectReview(ctx, reviewerScope(), pluginrepo.RejectReviewParams{
 		ReviewID: req.ID, ReviewerUID: "admin-1", ReviewerName: "Adam", Reason: "needs docs",
 	}); err != nil {
 		t.Fatal(err)
@@ -519,18 +519,18 @@ func TestCancelIsApplicantOnlyAndConflictsWhenDecided(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Someone else cannot cancel it, and gets no hint that it exists.
-	if err := repo.CancelReview(ctx, tenantScope(), req.ID, "user-9"); !errors.Is(err, pluginrepo.ErrNotFound) {
+	if _, _, err := repo.CancelReview(ctx, tenantScope(), req.ID, "user-9"); !errors.Is(err, pluginrepo.ErrNotFound) {
 		t.Fatalf("cancel by a non-applicant = %v, want ErrNotFound", err)
 	}
 	// Neither can a caller in another Space.
-	if err := repo.CancelReview(ctx, pluginrepo.Scope{CallerUID: "user-1", SpaceID: "space-b"}, req.ID, "user-1"); !errors.Is(err, pluginrepo.ErrNotFound) {
+	if _, _, err := repo.CancelReview(ctx, pluginrepo.Scope{CallerUID: "user-1", SpaceID: "space-b"}, req.ID, "user-1"); !errors.Is(err, pluginrepo.ErrNotFound) {
 		t.Fatalf("cross-Space cancel = %v, want ErrNotFound", err)
 	}
-	if err := repo.CancelReview(ctx, tenantScope(), req.ID, "user-1"); err != nil {
+	if _, _, err := repo.CancelReview(ctx, tenantScope(), req.ID, "user-1"); err != nil {
 		t.Fatalf("applicant cancel: %v", err)
 	}
 	// Cancelling twice, or cancelling after a decision, is a conflict.
-	if err := repo.CancelReview(ctx, tenantScope(), req.ID, "user-1"); !errors.Is(err, pluginrepo.ErrConflict) {
+	if _, _, err := repo.CancelReview(ctx, tenantScope(), req.ID, "user-1"); !errors.Is(err, pluginrepo.ErrConflict) {
 		t.Fatalf("second cancel = %v, want ErrConflict", err)
 	}
 }
@@ -550,7 +550,7 @@ func TestDecisionsAreSpaceScoped(t *testing.T) {
 	if _, err := repo.ApproveReview(ctx, foreign, pluginrepo.ApproveReviewParams{ReviewID: req.ID, ReviewerUID: "admin-2"}); !errors.Is(err, pluginrepo.ErrNotFound) {
 		t.Fatalf("cross-Space approve = %v, want ErrNotFound", err)
 	}
-	if err := repo.RejectReview(ctx, foreign, pluginrepo.RejectReviewParams{ReviewID: req.ID, ReviewerUID: "admin-2", Reason: "no"}); !errors.Is(err, pluginrepo.ErrNotFound) {
+	if _, _, err := repo.RejectReview(ctx, foreign, pluginrepo.RejectReviewParams{ReviewID: req.ID, ReviewerUID: "admin-2", Reason: "no"}); !errors.Is(err, pluginrepo.ErrNotFound) {
 		t.Fatalf("cross-Space reject = %v, want ErrNotFound", err)
 	}
 	var status, visibility string
@@ -589,7 +589,7 @@ func TestConcurrentDecisionsProduceOneWinner(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		errs[1] = repo.RejectReview(ctx, pluginrepo.Scope{CallerUID: "admin-2", SpaceID: "space-a"},
+		_, _, errs[1] = repo.RejectReview(ctx, pluginrepo.Scope{CallerUID: "admin-2", SpaceID: "space-a"},
 			pluginrepo.RejectReviewParams{ReviewID: req.ID, ReviewerUID: "admin-2", ReviewerName: "Ada", Reason: "no"})
 	}()
 	wg.Wait()
@@ -645,7 +645,7 @@ func TestDecidingASettledRequestConflictsAndAMissingOneIsNotFound(t *testing.T) 
 	if _, err := repo.ApproveReview(ctx, reviewerScope(), pluginrepo.ApproveReviewParams{ReviewID: req.ID, ReviewerUID: "admin-1", ReviewerName: "Adam"}); !errors.Is(err, pluginrepo.ErrConflict) {
 		t.Fatalf("re-approve = %v, want ErrConflict", err)
 	}
-	if err := repo.RejectReview(ctx, reviewerScope(), pluginrepo.RejectReviewParams{ReviewID: req.ID, ReviewerUID: "admin-1", Reason: "no"}); !errors.Is(err, pluginrepo.ErrConflict) {
+	if _, _, err := repo.RejectReview(ctx, reviewerScope(), pluginrepo.RejectReviewParams{ReviewID: req.ID, ReviewerUID: "admin-1", Reason: "no"}); !errors.Is(err, pluginrepo.ErrConflict) {
 		t.Fatalf("reject after approve = %v, want ErrConflict", err)
 	}
 	if _, err := repo.ApproveReview(ctx, reviewerScope(), pluginrepo.ApproveReviewParams{ReviewID: "review-nope", ReviewerUID: "admin-1"}); !errors.Is(err, pluginrepo.ErrNotFound) {

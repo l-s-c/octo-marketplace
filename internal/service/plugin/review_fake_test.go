@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/notify"
@@ -114,16 +115,16 @@ func (f *fakeStore) ApproveReview(_ context.Context, s pluginrepo.Scope, p plugi
 	return f.review.approved, nil
 }
 
-func (f *fakeStore) RejectReview(_ context.Context, _ pluginrepo.Scope, p pluginrepo.RejectReviewParams) error {
+func (f *fakeStore) RejectReview(_ context.Context, _ pluginrepo.Scope, p pluginrepo.RejectReviewParams) (json.RawMessage, json.RawMessage, error) {
 	f.review.rejectParams = p
-	return f.review.rejectErr
+	return nil, nil, f.review.rejectErr
 }
 
-func (f *fakeStore) CancelReview(_ context.Context, s pluginrepo.Scope, reviewID, callerUID string) error {
+func (f *fakeStore) CancelReview(_ context.Context, s pluginrepo.Scope, reviewID, callerUID string) (json.RawMessage, json.RawMessage, error) {
 	f.review.cancelScope = s
 	f.review.cancelReviewID = reviewID
 	f.review.cancelUID = callerUID
-	return f.review.cancelErr
+	return nil, nil, f.review.cancelErr
 }
 
 func (f *fakeStore) GetReviewRequestAnySpace(_ context.Context, _ string) (*model.PluginReviewRequest, error) {

@@ -152,10 +152,20 @@ func (h *CardActionHandler) Decide(c *gin.Context) {
 	result, err := h.svc.DecideReviewFromCard(c.Request.Context(), eventID,
 		body.OperatorUID, body.Decision, strings.TrimSpace(reviewID))
 	if err != nil {
+		if errors.Is(err, pluginsvc.ErrCardBadDecision) {
+			// A malformed payload (unrecognized decision, missing review_id,
+			// empty operator_uid): permanently broken. Return 400 so octo-server
+			// routes the event to the DLQ instead of acking it as 无权限, which
+			// would silently discard a real admin's click every time the
+			// vocabulary drifts between this service and octo-server.
+			c.JSON(http.StatusBadRequest, gin.H{"error": "malformed decision payload"})
+			return
+		}
 		if errors.Is(err, pluginsvc.ErrReviewInvalid) {
-			// Well-formed but not actionable (unknown decision value, missing
-			// review_id/operator_uid). Report it in-band as a refusal so the card
-			// renders a terminal state instead of the event being retried.
+			// A decision that failed validation for a handled reason (e.g. the
+			// operator is not a reviewer). This is a HANDLED refusal: 200 with
+			// a typed body so the card renders "no permission" and stops
+			// redelivery.
 			c.JSON(http.StatusOK, pluginsvc.CardActionResult{Disposition: "forbidden", State: "pending"})
 			return
 		}

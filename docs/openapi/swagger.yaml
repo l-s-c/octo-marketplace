@@ -1853,6 +1853,8 @@ components:
           type: string
         manifest_json:
           type: object
+        parse_task_id:
+          type: string
         plugin_id:
           type: string
         plugin_json:
@@ -5673,14 +5675,16 @@ paths:
       tags:
       - plugin
     post:
-      description: Freezes the reviewed content under a caller-supplied version label
-        and queues it for Space owner/admin approval. manifest_json and plugin_json
-        are supplied together and are REQUIRED once the plugin is listed to the org;
-        while it is a private draft they may be omitted and the draft row is snapshotted.
-        Submitting NEVER changes the plugin row — the listed content only changes
-        when a reviewer approves. Only the plugin owner may submit, only one request
-        per plugin may be pending, and a version label already published for that
-        plugin is refused.
+      description: 'Freezes the reviewed content under a caller-supplied version label
+        and queues it for Space owner/admin approval. Content is supplied one of three
+        ways: (1) parse_task_id for a skill zip upload processed server-side, materializing
+        the package exactly as /plugins/import does; (2) manifest_json and plugin_json
+        together for declared JSON documents (connectors, experts, expert teams, or
+        a skill text edit without reupload); (3) neither, which snapshots the live
+        draft row and is valid only while the plugin is private. Submitting NEVER
+        changes the plugin row — the listed content only changes when a reviewer approves.
+        Only the plugin owner may submit, only one request per plugin may be pending,
+        and a version label already published for that plugin is refused.'
       operationId: plugin.review_request.create
       requestBody:
         content:
@@ -5705,8 +5709,9 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: 'VALIDATION_ERROR: manifest_json/plugin_json are required for
-            an already-listed plugin'
+          description: 'VALIDATION_ERROR: missing/invalid fields; parse_task_id is
+            mutually exclusive with manifest_json and is only valid for skills; listed
+            plugins require content'
         '401':
           content:
             application/json:
@@ -5732,6 +5737,12 @@ paths:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: 'CONFLICT: a request is already pending, or the version label
             is already published'
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: PAYLOAD_TOO_LARGE
         '429':
           content:
             application/json:

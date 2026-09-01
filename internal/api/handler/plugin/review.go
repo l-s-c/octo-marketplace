@@ -79,12 +79,19 @@ type reviewRequestResponse struct {
 
 // reviewSubmitRequest is the submit body.
 //
-// manifest_json / plugin_json are the reviewed CONTENT and are supplied together
-// or not at all. They are REQUIRED when the plugin is already listed to the org
-// (kind=upgrade): a listed plugin's live row is what the Space is already
-// reading, so freezing it would make the review a formality over content that
-// already shipped. While the plugin is a private draft they may be omitted and
-// the draft row is snapshotted.
+// Content arrives one of three mutually-exclusive ways:
+//
+//   - parse_task_id: server-side materialization from a completed skill zip
+//     parse task. This is how the browser "发布新版本" flow submits a skill
+//     upgrade when the author uploaded a new zip. The canonical package is
+//     built server-side by expanding the zip exactly as /plugins/import does;
+//     binary/oversize files are spilled to content-addressed object keys. Only
+//     valid for skill plugins.
+//   - manifest_json + plugin_json together: declared JSON documents. Used by
+//     connectors, experts, expert teams, and by skill authors who edit content
+//     without re-uploading a zip.
+//   - neither: snapshot the live draft row (private first-submission only;
+//     listed plugins require content).
 //
 // relations uses the same target-state shape and semantics as /plugins/upsert:
 // present (even empty) replaces the reviewed graph, ABSENT inherits the plugin's
@@ -94,6 +101,7 @@ type reviewSubmitRequest struct {
 	PluginID     string             `json:"plugin_id"`
 	Version      string             `json:"version"`
 	Changelog    string             `json:"changelog,omitempty"`
+	ParseTaskID  string             `json:"parse_task_id,omitempty"`
 	ManifestJSON json.RawMessage    `json:"manifest_json,omitempty" swaggertype:"object"`
 	PluginJSON   json.RawMessage    `json:"plugin_json,omitempty" swaggertype:"object"`
 	Relations    *[]relationRequest `json:"relations,omitempty"`
@@ -137,7 +145,7 @@ func reviewDTO(r *model.PluginReviewRequest) reviewRequestResponse {
 // SubmitReview submits a plugin for Space visibility review.
 //
 // @Summary Submit a plugin for Space review
-// @Description Freezes the reviewed content under a caller-supplied version label and queues it for Space owner/admin approval. manifest_json and plugin_json are supplied together and are REQUIRED once the plugin is listed to the org; while it is a private draft they may be omitted and the draft row is snapshotted. Submitting NEVER changes the plugin row — the listed content only changes when a reviewer approves. Only the plugin owner may submit, only one request per plugin may be pending, and a version label already published for that plugin is refused.
+// @Description Freezes the reviewed content under a caller-supplied version label and queues it for Space owner/admin approval. Content is supplied one of three ways: (1) parse_task_id for a skill zip upload processed server-side, materializing the package exactly as /plugins/import does; (2) manifest_json and plugin_json together for declared JSON documents (connectors, experts, expert teams, or a skill text edit without reupload); (3) neither, which snapshots the live draft row and is valid only while the plugin is private. Submitting NEVER changes the plugin row — the listed content only changes when a reviewer approves. Only the plugin owner may submit, only one request per plugin may be pending, and a version label already published for that plugin is refused.
 // @Tags plugin
 // @ID plugin.review_request.create
 // @Accept json
@@ -145,11 +153,12 @@ func reviewDTO(r *model.PluginReviewRequest) reviewRequestResponse {
 // @Security Bearer
 // @Param payload body reviewSubmitRequest true "Submission"
 // @Success 200 {object} apiresponse.Data[reviewRequestResponse]
-// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR: manifest_json/plugin_json are required for an already-listed plugin"
+// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR: missing/invalid fields; parse_task_id is mutually exclusive with manifest_json and is only valid for skills; listed plugins require content"
 // @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 409 {object} apiresponse.Error "CONFLICT: a request is already pending, or the version label is already published"
+// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
 // @Failure 429 {object} apiresponse.Error "RATE_LIMITED"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /plugins/review_requests [post]
@@ -164,11 +173,12 @@ func (h *Handler) SubmitReview(c *gin.Context) {
 		return
 	}
 	params := pluginsvc.ReviewSubmitParams{
-		PluginID:  body.PluginID,
-		Version:   body.Version,
-		Changelog: body.Changelog,
-		Manifest:  body.ManifestJSON,
-		Package:   body.PluginJSON,
+		PluginID:    body.PluginID,
+		Version:     body.Version,
+		Changelog:   body.Changelog,
+		ParseTaskID: body.ParseTaskID,
+		Manifest:    body.ManifestJSON,
+		Package:     body.PluginJSON,
 	}
 	if body.Relations != nil {
 		rels := make([]pluginsvc.RelationRequest, 0, len(*body.Relations))

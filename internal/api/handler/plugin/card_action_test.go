@@ -197,12 +197,13 @@ func TestCardActionReturnsRetryableStatusOnFault(t *testing.T) {
 	}
 }
 
-// A well-formed but unactionable payload is a HANDLED outcome: 200 with a typed
-// refusal, so the event is acked instead of retried into the DLQ.
-func TestCardActionReportsUnactionablePayloadInBand(t *testing.T) {
+// A well-formed but forbidden payload (operator is not a reviewer) is a HANDLED
+// outcome: 200 with a typed "forbidden" refusal, so the card renders and the
+// event is acked instead of retried.
+func TestCardActionReportsForbiddenPayloadInBand(t *testing.T) {
 	svc := &fakeCardActionService{err: pluginsvc.ErrReviewInvalid}
 	now := time.Unix(1784073600, 0)
-	body := cardBody("8", "obliterate", "admin-1", "review-1")
+	body := cardBody("8", "approve", "member-1", "review-1")
 	rec := httptest.NewRecorder()
 	cardEngine(t, svc, cardSecret, now).ServeHTTP(rec, signedCardRequest(t, body, now, "8"))
 	if rec.Code != http.StatusOK {
@@ -214,6 +215,20 @@ func TestCardActionReportsUnactionablePayloadInBand(t *testing.T) {
 	}
 	if out.Disposition != "forbidden" || out.State != "pending" {
 		t.Fatalf("result = %+v", out)
+	}
+}
+
+// An unrecognized decision value is a permanently malformed payload (protocol
+// drift between marketplace and octo-server): the handler must return 400 so
+// the event is routed to the DLQ instead of being silently acked as "forbidden".
+func TestCardActionBadDecisionGoesToDLQ(t *testing.T) {
+	svc := &fakeCardActionService{err: pluginsvc.ErrCardBadDecision}
+	now := time.Unix(1784073600, 0)
+	body := cardBody("9", "obliterate", "admin-1", "review-1")
+	rec := httptest.NewRecorder()
+	cardEngine(t, svc, cardSecret, now).ServeHTTP(rec, signedCardRequest(t, body, now, "9"))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 so the event hits the DLQ", rec.Code)
 	}
 }
 

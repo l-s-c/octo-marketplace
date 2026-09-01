@@ -652,15 +652,33 @@ func splitQuery(values []string) []string {
 	return result
 }
 func writeServiceError(c *gin.Context, err error, operation string) {
+	var fieldErr *pluginsvc.ReviewFieldError
 	switch {
-	case errors.Is(err, pluginsvc.ErrInvalidRequest), errors.Is(err, pluginsvc.ErrReviewInvalid):
+	case errors.As(err, &fieldErr):
+		// Structured field error from the review path: surface the exact field
+		// and reason so the browser can show the user which input to fix,
+		// instead of collapsing every cause into {"field":"body","reason":"invalid"}.
+		apiresponse.Fail(c, http.StatusBadRequest, errcode.BadRequest, "request validation failed", map[string]any{"field": fieldErr.Field, "reason": fieldErr.Reason}, "Correct the request and try again.")
+	case errors.Is(err, pluginsvc.ErrInvalidRequest):
 		validation(c, "body")
+	case errors.Is(err, pluginsvc.ErrReviewInvalid):
+		validation(c, "body")
+	// A named field error from legacy paths (ErrReasonRequired) still works.
 	case errors.Is(err, pluginsvc.ErrReasonRequired):
 		validation(c, "reason")
+	// Invalid parse task for review submission: name the field.
+	case errors.Is(err, pluginsvc.ErrInvalidParseTask):
+		apiresponse.Fail(c, http.StatusBadRequest, errcode.BadRequest, "parse task is invalid or already consumed", map[string]any{"field": "parse_task_id", "reason": "invalid_or_consumed"}, "Upload a new package and try again.")
 	// An upgrade submission with no content: name the field so the client knows
 	// what to send rather than guessing at a generic "body".
 	case errors.Is(err, pluginsvc.ErrReviewContentRequired):
-		apiresponse.Fail(c, http.StatusBadRequest, errcode.BadRequest, "a listed plugin must be submitted with the reviewed content", map[string]any{"field": "manifest_json", "reason": "required"}, "Send manifest_json and plugin_json with the submission.")
+		apiresponse.Fail(c, http.StatusBadRequest, errcode.BadRequest, "a listed plugin must be submitted with the reviewed content", map[string]any{"field": "manifest_json", "reason": "required"}, "Send manifest_json and plugin_json, or parse_task_id, with the submission.")
+	// Parse task against a non-skill plugin.
+	case errors.Is(err, pluginsvc.ErrReviewParseTaskType):
+		apiresponse.Fail(c, http.StatusBadRequest, errcode.BadRequest, "parse_task_id is only valid for skill plugins", map[string]any{"field": "parse_task_id", "reason": "only_valid_for_skill_plugins"}, "Use manifest_json/plugin_json for non-skill plugins.")
+	// Zip package name mismatch.
+	case errors.Is(err, pluginsvc.ErrReviewNameMismatch):
+		apiresponse.Fail(c, http.StatusBadRequest, errcode.BadRequest, "the uploaded package name does not match the plugin", map[string]any{"field": "parse_task_id", "reason": "name_mismatch"}, "Upload a package whose name matches the existing plugin.")
 	// A state conflict, not a permission problem: the owner may change this
 	// plugin, but only through a review request (or after delisting it).
 	case errors.Is(err, pluginsvc.ErrListedRequiresReview):

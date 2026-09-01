@@ -58,10 +58,10 @@ func TestPluginReviewMigrationUpDownMySQL(t *testing.T) {
 	insertReview := func(id, status string) error {
 		_, err := database.Exec(`INSERT INTO plugin_review_requests
 			(review_id, plugin_id, space_id, status, kind, version,
-			 manifest_json, plugin_json, relations_json, manifest_hash, plugin_hash,
+			 manifest_json, plugin_json, attachment_keys_json, relations_json, manifest_hash, plugin_hash,
 			 applicant_uid, applicant_name, submitted_at, created_at, updated_at)
 			VALUES (?, 'plugin-r1', 'space-a', ?, 'first', '1.0.0',
-			        JSON_OBJECT('a', 1), JSON_OBJECT('b', 2), JSON_ARRAY(), REPEAT('a', 71), REPEAT('b', 71),
+			        JSON_OBJECT('a', 1), JSON_OBJECT('b', 2), NULL, JSON_ARRAY(), REPEAT('a', 71), REPEAT('b', 71),
 			        'user-1', 'Alice', NOW(3), NOW(3), NOW(3))`, id, status)
 		return err
 	}
@@ -105,10 +105,10 @@ func TestPluginReviewMigrationUpDownMySQL(t *testing.T) {
 	// approve path's unmarshal fail at decision time rather than at submit.
 	if _, err := database.Exec(`INSERT INTO plugin_review_requests
 		(review_id, plugin_id, space_id, status, kind, version,
-		 manifest_json, plugin_json, relations_json, manifest_hash, plugin_hash,
+		 manifest_json, plugin_json, attachment_keys_json, relations_json, manifest_hash, plugin_hash,
 		 applicant_uid, applicant_name, submitted_at, created_at, updated_at)
 		VALUES ('review-bad', 'plugin-r1', 'space-a', 'rejected', 'first', '1.0.0',
-		        JSON_OBJECT('a', 1), JSON_OBJECT('b', 2), JSON_OBJECT('not','an array'),
+		        JSON_OBJECT('a', 1), JSON_OBJECT('b', 2), NULL, JSON_OBJECT('not','an array'),
 		        REPEAT('a', 71), REPEAT('b', 71), 'user-1', 'Alice', NOW(3), NOW(3), NOW(3))`,
 	); err == nil {
 		t.Error("relations_json accepted a JSON object; the ARRAY check is missing")
@@ -129,11 +129,15 @@ func TestPluginReviewMigrationUpDownMySQL(t *testing.T) {
 		t.Fatalf("duplicate event_id error=%v, want MySQL 1062", err)
 	}
 
-	// Roll back only the review migration; the rest of the chain stays applied.
-	if n, err := migrate.ExecMax(database, "mysql", source, migrate.Down, 1); err != nil {
+	// Roll back the review feature's migrations; the rest of the chain stays
+	// applied. The feature spans TWO files — 20260901-00 creates the tables and
+	// 20260901-01 adds attachment_keys_json — and ExecMax counts from the newest
+	// applied migration, so rolling back only one would drop the column and leave
+	// both tables standing. Appending a later migration means bumping this count.
+	if n, err := migrate.ExecMax(database, "mysql", source, migrate.Down, 2); err != nil {
 		t.Fatalf("migrate Down: %v", err)
-	} else if n != 1 {
-		t.Fatalf("migrate Down applied %d migrations, want 1", n)
+	} else if n != 2 {
+		t.Fatalf("migrate Down applied %d migrations, want 2", n)
 	}
 	for _, table := range pluginReviewTables {
 		var count int

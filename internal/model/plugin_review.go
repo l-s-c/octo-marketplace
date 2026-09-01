@@ -55,9 +55,16 @@ type PluginReviewRequest struct {
 	Changelog   *string      `json:"changelog,omitempty"`
 	// Frozen snapshot bytes. Loaded only by the detail read (LoadReviewSnapshot);
 	// the list query deliberately does not select these columns.
-	ManifestJSON   json.RawMessage       `json:"-"`
-	PluginJSON     json.RawMessage       `json:"-"`
-	RelationsJSON  json.RawMessage       `json:"-"`
+	ManifestJSON  json.RawMessage `json:"-"`
+	PluginJSON    json.RawMessage `json:"-"`
+	RelationsJSON json.RawMessage `json:"-"`
+	// AttachmentKeys is the frozen storage-attachment sidecar (path -> managed
+	// object key) for the snapshot. It is NULL for submissions that carry no
+	// spilled files (all-inline packages, declared-JSON connector/expert
+	// submissions). Mirrors plugins.attachment_keys_json exactly so a
+	// zip-submitted skill upgrade can carry its complete snapshot through to
+	// approval without relying on the live row's keys still mapping correctly.
+	AttachmentKeys json.RawMessage       `json:"-"`
 	ManifestHash   string                `json:"manifest_hash"`
 	PluginHash     string                `json:"plugin_hash"`
 	ApplicantUID   string                `json:"applicant_id"`

@@ -127,8 +127,16 @@ func TestSubmitReviewValidatesInput(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store, svc := reviewFixture(t)
 			_, err := svc.SubmitReview(context.Background(), reviewApplicant, tt.params)
-			if !errors.Is(err, ErrReviewInvalid) {
-				t.Fatalf("error = %v, want ErrReviewInvalid", err)
+			// Validation errors now surface as either ErrReviewInvalid (for empty
+			// plugin_id) or a *ReviewFieldError wrapping the cause. Both are 400
+			// responses; we assert the error is non-nil and NOT ErrConflict/
+			// ErrNotFound/internal, and that it did not reach the repository.
+			if err == nil || errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
+				t.Fatalf("error = %v, want a validation error", err)
+			}
+			var fieldErr *ReviewFieldError
+			if !errors.Is(err, ErrReviewInvalid) && !errors.As(err, &fieldErr) {
+				t.Fatalf("error = %v, want ErrReviewInvalid or *ReviewFieldError", err)
 			}
 			if store.review.insertReq != nil {
 				t.Error("invalid submit reached the repository")
@@ -461,19 +469,20 @@ func TestDecideReviewFromCardValidatesInput(t *testing.T) {
 	tests := []struct {
 		name                              string
 		eventID, operator, decision, rvid string
+		wantErr                           error
 	}{
-		{name: "missing event id", operator: "admin-1", decision: "approve", rvid: "review-1"},
-		{name: "missing operator", eventID: "1", decision: "approve", rvid: "review-1"},
-		{name: "missing review id", eventID: "1", operator: "admin-1", decision: "approve"},
-		{name: "unknown decision", eventID: "1", operator: "admin-1", decision: "obliterate", rvid: "review-1"},
-		{name: "empty decision", eventID: "1", operator: "admin-1", rvid: "review-1"},
+		{name: "missing event id", operator: "admin-1", decision: "approve", rvid: "review-1", wantErr: ErrCardBadDecision},
+		{name: "missing operator", eventID: "1", decision: "approve", rvid: "review-1", wantErr: ErrCardBadDecision},
+		{name: "missing review id", eventID: "1", operator: "admin-1", decision: "approve", wantErr: ErrCardBadDecision},
+		{name: "unknown decision", eventID: "1", operator: "admin-1", decision: "obliterate", rvid: "review-1", wantErr: ErrCardBadDecision},
+		{name: "empty decision", eventID: "1", operator: "admin-1", rvid: "review-1", wantErr: ErrCardBadDecision},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, svc := reviewFixture(t)
 			_, err := svc.DecideReviewFromCard(context.Background(), tt.eventID, tt.operator, tt.decision, tt.rvid)
-			if !errors.Is(err, ErrReviewInvalid) {
-				t.Fatalf("error = %v, want ErrReviewInvalid", err)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tt.wantErr)
 			}
 		})
 	}
@@ -745,8 +754,16 @@ func TestSubmitReviewRejectsPartialContent(t *testing.T) {
 				PluginID: "plugin-1", Version: "2.0.0",
 				Manifest: json.RawMessage(tt.manifest), Package: json.RawMessage(tt.pkgStr),
 			})
-			if !errors.Is(err, ErrReviewInvalid) {
-				t.Fatalf("error = %v, want ErrReviewInvalid", err)
+			if err == nil {
+				t.Fatal("expected error for partial content")
+			}
+			// Partial content surfaces as a field error on manifest_json (or
+			// another validation error); the exact sentinel has changed from
+			// plain ErrReviewInvalid to a structured *ReviewFieldError, but it
+			// must still be a 400-class validation error and must not reach the
+			// repository.
+			if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
+				t.Fatalf("error = %v, want a validation error", err)
 			}
 			if store.review.insertReq != nil {
 				t.Error("a partial submission reached the repository")

@@ -73,8 +73,8 @@ type Store interface {
 	LoadReviewSnapshot(context.Context, pluginrepo.Scope, string, bool) (*model.PluginReviewRequest, error)
 	ListReviewRequests(context.Context, pluginrepo.Scope, pluginrepo.ReviewListFilter) ([]*model.PluginReviewRequest, int64, error)
 	ApproveReview(context.Context, pluginrepo.Scope, pluginrepo.ApproveReviewParams) (*model.Plugin, error)
-	RejectReview(context.Context, pluginrepo.Scope, pluginrepo.RejectReviewParams) error
-	CancelReview(context.Context, pluginrepo.Scope, string, string) error
+	RejectReview(context.Context, pluginrepo.Scope, pluginrepo.RejectReviewParams) (json.RawMessage, json.RawMessage, error)
+	CancelReview(context.Context, pluginrepo.Scope, string, string) (json.RawMessage, json.RawMessage, error)
 	GetReviewRequestAnySpace(context.Context, string) (*model.PluginReviewRequest, error)
 
 	// Card-action receipts (IM decision idempotency).
