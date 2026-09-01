@@ -16,7 +16,7 @@ import (
 // have drifted on the canonical string, and every production callback would
 // 401 — reconcile the implementations, not the vector.
 const (
-	vectorSecret     = "0123456789abcdef0123456789abcdef"
+	vectorSecret     = "0123456789abcdef0123456789abcdef" // gitleaks:allow
 	vectorMethod     = "POST"
 	vectorPath       = "/v1/card-actions/decide"
 	vectorTimestamp  = "1784073600"

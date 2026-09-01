@@ -18,7 +18,7 @@ import (
 	pluginsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/plugin"
 )
 
-const cardSecret = "0123456789abcdef0123456789abcdef"
+const cardSecret = "0123456789abcdef0123456789abcdef" // gitleaks:allow
 
 // cardEngine mounts the callback the way production does: on the ROOT engine,
 // with no authenticator in the chain.
@@ -237,7 +237,7 @@ func TestCardActionBadDecisionGoesToDLQ(t *testing.T) {
 // callback in production.
 func TestCardActionMatchesThePublishedSignatureVector(t *testing.T) {
 	const (
-		vectorSecret    = "0123456789abcdef0123456789abcdef"
+		vectorSecret    = "0123456789abcdef0123456789abcdef" // gitleaks:allow
 		vectorTimestamp = "1784073600"
 		vectorEventID   = "9007199254740993"
 		vectorBody      = `{"event_id":"9007199254740993","action_id":"approval-execute","decision":"execute","operator_uid":"user-b","inputs":{},"data":{"owner":"tasks","action_type":"task.execute.decision","decision":"execute","task_id":"task-1"},"message_id":"190001234567890","channel_id":"notification","channel_type":1,"space_id":"space-1","acted_at":1784073600}`
