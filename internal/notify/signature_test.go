@@ -22,8 +22,8 @@ const (
 	vectorTimestamp  = "1784073600"
 	vectorEventID    = "9007199254740993"
 	vectorBody       = `{"event_id":"9007199254740993","action_id":"approval-execute","decision":"execute","operator_uid":"user-b","inputs":{},"data":{"owner":"tasks","action_type":"task.execute.decision","decision":"execute","task_id":"task-1"},"message_id":"190001234567890","channel_id":"notification","channel_type":1,"space_id":"space-1","acted_at":1784073600}`
-	vectorBodySHA256 = "e5f9edc7558b6dbac6f754308b161d79a84e9d4635377a8afd6f95b6baa4c6cc"
-	vectorSignature  = "v1=77d6abe3e80bd90d70545ce90d8c87daafd65a22b62919cee71b450613d6e50f"
+	vectorBodySHA256 = "e5f9edc7558b6dbac6f754308b161d79a84e9d4635377a8afd6f95b6baa4c6cc"    // gitleaks:allow
+	vectorSignature  = "v1=77d6abe3e80bd90d70545ce90d8c87daafd65a22b62919cee71b450613d6e50f" // gitleaks:allow
 )
 
 func TestPublishedVector_BodyDigest(t *testing.T) {
@@ -65,7 +65,7 @@ func TestSign_EveryComponentIsLoadBearing(t *testing.T) {
 		secret, method, path, timestamp, eventID string
 		body                                     string
 	}{
-		{"secret", "0123456789abcdef0123456789abcdeF", vectorMethod, vectorPath, vectorTimestamp, vectorEventID, vectorBody},
+		{"secret", "0123456789abcdef0123456789abcdeF", vectorMethod, vectorPath, vectorTimestamp, vectorEventID, vectorBody}, // gitleaks:allow
 		{"method", vectorSecret, "PUT", vectorPath, vectorTimestamp, vectorEventID, vectorBody},
 		{"path", vectorSecret, vectorMethod, "/v1/card-actions/decide2", vectorTimestamp, vectorEventID, vectorBody},
 		{"timestamp", vectorSecret, vectorMethod, vectorPath, "1784073601", vectorEventID, vectorBody},
@@ -108,7 +108,7 @@ func TestVerify_Rejections(t *testing.T) {
 		{"wrong version prefix", vectorSecret, "v2=" + bare},
 		{"uppercase hex", vectorSecret, "v1=" + strings.ToUpper(bare)},
 		{"truncated digest", vectorSecret, vectorSignature[:len(vectorSignature)-2]},
-		{"wrong secret", "0123456789abcdef0123456789abcdeF", vectorSignature},
+		{"wrong secret", "0123456789abcdef0123456789abcdeF", vectorSignature}, // gitleaks:allow
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

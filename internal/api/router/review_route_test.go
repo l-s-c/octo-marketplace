@@ -17,7 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const routeTestCardSecret = "0123456789abcdef0123456789abcdef"
+const routeTestCardSecret = "0123456789abcdef0123456789abcdef" // gitleaks:allow
 
 // reviewRouterEngine builds the engine through the PRODUCTION entry point with a
 // real *sql.DB (so the plugin surface is wired at all) and a PROD-mode tenant
