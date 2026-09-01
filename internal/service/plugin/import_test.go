@@ -522,3 +522,92 @@ func TestSkillMarkdownRefObjectWinsOverInlineStub(t *testing.T) {
 		t.Fatalf("fallback content=%q err=%v", content, err)
 	}
 }
+
+// A tenant upload is a private draft. This was the other half of the old
+// auto-listing behaviour: resolveImportFields defaulted to `space`, so every
+// upload appeared in the org market with no review at all.
+func TestImportLandsPrivateRegardlessOfTheRequestedVisibility(t *testing.T) {
+	for _, asked := range []model.PluginVisibility{"", model.PluginVisibilitySpace, model.PluginVisibilityPrivate} {
+		store, _, _, svc := importFixtures(t)
+		if _, err := svc.Import(context.Background(), testCaller, ImportParams{ParseTaskID: "task-1", Visibility: asked}); err != nil {
+			t.Fatalf("visibility=%q import err = %v", asked, err)
+		}
+		if store.create == nil {
+			t.Fatalf("visibility=%q: nothing persisted", asked)
+		}
+		if store.create.Visibility != model.PluginVisibilityPrivate {
+			t.Fatalf("import asked %q, PERSISTED %q; a fresh upload must not be org-visible", asked, store.create.Visibility)
+		}
+	}
+}
+
+// A re-import must not delist an already-approved plugin (nor promote a private
+// one). It therefore replaces LIVE content without re-review — deliberate, and
+// recorded in the divergence note.
+func TestReimportPreservesTheExistingVisibility(t *testing.T) {
+	for _, existing := range []model.PluginVisibility{model.PluginVisibilityPrivate, model.PluginVisibilitySpace} {
+		store, _, _, svc := importFixtures(t)
+		space := "space-a"
+		store.plugins["plugin-1"] = &model.Plugin{
+			ID: "plugin-1", Name: "My Skill", Type: model.PluginTypeSkill,
+			OwnerUID: "user-1", SpaceID: &space, Visibility: existing,
+			Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{"plugin_name":"My Skill","name":"my-skill","description":"d"}`),
+			Package: json.RawMessage(`{"attachments":[]}`),
+		}
+		// A client asking to widen the plugin on reupload must not get it.
+		if _, err := svc.Import(context.Background(), testCaller, ImportParams{
+			ParseTaskID: "task-1", PluginID: "plugin-1", Visibility: model.PluginVisibilitySpace,
+		}); err != nil {
+			t.Fatalf("existing=%q reupload err = %v", existing, err)
+		}
+		if store.update == nil {
+			t.Fatalf("existing=%q: nothing persisted", existing)
+		}
+		if store.update.Visibility != existing {
+			t.Fatalf("existing=%q, PERSISTED %q; a reupload must neither promote nor delist", existing, store.update.Visibility)
+		}
+	}
+}
+
+// resolveImportFields is the import path's own visibility decision, tested
+// directly because Service.createWithID independently forces private on a fresh
+// create: without this the import-side clamp could be deleted and the
+// end-to-end import tests would still pass on the create path alone.
+func TestResolveImportFieldsClampsTenantVisibility(t *testing.T) {
+	task := &skillrepo.ParseTaskRow{ID: "task-1", ResultName: "My Skill", ResultVersion: "2.0.0"}
+	space := "space-a"
+	listed := &model.Plugin{
+		ID: "plugin-1", Name: "My Skill", Visibility: model.PluginVisibilitySpace, SpaceID: &space,
+		Manifest: json.RawMessage(`{"plugin_name":"My Skill","name":"my-skill","description":"d"}`),
+	}
+	tests := []struct {
+		name        string
+		params      ImportParams
+		systemAdmin bool
+		old         *model.Plugin
+		want        model.PluginVisibility
+	}{
+		{name: "fresh tenant import defaults private", want: model.PluginVisibilityPrivate},
+		{name: "fresh tenant import asking for space still lands private",
+			params: ImportParams{Visibility: model.PluginVisibilitySpace}, want: model.PluginVisibilityPrivate},
+		{name: "reupload of a listed plugin keeps space",
+			params: ImportParams{Visibility: model.PluginVisibilityPrivate}, old: listed, want: model.PluginVisibilitySpace},
+		{name: "system admin import is untouched",
+			params: ImportParams{Visibility: model.PluginVisibilitySystem}, systemAdmin: true, want: model.PluginVisibilitySystem},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := resolveImportFields(tt.params, task, tt.systemAdmin, tt.old)
+			if err != nil {
+				t.Fatalf("resolveImportFields: %v", err)
+			}
+			if f.visibility != tt.want {
+				t.Fatalf("visibility = %q, want %q", f.visibility, tt.want)
+			}
+		})
+	}
+	// An explicitly invalid value must still be a 400, not a silent downgrade.
+	if _, err := resolveImportFields(ImportParams{Visibility: model.PluginVisibilityPublic}, task, false, nil); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("public visibility err = %v, want ErrInvalidRequest", err)
+	}
+}

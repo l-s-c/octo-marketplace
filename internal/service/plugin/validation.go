@@ -100,6 +100,23 @@ func validVisibility(v model.PluginVisibility, systemAdmin bool) bool {
 	}
 }
 
+// tenantVisibilityAllowed reports whether a tenant update may move a plugin from
+// `current` to `next`. `validVisibility` says which values exist; this says which
+// TRANSITIONS a tenant may perform.
+//
+// A tenant may keep what the row already has, or lower it to private (delisting
+// their own plugin). Raising to `space` is reserved for ApproveReview: it is the
+// only remaining direct route to org visibility, and leaving it open makes the
+// whole review workflow bypassable with a single upsert. Raising to `system` is
+// separately impossible — validVisibility already requires IsSystemAdmin — but it
+// is rejected here too so this predicate is complete on its own terms.
+//
+// A legacy `public` row is unreachable here anyway (validVisibility refuses to
+// write `public`), so keeping it means keeping the value the caller cannot send.
+func tenantVisibilityAllowed(current, next model.PluginVisibility) bool {
+	return next == model.PluginVisibilityPrivate || next == current
+}
+
 func validName(v string) bool {
 	return v != "" && utf8.ValidString(v) && len(v) <= maxNameBytes && !strings.ContainsRune(v, '\x00')
 }

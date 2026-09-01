@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -207,5 +208,129 @@ func TestOSSConfigFromEnv(t *testing.T) {
 	}
 	if cfg.MaxUploadMB != 50 {
 		t.Fatalf("MaxUploadMB=%d want=50", cfg.MaxUploadMB)
+	}
+}
+
+// TestDevAuthSpaceRoleZeroSurvives is the whole reason DEV_AUTH_SPACE_ROLE is
+// not parsed by envInt: that helper treats <= 0 as unset and would promote a
+// deliberately-configured plain member to the owner default, silently making
+// the non-reviewer path unreachable in local development.
+func TestDevAuthSpaceRoleZeroSurvives(t *testing.T) {
+	t.Setenv("MYSQL_DSN", "test-dsn")
+	t.Setenv("DEV_AUTH_SPACE_ROLE", "0")
+	if got := Load().DevAuthSpaceRole; got != 0 {
+		t.Fatalf("DevAuthSpaceRole=%d want=0 (an explicit member must not be promoted)", got)
+	}
+}
+
+func TestDevAuthSpaceRoleDefaults(t *testing.T) {
+	t.Setenv("MYSQL_DSN", "test-dsn")
+	t.Setenv("DEV_AUTH_SPACE_ROLE", "")
+	if got := Load().DevAuthSpaceRole; got != DefaultDevAuthSpaceRole {
+		t.Fatalf("DevAuthSpaceRole=%d want=%d", got, DefaultDevAuthSpaceRole)
+	}
+}
+
+func TestDevAuthSpaceRoleFromEnv(t *testing.T) {
+	t.Setenv("MYSQL_DSN", "test-dsn")
+	t.Setenv("DEV_AUTH_SPACE_ROLE", "1")
+	if got := Load().DevAuthSpaceRole; got != 1 {
+		t.Fatalf("DevAuthSpaceRole=%d want=1", got)
+	}
+}
+
+// An unparseable value must not resolve to the owner default. It loads as an
+// out-of-range sentinel so ValidateAPI fails the boot.
+func TestDevAuthSpaceRoleUnparseableFailsValidation(t *testing.T) {
+	t.Setenv("MYSQL_DSN", "test-dsn")
+	t.Setenv("DEV_AUTH_SPACE_ROLE", "admin")
+	cfg := Load()
+	if cfg.DevAuthSpaceRole == DefaultDevAuthSpaceRole {
+		t.Fatal("DevAuthSpaceRole silently fell back to the owner default on an unparseable value")
+	}
+	if err := cfg.ValidateAPI(); err == nil {
+		t.Fatal("ValidateAPI() error=nil want DEV_AUTH_SPACE_ROLE error")
+	}
+}
+
+func TestOctoNotifyDefaults(t *testing.T) {
+	t.Setenv("MYSQL_DSN", "test-dsn")
+	t.Setenv("OCTO_NOTIFY_TIMEOUT", "")
+	t.Setenv("OCTO_CARD_ACTION_MAX_SKEW", "")
+	t.Setenv("OCTO_MARKETPLACE_INTERNAL_TOKEN", "")
+	t.Setenv("OCTO_MARKETPLACE_CARD_ACTION_SECRET", "")
+	cfg := Load()
+	if cfg.OctoNotifyTimeout != 3*time.Second {
+		t.Fatalf("OctoNotifyTimeout=%v want=3s", cfg.OctoNotifyTimeout)
+	}
+	if cfg.OctoCardActionMaxSkew != 5*time.Minute {
+		t.Fatalf("OctoCardActionMaxSkew=%v want=5m", cfg.OctoCardActionMaxSkew)
+	}
+	if cfg.OctoInternalToken != "" || cfg.OctoCardActionSecret != "" {
+		t.Fatal("octo secrets must default to blank (surface disabled), never to a built-in value")
+	}
+}
+
+func TestValidateAPIOctoSecrets(t *testing.T) {
+	const (
+		secretA = "0123456789abcdef0123456789abcdef" // exactly 32 bytes
+		secretB = "fedcba9876543210fedcba9876543210"
+		short   = "0123456789abcdef"
+	)
+	base := func() Config {
+		return Config{
+			MySQLDSN: "dsn", APIPort: "8092",
+			SkillParseTimeout: time.Minute, SkillParseStaleTimeout: 5 * time.Minute,
+		}
+	}
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{name: "both blank disables both surfaces", mutate: func(*Config) {}},
+		{name: "only internal token configured", mutate: func(c *Config) {
+			c.OctoInternalToken = secretA
+		}},
+		{name: "distinct long secrets", mutate: func(c *Config) {
+			c.OctoInternalToken = secretA
+			c.OctoCardActionSecret = secretB
+		}},
+		{name: "short internal token", mutate: func(c *Config) {
+			c.OctoInternalToken = short
+		}, wantErr: true},
+		{name: "short card action secret", mutate: func(c *Config) {
+			c.OctoInternalToken = secretA
+			c.OctoCardActionSecret = short
+		}, wantErr: true},
+		{name: "reused secret across surfaces", mutate: func(c *Config) {
+			c.OctoInternalToken = secretA
+			c.OctoCardActionSecret = secretA
+		}, wantErr: true},
+		{name: "dev space role above range", mutate: func(c *Config) {
+			c.DevAuthSpaceRole = 3
+		}, wantErr: true},
+		{name: "dev space role below range", mutate: func(c *Config) {
+			c.DevAuthSpaceRole = -1
+		}, wantErr: true},
+		{name: "dev space role member", mutate: func(c *Config) {
+			c.DevAuthSpaceRole = 0
+		}},
+		{name: "dev space role owner", mutate: func(c *Config) {
+			c.DevAuthSpaceRole = 2
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			tt.mutate(&cfg)
+			err := cfg.ValidateAPI()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateAPI() error=%v wantErr=%v", err, tt.wantErr)
+			}
+			if err != nil && (strings.Contains(err.Error(), secretA) || strings.Contains(err.Error(), short)) {
+				t.Fatalf("ValidateAPI() error leaks a secret value: %v", err)
+			}
+		})
 	}
 }

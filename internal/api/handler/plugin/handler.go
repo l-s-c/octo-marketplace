@@ -37,6 +37,14 @@ type Service interface {
 	SkillMarkdown(context.Context, pluginsvc.Caller, string) (string, error)
 	OpenSkillPackage(context.Context, pluginsvc.Caller, string) (*pluginsvc.SkillPackageStream, error)
 	ListTags(context.Context, pluginsvc.Caller, pluginsvc.TagListParams) ([]model.TagFilter, error)
+
+	// Space review workflow (see review.go).
+	SubmitReview(context.Context, pluginsvc.Caller, pluginsvc.ReviewSubmitParams) (*model.PluginReviewRequest, error)
+	ListReviews(context.Context, pluginsvc.Caller, string, model.ReviewStatus, int, int) ([]*model.PluginReviewRequest, int64, error)
+	GetReview(context.Context, pluginsvc.Caller, string) (*model.PluginReviewRequest, error)
+	ApproveReview(context.Context, pluginsvc.Caller, string) (*model.Plugin, error)
+	RejectReview(context.Context, pluginsvc.Caller, string, string) error
+	CancelReview(context.Context, pluginsvc.Caller, string) error
 }
 
 // CategoryService is separate because category listing is a read-only operation
@@ -71,6 +79,16 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	plugins.POST("/import", h.Import)
 	plugins.GET("/skill_md", h.SkillMarkdown)
 	plugins.GET("/download", h.DownloadSkillPackage)
+	// Space review queue. Registered on the same authenticated group; the routes
+	// are resourceful (unlike the verb-style legacy plugin routes above) because
+	// the octo-web client is already built against these paths.
+	reviews := plugins.Group("/review_requests")
+	reviews.POST("", h.SubmitReview)
+	reviews.GET("", h.ListReviews)
+	reviews.GET("/:review_id", h.GetReview)
+	reviews.POST("/:review_id/approve", h.ApproveReview)
+	reviews.POST("/:review_id/reject", h.RejectReview)
+	reviews.POST("/:review_id/cancel", h.CancelReview)
 }
 
 type relationRequest struct {
@@ -563,6 +581,14 @@ func caller(c *gin.Context) (pluginsvc.Caller, bool) {
 		return pluginsvc.Caller{}, false
 	}
 	out := pluginsvc.Caller{UID: identity.UID, Name: identity.Name, SpaceID: spaceID, RequestID: logging.RequestIDFromGin(c), IsSystemAdmin: identity.Role == marketmiddleware.RoleSuperAdmin}
+	// The caller's role IN THE SPACE THIS REQUEST IS FOR. Reading it by spaceID
+	// rather than taking any single value out of the map is what stops an admin of
+	// Space B from acting as a reviewer while operating in Space A. A missing entry
+	// is a plain member. A system admin outranks any Space role.
+	out.SpaceRole = identity.SpaceRoles[spaceID]
+	if out.IsSystemAdmin && out.SpaceRole < pluginsvc.SpaceRoleOwner {
+		out.SpaceRole = pluginsvc.SpaceRoleOwner
+	}
 	if bot, ok := marketmiddleware.BotIdentity(c); ok {
 		out.BotUID, out.BotName = bot.BotUID, bot.BotName
 	}
@@ -627,8 +653,15 @@ func splitQuery(values []string) []string {
 }
 func writeServiceError(c *gin.Context, err error, operation string) {
 	switch {
-	case errors.Is(err, pluginsvc.ErrInvalidRequest):
+	case errors.Is(err, pluginsvc.ErrInvalidRequest), errors.Is(err, pluginsvc.ErrReviewInvalid):
 		validation(c, "body")
+	case errors.Is(err, pluginsvc.ErrReasonRequired):
+		validation(c, "reason")
+	// Authorization refusal, distinct from "not found": the caller is in the right
+	// Space and may know the resource exists, they simply lack the reviewer role.
+	// Without this branch a permission error falls through to 500.
+	case errors.Is(err, pluginsvc.ErrReviewForbidden):
+		apiresponse.Fail(c, http.StatusForbidden, errcode.PermissionDenied, "operation requires the Space owner or admin role", map[string]any{"required_role": "space_admin"}, "Ask a Space owner or admin to perform this action.")
 	case errors.Is(err, pluginsvc.ErrNotFound):
 		apiresponse.Fail(c, http.StatusNotFound, errcode.NotFound, "plugin not found", map[string]any{"resource": "plugin"}, "Verify the plugin_id and try again.")
 	case errors.Is(err, pluginsvc.ErrTooLarge):

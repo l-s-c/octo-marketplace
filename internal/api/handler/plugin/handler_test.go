@@ -37,6 +37,8 @@ type fakeService struct {
 	skillMarkdown    string
 	tagParams        pluginsvc.TagListParams
 	tags             []model.TagFilter
+	// review carries the review half of the fake (see review_fake_test.go).
+	review reviewServiceFake
 }
 
 func (f *fakeService) List(_ context.Context, c pluginsvc.Caller, p pluginsvc.ListParams) ([]model.Plugin, int64, error) {

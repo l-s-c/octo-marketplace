@@ -19,6 +19,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/logging"
 	marketmiddleware "github.com/Mininglamp-OSS/octo-marketplace/internal/middleware"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/notify"
 	metricsredis "github.com/Mininglamp-OSS/octo-marketplace/internal/redis"
 	categoryrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/category"
 	expertrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/expert"
@@ -74,15 +75,38 @@ type RedisConfig struct {
 	Client *goredis.Client
 }
 
-func Public(database Pinger, authenticator *marketmiddleware.Authenticator, adminAuth *marketmiddleware.AdminAuthenticator, storageCfg StorageConfig, mcp *handler.MCP, adminMCP *handler.AdminMCP, parseCfg ParseConfig, fleetClient expertsvc.FleetProvisioner, redisCfg ...RedisConfig) *gin.Engine {
+// ReviewConfig wires the Space review workflow's octo-server integration.
+//
+// Everything here is optional and independent of the review workflow itself:
+// with an empty config the six tenant review endpoints work exactly as they do
+// with it, they simply dispatch no IM approval card, and the card-action
+// callback stays permanently closed (no secret => every request 401s). Web-path
+// authorization reads the caller's Space role from the verified identity and
+// never consults this.
+type ReviewConfig struct {
+	// OctoAPIURL is the octo-server base URL used for the internal role lookup
+	// and notify dispatch. Empty disables both.
+	OctoAPIURL string
+	// InternalToken authenticates against octo-server /v1/internal/*
+	// (OCTO_MARKETPLACE_INTERNAL_TOKEN).
+	InternalToken string
+	// CardActionSecret is the HMAC key octo-server signs card-action callbacks
+	// with (OCTO_MARKETPLACE_CARD_ACTION_SECRET). Empty leaves the callback
+	// endpoint permanently closed rather than open.
+	CardActionSecret  string
+	NotifyTimeout     time.Duration
+	CardActionMaxSkew time.Duration
+}
+
+func Public(database Pinger, authenticator *marketmiddleware.Authenticator, adminAuth *marketmiddleware.AdminAuthenticator, storageCfg StorageConfig, mcp *handler.MCP, adminMCP *handler.AdminMCP, parseCfg ParseConfig, fleetClient expertsvc.FleetProvisioner, reviewCfg ReviewConfig, redisCfg ...RedisConfig) *gin.Engine {
 	var rc RedisConfig
 	if len(redisCfg) > 0 {
 		rc = redisCfg[0]
 	}
-	return publicWithOptions(database, authenticator, adminAuth, storageCfg, mcp, adminMCP, authenticator.AuthEnabled(), parseCfg, fleetClient, rc)
+	return publicWithOptions(database, authenticator, adminAuth, storageCfg, mcp, adminMCP, authenticator.AuthEnabled(), parseCfg, fleetClient, rc, reviewCfg)
 }
 
-func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenticator, adminAuth *marketmiddleware.AdminAuthenticator, storageCfg StorageConfig, mcp *handler.MCP, adminMCP *handler.AdminMCP, authEnabled bool, parseCfg ParseConfig, fleetClient expertsvc.FleetProvisioner, redisCfg RedisConfig) *gin.Engine {
+func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenticator, adminAuth *marketmiddleware.AdminAuthenticator, storageCfg StorageConfig, mcp *handler.MCP, adminMCP *handler.AdminMCP, authEnabled bool, parseCfg ParseConfig, fleetClient expertsvc.FleetProvisioner, redisCfg RedisConfig, reviewCfg ReviewConfig) *gin.Engine {
 	r := gin.New()
 	r.Use(logging.RequestID(), logging.AccessLog(), logging.Recovery(), corsMiddleware(storageCfg.CORSAllowedOrigins))
 
@@ -144,8 +168,21 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 
 		pluginSvc := pluginsvc.New(pluginRepo, store)
 		pluginSvc.SetArtifactLimits(int64(storageCfg.MaxMB) << 20)
+		// Space review IM integration. A nil notifier keeps the review endpoints
+		// fully functional and simply sends no approval card.
+		if reviewCfg.OctoAPIURL != "" && reviewCfg.InternalToken != "" {
+			pluginSvc.WithNotify(
+				notify.New(reviewCfg.OctoAPIURL, reviewCfg.InternalToken, reviewCfg.NotifyTimeout),
+				notify.BestEffort,
+			)
+		}
 		pluginCats := pluginsvc.NewCategories(pluginRepo, generateID)
 		pluginhandler.New(pluginSvc, pluginCats).Register(v1)
+		// The octo-server card-action callback is mounted on the ROOT engine, not
+		// on v1: it carries an HMAC signature instead of a user token, so it must
+		// not pass through the tenant Authenticator, and its path is covered by
+		// that signature (it cannot be moved under /api/v1 unilaterally).
+		pluginhandler.NewCardAction(pluginSvc, reviewCfg.CardActionSecret, reviewCfg.CardActionMaxSkew).Register(r)
 		// Admin surface: /api/v1/admin/plugins(+/plugin_categories), cross-Space
 		// management of system connectors and global skills/experts, gated by the
 		// admin authenticator.
@@ -317,7 +354,7 @@ func PublicWithDB(db *sql.DB, authenticator *marketmiddleware.Authenticator, sto
 		StaleTimeout:   5 * time.Minute,
 		MaxAttempts:    2,
 		WorkerPoolSize: 10,
-	}, nil, RedisConfig{})
+	}, nil, ReviewConfig{}, RedisConfig{})
 }
 
 // PublicWithDBAndAdminAuth is a test helper that mounts the admin surface with
@@ -331,5 +368,5 @@ func PublicWithDBAndAdminAuth(db *sql.DB, authenticator *marketmiddleware.Authen
 		StaleTimeout:   5 * time.Minute,
 		MaxAttempts:    2,
 		WorkerPoolSize: 10,
-	}, nil, RedisConfig{})
+	}, nil, RedisConfig{}, ReviewConfig{})
 }

@@ -208,6 +208,23 @@ func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdm
 	if !validName(f.pluginName) || f.name == "" || !validVersion(f.version) || !validVisibility(f.visibility, systemAdmin) {
 		return nil, ErrInvalidRequest
 	}
+	// A tenant upload is a private, self-testable draft: Space visibility is
+	// granted only by an approved review request. Clamped LAST — after the checks
+	// above — so an explicit `public`/garbage value is still a 400 rather than
+	// being silently downgraded, and so the request field cannot smuggle `space`
+	// in either. The admin import (systemAdmin) sets its own visibility and is not
+	// a tenant-owned row, so it is left alone.
+	//
+	// A re-import keeps whatever visibility the plugin already has, because
+	// demoting a listed plugin mid-edit would silently delist it. That does mean a
+	// re-import replaces LIVE content without re-review — deliberate here, and
+	// recorded in the divergence note; closing it needs a draft/live content split.
+	if !systemAdmin {
+		f.visibility = model.PluginVisibilityPrivate
+		if old != nil && old.Visibility != "" {
+			f.visibility = old.Visibility
+		}
+	}
 	return f, nil
 }
 

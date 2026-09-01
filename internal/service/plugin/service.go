@@ -13,6 +13,7 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/id"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/notify"
 	pluginrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/plugin"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/storage"
 )
@@ -41,6 +42,11 @@ type Caller struct {
 	BotName       string
 	RequestID     string
 	IsSystemAdmin bool
+	// SpaceRole is the caller's role in SpaceID using octo-server's
+	// space_member.role encoding (0=member, 1=admin, 2=owner). Populated by the
+	// HTTP layer from the verified identity's space_roles map, never from request
+	// data. Reviewer-side review operations require >= SpaceRoleAdmin.
+	SpaceRole int
 }
 
 // Store is the transactional persistence boundary required by Service.
@@ -58,6 +64,22 @@ type Store interface {
 	CountMemberRelations(context.Context, []string) (map[string]int, error)
 	CountDeclaredRelations(context.Context, string) (int, error)
 	ListTags(context.Context, pluginrepo.Scope, pluginrepo.TagListFilter) ([]model.TagFilter, error)
+
+	// Space review requests. Every method carries the caller Scope; the
+	// AnySpace variant is the single deliberate exception and is documented at
+	// its definition.
+	InsertReviewRequest(context.Context, pluginrepo.Scope, *model.PluginReviewRequest, pluginrepo.FrozenSnapshot) error
+	GetReviewRequest(context.Context, pluginrepo.Scope, string, bool) (*model.PluginReviewRequest, error)
+	LoadReviewSnapshot(context.Context, pluginrepo.Scope, string, bool) (*model.PluginReviewRequest, error)
+	ListReviewRequests(context.Context, pluginrepo.Scope, pluginrepo.ReviewListFilter) ([]*model.PluginReviewRequest, int64, error)
+	ApproveReview(context.Context, pluginrepo.Scope, pluginrepo.ApproveReviewParams) (*model.Plugin, error)
+	RejectReview(context.Context, pluginrepo.Scope, pluginrepo.RejectReviewParams) error
+	CancelReview(context.Context, pluginrepo.Scope, string, string) error
+	GetReviewRequestAnySpace(context.Context, string) (*model.PluginReviewRequest, error)
+
+	// Card-action receipts (IM decision idempotency).
+	GetCardActionReceipt(context.Context, string) (*model.CardActionReceipt, error)
+	InsertCardActionReceipt(context.Context, *model.CardActionReceipt) error
 }
 
 var _ Store = (*pluginrepo.Repo)(nil)
@@ -72,6 +94,14 @@ type Service struct {
 	now                func() time.Time
 	maxAttachmentBytes int64
 	maxArchiveBytes    int64
+
+	// Review IM notification wiring. Both are optional and are used ONLY by the
+	// IM surface: a nil notifier means no approval card is dispatched, and the
+	// card-action callback cannot verify an operator (it faults rather than
+	// granting). Web-path review authorization never consults either of these —
+	// it reads Caller.SpaceRole — so review works whether or not IM is wired.
+	notify     ReviewNotifier
+	bestEffort func(string, func(ctx context.Context) error)
 }
 
 func New(repo Store, stores ...storage.Storage) *Service {
@@ -85,6 +115,34 @@ func New(repo Store, stores ...storage.Storage) *Service {
 	if len(stores) > 0 {
 		s.storage = stores[0]
 	}
+	return s
+}
+
+// ReviewNotifier is the subset of *notify.Client the review workflow uses. The
+// compile-time assertion keeps it honest: the interface exists for test
+// substitution, not to re-abstract the client.
+type ReviewNotifier interface {
+	Enabled() bool
+	// MemberRole reports uid's role in spaceID. A nil role means "not an active
+	// member of an active Space" — non-member, removed member, unknown Space and
+	// disbanded Space are deliberately indistinguishable. An error means the
+	// lookup could not be performed and must NEVER be treated as a refusal.
+	MemberRole(ctx context.Context, spaceID, uid string) (*int, error)
+	NotifySpaceAdmins(ctx context.Context, req notify.NotifyRequest) (*notify.NotifyResponse, error)
+}
+
+var _ ReviewNotifier = (*notify.Client)(nil)
+
+// WithNotify wires the octo-server client used for IM approval cards and the
+// post-commit dispatcher that runs them. Both are optional; leaving them unset
+// disables IM dispatch and makes the card-action callback report a fault rather
+// than authorizing anyone.
+//
+// This deliberately does NOT govern web-path authorization: that reads
+// Caller.SpaceRole, so approving from the web works with IM entirely unwired.
+func (s *Service) WithNotify(n ReviewNotifier, bestEffort func(string, func(ctx context.Context) error)) *Service {
+	s.notify = n
+	s.bestEffort = bestEffort
 	return s
 }
 
@@ -383,6 +441,22 @@ func (s *Service) createWithID(ctx context.Context, caller Caller, req WriteRequ
 	if err := validateCaller(caller); err != nil {
 		return nil, err
 	}
+	// A fresh tenant plugin is a private, self-testable draft. Space visibility is
+	// granted only by an approved review request (SubmitReview -> ApproveReview),
+	// and this is one of exactly two paths that could otherwise mint a
+	// Space-visible row directly.
+	//
+	// The requested value is VALIDATED before it is overridden: silently accepting
+	// `public` or a garbage value and storing `private` would hide a client bug and
+	// contradict the tenant contract those inputs already had. A system admin is
+	// left alone — `system` rows are not tenant-owned and not subject to Space
+	// review, matching the import path and AdminCreate.
+	if !caller.IsSystemAdmin {
+		if !validVisibility(req.Visibility, false) {
+			return nil, ErrInvalidRequest
+		}
+		req.Visibility = model.PluginVisibilityPrivate
+	}
 	now := s.now()
 	p, rels, err := s.buildWrite(ctx, caller, "", req, now, false)
 	if err != nil {
@@ -446,6 +520,20 @@ func (s *Service) update(ctx context.Context, caller Caller, pluginID string, re
 		return nil, ErrNotFound
 	}
 	if req.Type != old.Type {
+		return nil, ErrInvalidRequest
+	}
+	// A tenant update may keep the row's current visibility or lower it to
+	// private (a legitimate self-delisting), but never RAISE it. Together with
+	// createWithID above this closes the second and last path to org visibility
+	// that bypasses review: without it, `POST /plugins/upsert` with
+	// visibility:"space" lists a plugin in one call and the whole workflow is
+	// decorative. Reviewed promotion happens in ApproveReview, which writes the
+	// visibility column directly rather than through this path.
+	//
+	// A system admin is exempt for the same reason as createWithID: `system` rows
+	// are not tenant-owned, and a platform operator already reaches every one of
+	// these transitions through /api/v1/admin.
+	if !caller.IsSystemAdmin && !tenantVisibilityAllowed(old.Visibility, req.Visibility) {
 		return nil, ErrInvalidRequest
 	}
 	now := s.now()

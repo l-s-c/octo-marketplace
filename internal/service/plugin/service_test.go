@@ -55,6 +55,8 @@ type fakeStore struct {
 	tags           []model.TagFilter
 	tagFilter      pluginrepo.TagListFilter
 	err            error
+	// review carries the review-request half of the fake (see review_fake_test.go).
+	review reviewFake
 }
 
 func (f *fakeStore) List(_ context.Context, s pluginrepo.Scope, filter pluginrepo.ListFilter) ([]model.Plugin, int64, error) {

@@ -165,6 +165,11 @@ components:
         data:
           $ref: '#/components/schemas/internal_api_handler_plugin.installResponse'
       type: object
+    github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_reviewRequestResponse:
+      properties:
+        data:
+          $ref: '#/components/schemas/internal_api_handler_plugin.reviewRequestResponse'
+      type: object
     github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_skillMarkdownResponse:
       properties:
         data:
@@ -254,6 +259,16 @@ components:
         data:
           items:
             $ref: '#/components/schemas/internal_api_handler_plugin.listItemResponse'
+          type: array
+          uniqueItems: false
+        pagination:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetPagination'
+      type: object
+    ? github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_reviewRequestResponse
+    : properties:
+        data:
+          items:
+            $ref: '#/components/schemas/internal_api_handler_plugin.reviewRequestResponse'
           type: array
           uniqueItems: false
         pagination:
@@ -787,6 +802,34 @@ components:
         url:
           type: string
       type: object
+    github_com_Mininglamp-OSS_octo-marketplace_internal_model.ReviewDecisionSource:
+      enum:
+      - web
+      - im
+      type: string
+      x-enum-varnames:
+      - ReviewDecisionSourceWeb
+      - ReviewDecisionSourceIM
+    github_com_Mininglamp-OSS_octo-marketplace_internal_model.ReviewKind:
+      enum:
+      - first
+      - upgrade
+      type: string
+      x-enum-varnames:
+      - ReviewKindFirst
+      - ReviewKindUpgrade
+    github_com_Mininglamp-OSS_octo-marketplace_internal_model.ReviewStatus:
+      enum:
+      - pending
+      - approved
+      - rejected
+      - canceled
+      type: string
+      x-enum-varnames:
+      - ReviewStatusPending
+      - ReviewStatusApproved
+      - ReviewStatusRejected
+      - ReviewStatusCanceled
     github_com_Mininglamp-OSS_octo-marketplace_internal_model.SkillRead:
       properties:
         can_download:
@@ -1738,6 +1781,80 @@ components:
             type: string
           type: array
           uniqueItems: false
+      type: object
+    internal_api_handler_plugin.reviewRejectRequest:
+      properties:
+        reason:
+          type: string
+      type: object
+    internal_api_handler_plugin.reviewRequestResponse:
+      properties:
+        applicant_id:
+          type: string
+        applicant_name:
+          type: string
+        changelog:
+          type: string
+        current_version:
+          type: string
+        decision_source:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.ReviewDecisionSource'
+        kind:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.ReviewKind'
+        manifest_hash:
+          type: string
+        plugin_hash:
+          type: string
+        plugin_icon:
+          description: 'PluginIcon is a display URL (an uploaded icon is stored as
+            an object key and
+
+            must be presigned), resolved by the service through the same path the
+            plugin
+
+            list uses.'
+          type: string
+        plugin_id:
+          type: string
+        plugin_name:
+          type: string
+        plugin_type:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginType'
+        readme_content:
+          description: 'ReadmeContent is the primary document of the FROZEN submission;
+            populated
+
+            on the detail read only.'
+          type: string
+        reason:
+          type: string
+        review_id:
+          type: string
+        reviewed_at:
+          type: string
+        reviewer_id:
+          type: string
+        reviewer_name:
+          type: string
+        space_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.ReviewStatus'
+        submitted_at:
+          type: string
+        target_scope:
+          type: string
+        version:
+          type: string
+      type: object
+    internal_api_handler_plugin.reviewSubmitRequest:
+      properties:
+        changelog:
+          type: string
+        plugin_id:
+          type: string
+        version:
+          type: string
       type: object
     internal_api_handler_plugin.skillMarkdownResponse:
       properties:
@@ -5455,6 +5572,445 @@ paths:
       security:
       - Bearer: []
       summary: Install plugin to a Loop workspace/runtime
+      tags:
+      - plugin
+  /plugins/review_requests:
+    get:
+      description: mode=mine lists the caller's own submissions; mode=space lists
+        every request in the Space and requires the Space owner/admin role. Both are
+        always scoped to the Space of the request.
+      operationId: plugin.review_request.list
+      parameters:
+      - description: List mode
+        in: query
+        name: mode
+        required: true
+        schema:
+          enum:
+          - mine
+          - space
+          type: string
+      - description: Filter by status
+        in: query
+        name: status
+        schema:
+          enum:
+          - pending
+          - approved
+          - rejected
+          - canceled
+          type: string
+      - description: Page number, default 1
+        in: query
+        name: page
+        schema:
+          type: integer
+      - description: Page size, default 20, max 100
+        in: query
+        name: page_size
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.OffsetList-internal_api_handler_plugin_reviewRequestResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: 'FORBIDDEN: mode=space requires the Space owner/admin role'
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: RATE_LIMITED
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: List plugin review requests
+      tags:
+      - plugin
+    post:
+      description: Freezes the plugin's current draft content (documents plus relation
+        graph) under a caller-supplied version label and queues it for Space owner/admin
+        approval. Only the plugin owner may submit, only one request per plugin may
+        be pending, and a version label already published for that plugin is refused.
+      operationId: plugin.review_request.create
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/internal_api_handler_plugin.reviewSubmitRequest'
+                description: Submission
+                summary: payload
+        description: Submission
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_reviewRequestResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: 'CONFLICT: a request is already pending, or the version label
+            is already published'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: RATE_LIMITED
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Submit a plugin for Space review
+      tags:
+      - plugin
+  /plugins/review_requests/{review_id}:
+    get:
+      description: Returns the request plus readme_content extracted from the frozen
+        submission. Applicants see their own requests; Space owners/admins see every
+        request in the Space. A request in another Space is reported as not found.
+      operationId: plugin.review_request.get
+      parameters:
+      - description: Review request ID
+        in: path
+        name: review_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_reviewRequestResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: RATE_LIMITED
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Get a plugin review request
+      tags:
+      - plugin
+  /plugins/review_requests/{review_id}/approve:
+    post:
+      description: Requires the Space owner/admin role. Applies the frozen documents
+        and relation graph to the plugin, records a release version carrying the applicant's
+        label, and for a first listing flips visibility from private to space. Losing
+        a concurrent decision race returns CONFLICT.
+      operationId: plugin.review_request.approve
+      parameters:
+      - description: Review request ID
+        in: path
+        name: review_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: 'FORBIDDEN: Space owner/admin role required'
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: 'CONFLICT: already decided'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: RATE_LIMITED
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Approve a plugin review request
+      tags:
+      - plugin
+  /plugins/review_requests/{review_id}/cancel:
+    post:
+      description: Withdraws a pending request. Only the applicant may cancel; reviewers
+        reject instead. A request that has already been decided returns CONFLICT,
+        not NOT_FOUND.
+      operationId: plugin.review_request.cancel
+      parameters:
+      - description: Review request ID
+        in: path
+        name: review_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: 'NOT_FOUND: no such pending request for this applicant'
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: 'CONFLICT: already decided'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: RATE_LIMITED
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Cancel a plugin review request
+      tags:
+      - plugin
+  /plugins/review_requests/{review_id}/reject:
+    post:
+      description: 'Requires the Space owner/admin role and a non-empty reason of
+        at most 1000 characters. The plugin is left untouched: a private draft stays
+        private, and an already-listed version stays live. The applicant may edit
+        and resubmit, reusing the same version label.'
+      operationId: plugin.review_request.reject
+      parameters:
+      - description: Review request ID
+        in: path
+        name: review_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/internal_api_handler_plugin.reviewRejectRequest'
+                description: Rejection reason
+                summary: payload
+        description: Rejection reason
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-github_com_Mininglamp-OSS_octo-marketplace_internal_api_response_EmptyResp'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: 'VALIDATION_ERROR: reason is required'
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: 'FORBIDDEN: Space owner/admin role required'
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: 'CONFLICT: already decided'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: RATE_LIMITED
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Reject a plugin review request
       tags:
       - plugin
   /plugins/skill_md:
