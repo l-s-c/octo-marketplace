@@ -1058,3 +1058,471 @@ Both constants carry a comment pointing at the other. Tests
 
 `maxCardActionBody` stays 64 KiB: an IM callback body is a decision plus a couple
 of ids, sized by octo-server's own limits, and it is hashed before parsing.
+
+
+## Listing model (marketplace backend, 2026-09-02)
+
+Everything above was written when `visibility` alone decided marketplace
+presence. It no longer does. The items below record the two-axis model that
+replaced it, the publish/delist semantics built on it, and the version-label rule
+that came with them. Same rule as the section above: **what shipped wins**, and
+each item is a decision rather than an oversight.
+
+### 29. Two axes: `visibility` declares intent, `listing_state` decides presence.
+
+`migrations/sql/20260902-00-plugin-listing-state.sql` adds
+`listing_state ENUM('draft','published','delisted') NOT NULL DEFAULT 'draft'`
+after `visibility`. Before it, `private` doubled as "draft", so saving a plugin
+and publishing it were the same act — the moment an author created a row it was
+already in their own marketplace grid, and there was no way to say "org-visible,
+but not yet".
+
+`visibility` now means WHO should see the plugin once it is listed. `listing_state`
+means WHETHER it is listed. They are independent, and the separation is what the
+rest of this section is built on.
+
+**On read, two different predicates, deliberately not one.**
+
+- `visibilitySQL` (`internal/repository/plugin/repo.go:70`) is the SCOPE rule and
+  gates `listing_state` **only inside the `space` disjunct**:
+  `(p.visibility IN ('public','system') OR (p.space_id = ? AND ((p.visibility = 'space' AND p.listing_state = 'published') OR p.owner_uid = ?)))`.
+  The owner disjunct is deliberately NOT gated — an author has to read their own
+  draft in order to edit and publish it. The public/system disjunct is not gated
+  either (item 36). `'published'` is a literal, not a placeholder, so the nine
+  call sites embedding the constant keep their argument lists.
+- `listedSQL` (`internal/repository/plugin/read.go:143`) is the GRID rule,
+  ` AND p.listing_state='published'`, and is a separate concern: it is what makes
+  a draft absent from the market grid *including for its own author*, which is the
+  only thing distinguishing "save as draft" from "publish" to the person who just
+  pressed one of them. `buildListQuery` appends it on the non-`Mine`, non-`AllSpaces`
+  path; `ListTags` and `ListPlacementCategories` append it too, or a chip filters
+  to an empty grid and a category count overstates its page (item 37's facet
+  tests). `Mine` (我的发布) and `AllSpaces` (admin) omit it on purpose — both manage
+  rows in every state.
+
+**On write, the column moves at exactly six SQL sites**, and no ordinary tenant
+save is one of them: `insertPlugin` (`write.go:125`, taking whatever the service
+stamped — `buildWrite` mints `draft`, while `AdminCreate` and the admin container
+import re-stamp `published`, because the admin surface has no draft step and the
+create IS the publish), the `ResetListingToDraft` branch of `Repo.Update`
+(`write.go:534`, item 31), `ApproveReview`'s `isFirst` branch (`review.go:435`),
+`promoteEmbeddedChildren` (`review.go:597`), `PublishPlugin` (`listing.go:92`) and
+`DelistPlugin` (`listing.go:185`).
+
+Two notes for a reader of the surrounding comments. The doc comment on
+`model.Plugin.ListingState` says the column is written by "exactly four paths" and
+that "the UPDATE statements omit the column entirely" — that undercounts: the
+`ResetListingToDraft` branch does write it from `Repo.Update`, and
+`promoteEmbeddedChildren` writes it from inside the approve transaction. The
+narrower claim it is reaching for — *a content-only save cannot change the listing
+state* — does hold. And the DB DEFAULT is `draft` on purpose: `RebuildGraph`
+re-inserts a container's children, so a `published` default would silently list a
+draft container's children (item 35).
+
+Grandfathering: `UPDATE plugins SET listing_state='published' WHERE deleted_at IS NULL`.
+Every live row keeps exactly the reach it had. Soft-deleted rows are deliberately
+left `draft` so a manual undelete cannot republish something the org had already
+lost sight of. `draft` is therefore a purely new state no existing row can be in.
+
+### 30. `display_status` is derived at read time, and the review half is owner-only.
+
+`Plugin.DisplayStatus(hasPendingReview, latestReview)` (`internal/model/plugin.go:88`)
+is the single status a client renders. It folds the listing axis (`listing_state`,
+on the plugin) with the review axis (`plugin_review_requests`, a separate entity),
+in this precedence:
+
+1. an open request wins outright — including for an already-listed plugin whose
+   NEW version is in review, because showing 已发布 there hides that the author is
+   waiting on somebody;
+2. `delisted`, then `published` — what the listing axis says;
+3. a `rejected` latest review, so an author sees why their draft is not live;
+4. otherwise `draft`. A CANCELED latest review lands here on purpose: withdrawing
+   a request returns the plugin to 草稿 rather than leaving a "withdrawn" state.
+
+It is never stored. Storing it would be the collapse item 26 forbids — a listed v1
+with an in-review v2 is two simultaneous facts and one column cannot hold both —
+and the vocabulary is marketplace-only, never handed to `cardState`.
+
+The two inputs are populated in exactly two places, and both are effectively
+owner-scoped:
+
+- the mine listing — `ListFilter.IncludeReviewState`, set as `IncludeReviewState: p.Mine`
+  (`service.go:290`), which appends three correlated subqueries
+  (`pluginReviewStateColumns`) rather than a join;
+- `Service.Detail`, which calls `LatestReviewForPlugin` **only when
+  `p.OwnerUID == caller.UID`** — everyone in the Space may read a listed plugin,
+  but only its author has any business knowing an update is sitting in the queue.
+
+Everywhere else both fields are zero, so `display_status` collapses to the listing
+axis alone. `LatestReviewForPlugin` orders pending first, so one lookup answers
+both "is a request open" and "what happened last".
+
+### 31. Publish is one button; the row's declared visibility picks the branch.
+
+`Service.Publish` (`internal/service/plugin/listing.go`) takes no "submit for
+review" flag and no content. The caller says "publish this" and the plugin's
+declared visibility decides what that means:
+
+- `private` → listed immediately (`PublishPlugin`). There is no org audience to
+  protect and no review channel for a row nobody else can read.
+- `space` → a pending review request (`SubmitReview`); the plugin stays a draft
+  and `ApproveReview` is what lists it.
+- anything else → `ErrInvalidRequest`. `system` cannot reach here.
+
+Putting that rule in the service rather than the client is the point: a browser
+that guesses wrong either lists something unreviewed or strands a plugin in draft
+forever. Guards, in order: non-owner and embedded both answer `ErrNotFound` (a
+non-owner must not learn the plugin exists); already-published is
+`ErrAlreadyPublished`, not a no-op, because a second press means the client's view
+is stale; a pending request is `ErrReviewPending`.
+
+`Repo.PublishPlugin` **re-derives `private` from the FOR UPDATE-locked row**, not
+from the service's decision. The service decided from an unlocked read several
+round trips earlier, and between the two the owner can raise the draft to `space`
+through an ordinary upsert (legal on a draft) — the UPDATE would then stamp
+`published` onto org-visible unreviewed content with no review request ever
+created. `ApproveReview` re-derives `isFirst` the same way and for the same reason.
+The check is restated in the CAS predicate, which is
+`... AND visibility=? AND listing_state<>'published'`. Zero rows is `ErrConflict`
+via `mustChangeState`, deliberately not `ErrNotFound`: after a successful locked
+read the row provably exists, so reporting "not found" would 404 a plugin the
+caller is looking at.
+
+Publish mints no version — every save already snapshots one, and
+`plugin_versions.version` is a per-plugin counter (item 3). It does self-heal the
+default placement forward (`ensureVisibleDefaultPlacement`), for the same reason
+approve does (item 1 as amended): listing promises "this is in the market now",
+and a row with a missing or hidden placement is not.
+
+The complementary rule lives in `Service.update`: **widening the declared audience
+of a listed plugin un-lists it** (`ResetListingToDraft`). A published private
+plugin is editable by design, but writing `space` onto it while it stays published
+would list it org-wide with no review. The condition in code is "the visibility
+changed", not "it widened" — for a tenant the widening one is the only change that
+can reach there (published+space is already refused with `ErrListedRequiresReview`),
+and for the exempt system admin (item 36) dropping to draft on a narrowing is the
+safe direction anyway.
+
+### 32. Delist is moderation of ORG content, and both refusals are `ErrNotFound`.
+
+Space admins only, using the SAME predicate as approve and reject (`isReviewer`):
+taking something down is the same authority as putting it up, and a second notion
+of "who moderates this Space" would drift from the first. The author deliberately
+cannot self-delist, so a plugin the org depends on cannot vanish at its author's
+discretion. The row is locked by SPACE (`getReviewedPluginForUpdate`), not by
+owner, because the actor is by definition not the author.
+
+`Repo.DelistPlugin` then refuses two shapes from the locked row, **both with
+`ErrNotFound`**:
+
+- **an embedded child.** It is listed and un-listed by its container —
+  `ApproveReview` promotes the whole graph in one transaction. Taking one child
+  down leaves the container published while a member it declares is hidden, and
+  every non-owner install of the PARENT then fails with `ErrDependencyHidden`: a
+  takedown of one row that silently breaks another.
+- **anything whose declared visibility is not `space`.** This one is the security
+  refusal and the reason the error is not distinguishable. `visibilitySQL` admits
+  a private plugin only to its owner, so an admin who cannot GET the row would
+  learn it exists by successfully delisting it — an existence oracle, and a way to
+  interfere with a colleague's private plugin at will. `ErrNotFound` keeps the
+  answer identical to the read the same admin is allowed to make. This is the
+  CLAUDE.md rule "Cross-Space failures must not leak resource existence" applied
+  within a Space, where the boundary is ownership rather than tenancy.
+
+Both guarantees are restated in the CAS predicate — `... AND listing_state='published'
+AND visibility=? AND is_embedded=0` — exactly as publish carries its visibility
+check into the UPDATE, so the guarantee survives if the statement is ever reached
+without that read in front of it. A CAS miss is `ErrConflict`, which the service
+maps to `ErrNotPublished` (409); a plugin in another Space never reaches the CAS
+and stays a 404 even for a real admin of that other Space.
+
+The transaction also **cancels any pending request** (item 34's helper): a request
+on a plugin that just left the market has nothing left to decide, leaving it open
+would let a later approval silently relist the plugin behind the admin's back, and
+canceling releases the single-pending slot so the author can edit and resubmit.
+
+Placements are deliberately untouched — hiding them would also hide the plugin
+from its own author's 我的发布, which shares the placement join, and `listing_state`
+already removes it from every other reader.
+
+Deliberate consequence, stated in the code and worth repeating: **a published
+PRIVATE plugin has no takedown path at all.** It needs none (published+private is
+"listed to its owner alone"), and the owner can still drop it back to a draft by
+widening the visibility, which un-lists it.
+
+### 33. Version labels are `x.y.z` and forward-only; the exemption is byte-equality with the STORED label.
+
+`versionPattern` is `^\d{1,9}\.\d{1,9}\.\d{1,9}$`. The old pattern accepted any
+identifier-ish string, which is how `v999`, `1.0.0lll` and `oooo1.0.0` reached
+production — none of them can be ordered against another, so "the version may only
+go up" was unanswerable.
+
+**Why the grandfathering exemption exists.** Tightening the format alone would
+strand every row already carrying such a label. Every UI here is fetch-edit-save
+and echoes `version` straight back (octo-web's edit modal seeds the input from
+`current_version`, and its patch bump returns the label unchanged for anything with
+fewer than three dot-parts), so a legacy-labelled row would 400 on every save —
+**permanently**, because the only way to correct the label is a save.
+
+The exemption is `WriteRequest.grandfatheredVersion`: unexported on purpose, set
+only from `*old.CurrentVersion`, never from a request body. `buildWrite`
+(`service.go:765`) accepts a malformed label only when it is byte-equal (modulo
+surrounding space) to that stored value; **a malformed NEW label is still
+refused**. `isStoredVersionLabel` (`import.go:264`) is the import path's copy of
+the same byte-equality, likewise read from the stored row so a caller cannot
+smuggle a malformed label past the format gate by asserting it is grandfathered.
+
+Where the two rules now live:
+
+- `Service.update` — the tenant upsert. Both checks sit **above** the
+  `IsSystemAdmin` branch, so a super-admin on `/plugins/upsert` is bound by
+  forward-only too.
+- `applyStoredVersionRules` (`admin.go:229`) — the admin twin, called from
+  `AdminUpdate` and from `adminImportConsumedTask`. Neither route had either rule
+  before; that was an omission, not an exemption. Its ordering check is gated on
+  the submitted label being well-formed, which is the one way it reads differently
+  from the tenant copy — the set of accepted writes is identical, only the
+  attribution differs (a format problem should be reported as a format problem,
+  not as "use a higher version").
+- `resolveImportFields` (`import.go:231`) — the skill import/reupload path, with a
+  three-way split: a caller-SUBMITTED label is validated (they can fix it) unless
+  it is the row's own stored one; a PACKAGE-derived label that no longer parses
+  falls back to `defaultCurrentVersion` (`"1.0.0"`) rather than failing the whole
+  upload over a field the author never typed and cannot edit without repackaging.
+  The refusal is a `*ReviewFieldError{Field: "version"}`, not a bare
+  `ErrInvalidRequest`, and it runs **before** the parse task is consumed so the
+  upload stays retryable.
+
+**The real stakes, precisely, because the obvious guess is wrong.**
+`plugin_versions.version` is a per-plugin auto-increment counter, not this label
+(item 3), so a bad label corrupts no snapshot and collides with nothing there. The
+damage is on the review axis: `SubmitReview` refuses a submission that is not
+`versionNotRegressed` against `plugins.current_version`, and
+`publishedVersionLabels` folds `current_version` into the set of labels the org has
+already seen for every non-draft row. Dropping a listed plugin from `2.0.0` to
+`1.5.0` therefore **re-opens the entire range below an already-approved label** —
+the next reviewed upgrade can land at `1.6.0` and every installer watches the
+plugin go backwards.
+
+`versionNotRegressed` refuses a malformed NEXT first and unconditionally (checking
+CURRENT first would let one legacy value wave another through), and treats an
+unorderable CURRENT as blocking nothing — which is what preserves the admin
+surface's data-repair role: correcting a stranded `v999` to a real label still goes
+through. What stays refused everywhere is a downgrade between two WELL-FORMED
+labels. That is a real if rare need with no route left, and the trade is taken
+deliberately: refusing fails loudly with a 400 naming the version field, while
+allowing it fails silently for every consumer of the plugin. A genuinely stuck
+well-formed label needs a DB fix.
+
+### 34. Removing a plugin from circulation cascade-cancels its pending review.
+
+`cancelPendingReviewFor` (`review.go:856`) settles a plugin's pending request
+inside the caller's transaction. Four call sites: `Repo.Delete`, `Repo.DeleteGraph`
+(the top), `softDeleteRebuiltChild` (each embedded child) and `DelistPlugin`.
+
+**Why a cascade is the only fix that reaches the row.** Once `plugins.deleted_at`
+is set, the request outlives its plugin in a state nobody can leave, in both
+directions at once: `ListReviewRequests`, `GetReviewRequest` and
+`LoadReviewSnapshot` all carry `p.deleted_at IS NULL`, so neither the applicant nor
+a reviewer can even SEE the row; and `CancelReview`, `ApproveReview` and
+`RejectReview` each load the plugin through `getReviewedPluginForUpdate`, which
+refuses a deleted one — so the applicant's own cancel answers "plugin not found".
+Relaxing any single one of those would be dead code, because the request is
+undiscoverable before it is unsettleable.
+
+The UPDATE is a CAS on `status='pending'`, not a blind write, so a request another
+transaction just approved or rejected keeps the decision it actually got, with its
+reviewer and reason intact. Zero rows is the ordinary case and is not an error.
+Reasons are stored on the row: `plugin delisted by a Space admin`, `plugin deleted`.
+
+Placing the cascade at `softDeleteRebuiltChild` rather than at its two callers is
+deliberate: it makes the invariant structural — no path that soft-deletes a
+`plugins` row leaves a pending request pointing at it — and it also covers
+`RebuildGraph`'s replaced children, which are removed exactly as permanently.
+Reaching a child's request through the service requires a row that became embedded
+*after* submitting (`SubmitReview` refuses `is_embedded`), so in practice it matches
+zero rows; that is the point.
+
+**Soft-delete semantics, and why delete collects no storage objects.** The
+`plugins` row, its whole `plugin_versions` history and its live attachment sidecar
+all survive, and nothing in this service ever deletes a plugin's own objects —
+neither `Service.Delete` nor the admin delete touches storage. Collecting only the
+canceled submission's spill would make delete the single place a soft delete
+performs an irreversible external side effect, on the smallest slice of what it is
+knowingly leaving behind. The asymmetry settles it: not collecting is recoverable
+(every row a later sweeper needs survives the soft delete, and
+`retainedAttachmentKeys` is not filtered by `deleted_at`), collecting is not. It
+would also prejudge whether `deleted_at` means "recoverable" — and the migration
+already fails closed against a manual undelete, which is not the posture of a
+codebase that treats a soft-deleted plugin as destroyed.
+
+Delist's identical non-collection rests on a **different** argument: the author
+never abandoned that submission, a third party's takedown canceled it as a side
+effect, and they are expected to edit and republish. Do not merge the two
+justifications; they would not survive the same change.
+
+Contrast, changed in this branch: an **IM-sourced reject now DOES collect**.
+`DecideReviewFromCard` wires `cleanupOrphanedReviewObjects` from the two sidecars
+`RejectReview` already returns out of its own transaction. The comment that
+justified leaving them behind claimed the GC would cost an extra round trip, which
+was false — so the same decision leaked or did not leak depending on which button
+the admin happened to press.
+
+### 35. A container rebuild carries the listing state forward with visibility.
+
+`ReuploadContainer` stamps the top and every child from an UNLOCKED pre-parse read;
+`RebuildGraph` then re-stamps `visibility` / `listing_state` / `space_id` /
+`owner_uid` from the row locked with FOR UPDATE, so a concurrent edit, delist or
+approve during the multi-second parse wins over the pre-parse view. The top's
+`listing_state` is preserved by omission from its UPDATE; every child is freshly
+inserted, so all four fields are re-stamped there.
+
+Children must agree with the top in both directions: a child left `draft` under a
+published top makes `resolveInstallDetail` resolve fewer visible targets than
+`CountDeclaredRelations`, so every non-owner install of the container fails with
+`ErrDependencyHidden` — silent until somebody other than the author tries it; and a
+child `published` under a draft top is independently readable when it should not be.
+
+### 36. Out of scope and named residuals of the listing model.
+
+- **A super-admin can edit an already-listed row's live content with no review
+  request and no `review_approve` audit row.** `Service.update` exempts
+  `IsSystemAdmin` from the two tenant gates, and only the ordinary `update` audit
+  records the change. This is the platform-operator escape hatch and is kept
+  deliberately. It is narrower than it looks and the boundary is worth stating:
+  the super-admin cannot LIST anything through this path (`listing_state` is not
+  settable on the write path, and changing visibility on a published row still
+  drops it to draft), and `AdminUpdate` stamps `old.Visibility` via
+  `adminEffectiveWrite` rather than taking it from the request. It is a known
+  residual, not an oversight — and see item 37 for the fact that no test currently
+  pins that boundary.
+- **`system` rows have no listing lifecycle.** `visibilitySQL`'s public/system
+  disjunct is deliberately not gated on `listing_state`. A `system` row is
+  admin-owned, reaches every Space and has no per-Space listing lifecycle; gating
+  it would make every admin-created connector and global skill vanish the moment a
+  write path forgot to stamp `published`. Admin creates do stamp it, so the value
+  stays consistent, but nothing depends on that. A future 全平台可见 tenant flow
+  would have to extend this — it is not extended today, on purpose.
+- **No takedown path for a published private plugin** (item 32).
+- **No object GC on delist or delete** (items 32, 34). The canceled submission's
+  spilled objects leak until some future sweeper collects them; bounded by one
+  submission per takedown, and content-addressed. Reclaiming them is one deliberate
+  decision about plugin-delete object GC — live sidecar, version sidecars and any
+  frozen submission together — not a fragment bolted onto a cascade.
+- **No backfill of review requests for grandfathered rows.** The existing
+  out-of-scope bullet still holds; `publishedVersionLabels` covers those rows by
+  folding `current_version` into the already-seen set for any non-draft plugin.
+- **No undelete.** There is no undelete path in this repository, and the migration
+  fails closed against a manual one by leaving soft-deleted rows `draft`.
+- **`listing_state` must never acquire review vocabulary.** No `pending`, no
+  `rejected` — that is exactly the collapse item 26 forbids, and 审核中 is derived
+  (item 30), not stored. The migration comment says so and a migration test holds
+  the enum at those three values.
+
+### 37. Acceptance criteria for items 29–36, as what the tests actually prove.
+
+Every `internal/db` test below is a real-MySQL integration test and **skips**
+without `TEST_MYSQL_DSN`; a green `go test ./...` on a machine without it proves
+none of them.
+
+- **Scope (the security half).**
+  `TestSpaceIntentDraftIsInvisibleToTheSpaceButVisibleToItsOwner` drives a
+  `space`-intent draft through nine surfaces — `Get`, `List`, `List(mine)`,
+  `GetWithRelations`, `ListTags`, `ListTags(mine)`, `ListVersions`,
+  `ListPlacementCategories`, and the WRITE path via `lockRelationTargets` (a
+  colleague trying to adopt the draft as a relation target of their own published
+  expert) — and asserts a same-Space colleague reaches it through none of them,
+  while the owner reaches it through the ones where that is meaningful. It is
+  table-driven precisely so a tenth call site added without `visibilitySQL` fails
+  here; add new surfaces as cases rather than asserting on the constant's text.
+  `TestCrossSpaceDraftLeakage` proves the parenthesis nesting: the owner disjunct
+  lives INSIDE `space_id = ?`, so the owner acting in another Space gets
+  `ErrNotFound`. `TestDelistedPluginLeavesTheMarketButStaysReadableByItsOwner`
+  proves `delisted` behaves like a draft for everyone else while staying on its
+  author's 我的发布. `TestHasPendingReviewIsScopedThroughThePlugin` proves the
+  pre-check cannot be used to probe whether an arbitrary plugin has a review open,
+  and that canceling releases it.
+- **Facets agree with the grid.** `TestGridFacetsAgreeWithTheGrid` asserts from the
+  AUTHOR's scope — the only scope where the two sets diverge — that
+  `ListPlacementCategories`' `plugin_count` equals the number of rows `List`
+  actually returns, and that a draft-only tag is absent from the grid's chips,
+  while `ListTags(mine)` still carries it with an every-state count.
+- **Publish / delist transactions.** `TestPublishImmediatelyListsAPrivatePlugin`
+  proves, across a healthy / hidden / missing default placement, that publish ends
+  with exactly one visible default placement, leaves `visibility` at `private`
+  (仅自己可见 + 已发布 is a real state), mints **zero** `plugin_versions` rows, and
+  writes one `publish` audit row.
+  `TestPublishRefusesAPluginThatBecameOrgVisibleMidFlight` (the locked re-derivation
+  of item 31), `TestConcurrentPublishAndDelistProduceOneWinner` (exactly one nil
+  and one `ErrConflict`), `TestDelistCancelsThePendingReviewAndFreesTheSlot`,
+  `TestWideningVisibilityOnAPublishedPluginUnlistsIt`,
+  `TestPublishedLabelsIncludeADelistedPluginsCurrentVersion`.
+  `TestDelistRefusesRowsThatAreNotOrgContent` proves all three refusals return
+  `ErrNotFound`, leave `listing_state` untouched and write **zero** delist audit
+  rows — including the case that names the residual: **the admin's OWN published
+  private plugin**. `TestDelistFromAnotherSpaceIsNotFound` proves the cross-Space
+  answer is indistinguishable from nonexistence.
+  `TestDelistRequiresTheReviewerRole` proves the authority is the approve/reject
+  predicate, including that the plugin's own owner acting as a plain member cannot
+  delist.
+- **Derived status.** `TestMineListingCarriesTheDerivedStatus` proves the mine
+  listing carries `display_status` without a client-side join, and pins the
+  precedence that mattered most: a LISTED plugin with a pending upgrade reads
+  `pending_review`, not `published`. `TestReviewQueueHidesRequestsForDeletedPlugins`
+  covers the review-side read.
+- **Version labels.** `TestAdminUpdateAcceptsTheRowsStoredLegacyVersionLabel`,
+  `TestImportReuploadAcceptsTheRowsStoredLegacyVersionLabel` and
+  `TestAdminSkillReuploadAcceptsTheRowsStoredLegacyVersionLabel` prove a
+  fetch-edit-save round-trip of a stored `1.0` / `v1.2.3` / `2.0.0-beta.1` survives
+  on each surface. `TestAdminUpdateStillRejectsANewMalformedVersion`,
+  `TestImportReuploadStillRejectsALegacyLabelThatIsNotTheRowsOwn` and
+  `TestAdminUpdateGrandfatheringIsNotCallerSupplied` prove the exemption is
+  byte-equality with the STORED label and nothing wider, and that a rejected write
+  never reaches the store. `TestImportFallsBackWhenThePackageDeclaresALegacyVersion`,
+  `TestImportRejectsACallerSubmittedLegacyVersion` and
+  `TestImportUsesTheSubmittedVersionOverALegacyPackageLabel` pin the
+  package-derived vs caller-submitted split, and that the guard runs before the
+  parse task is consumed. `TestAdminUpdateRefusesAVersionThatMovesBackwards` and
+  `TestAdminSkillReuploadRefusesAVersionThatMovesBackwards` prove forward-only now
+  holds on both admin routes (and that the reupload releases its task, so the
+  upload stays retryable). `TestAdminUpdateStillRepairsAnUnorderableStoredLabel`
+  proves the repair path — a stranded legacy label corrected to a real one — still
+  goes through.
+- **The wire shape of the version field error.**
+  `TestImportFieldErrorNamesTheVersionInputInTheEnvelope` proves the import handler
+  renders a `*ReviewFieldError` as `VALIDATION_ERROR` with
+  `details.field=version`. Scope note: it drives a **fake service** that returns
+  the error, so it pins the envelope wiring on a route that does not otherwise go
+  through the review path — it does NOT prove `resolveImportFields` produces that
+  error. That half is `TestImportRejectsACallerSubmittedLegacyVersion`.
+- **Delete cascade.** `TestDeleteCancelsThePendingReviewRequest` proves the request
+  becomes `canceled` with `reviewer_uid`, a reason and `reviewed_at` set; that a
+  second plugin's open request is untouched (the cascade is scoped, not a queue
+  sweep); and that the frozen attachment sidecar survives.
+  `TestDeleteDoesNotOverwriteAlreadyDecidedRequests` proves the CAS leaves an
+  already-rejected request's reviewer and reason intact.
+  `TestDeleteGraphCancelsPendingReviewsAcrossTheSubtree` proves both the top and an
+  embedded child are canceled, with the fixture making the child embedded *after*
+  its submission — the only way a real one gets there.
+- **Object policy.** `TestDeletingAPluginCollectsNoObjects` proves delete destroys
+  no storage object, neither the live sidecar's nor the submission's. It cannot be
+  made red by reverting the cascade; it guards the opposite mistake, so wiring any
+  object GC into the delete path turns it red — which is the signal to re-argue the
+  comment rather than quietly change it. `TestIMDenyCollectsTheSubmissionsOrphanedObjects`
+  proves an IM deny now collects exactly the orphaned key and keeps a key the live
+  row still references; `TestIMDenyThatLosesTheRaceCollectsNothing` proves a lost
+  CAS collects nothing, because the winner's outcome owns those objects.
+- **Migration.** `TestPluginListingStateMigrationUpDownMySQL` proves up / down /
+  re-apply, the fail-closed `draft` DEFAULT, the enum being exactly
+  `('draft','published','delisted')` and no more, `listing_state` as the third
+  column of `idx_plugins_scope_category_created`, the new
+  `idx_review_plugin_submitted`, and the grandfathering (a live row becomes
+  `published`, a soft-deleted one stays `draft`).
+- **Stated gap, so nobody infers coverage from the list above.** The super-admin
+  escape hatch in item 36 has **no test**. Nothing drives an `IsSystemAdmin` caller
+  through `Service.update` against a published `space` row to pin either half of
+  the claim — neither that the edit is allowed, nor that it cannot list the row.
+  `TestSystemAdminIsAlwaysAReviewer` and the system-admin case of
+  `TestDelistRequiresTheReviewerRole` cover the review/delist authority only. A
+  reviewer who wants that boundary held has to ask for the test; do not read item
+  36 as an asserted invariant.
