@@ -1,9 +1,10 @@
 -- +migrate Up
 -- Reindex, split out of 20260902-00 so each file is a single DDL unit (see
 -- 20260902-00's header for the implicit-commit hazard a DDL→UPDATE→DDL file
--- carried). Both index rebuilds are pure DDL and safe to co-locate here: neither
--- is separated by a DML step, so no intermediate implicit commit can strand a
--- half-applied UPDATE.
+-- carried). This file now carries exactly ONE DDL — the review_requests index
+-- that used to sit here moved to 20260902-03, because two ALTERs in one file
+-- reintroduce that same hazard (a crash between them replays a bare ADD INDEX,
+-- ERROR 1061).
 --
 -- The catalog read predicate now filters (visibility, space_id, listing_state)
 -- together, so listing_state joins the existing scope index rather than getting
@@ -18,17 +19,7 @@ ALTER TABLE `plugins`
   ADD INDEX `idx_plugins_scope_category_created` (`visibility`, `space_id`, `listing_state`, `category_id`, `created_at`),
   ALGORITHM=INPLACE, LOCK=NONE;
 
--- Backs the latest-review-per-plugin lookup that derives the displayed status on
--- the "my publishes" list. The pending EXISTS is already served by
--- idx_review_plugin_status_version; this one serves the ORDER BY submitted_at.
-ALTER TABLE `plugin_review_requests`
-  ADD INDEX `idx_review_plugin_submitted` (`plugin_id`, `submitted_at`),
-  ALGORITHM=INPLACE, LOCK=NONE;
-
 -- +migrate Down
-ALTER TABLE `plugin_review_requests`
-  DROP INDEX `idx_review_plugin_submitted`,
-  ALGORITHM=INPLACE, LOCK=NONE;
 ALTER TABLE `plugins`
   DROP INDEX `idx_plugins_scope_category_created`,
   ADD INDEX `idx_plugins_scope_category_created` (`visibility`, `space_id`, `category_id`, `created_at`),
