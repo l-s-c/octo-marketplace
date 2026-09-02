@@ -28,8 +28,9 @@ type Mutation struct {
 	SnapshotVersion bool
 	Changelog       *string
 	// ResetListingToDraft un-lists the plugin as part of this save. The ONLY
-	// caller is the visibility-widening path in Service.update; see the comment at
-	// the UPDATE statement for why that case cannot leave the row published.
+	// caller is Service.update, for a published row whose declared visibility
+	// CHANGED (not merely widened); see the comment at the UPDATE statement for
+	// why that case cannot leave the row published.
 	ResetListingToDraft bool
 }
 
@@ -521,7 +522,7 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 		updWhere, updTail = `WHERE plugin_id=? AND deleted_at IS NULL`, []any{p.ID}
 	}
 	// An ordinary save cannot change listing_state — EXCEPT when the caller is
-	// widening the declared audience of an already-listed plugin. Writing the new
+	// changing the declared audience of an already-listed plugin. Writing the new
 	// visibility while leaving listing_state='published' would list the plugin to
 	// the whole organization with no review, which is the one thing this workflow
 	// exists to prevent. Dropping back to 'draft' costs the author nothing (a
@@ -529,7 +530,10 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	// the normal 发布 path, where the new visibility routes it through review.
 	//
 	// Set by Service.update, which is the only place that can compare the declared
-	// visibility against the persisted one.
+	// visibility against the persisted one. Its condition is any CHANGE, not a
+	// widening: for a tenant the only change reaching here is the widening one
+	// (published+space is refused earlier), and for the exempt system admin a
+	// narrowing drops the row to draft too, which is the safe direction.
 	listingReset := ``
 	if m.ResetListingToDraft {
 		listingReset = `listing_state='draft',`
