@@ -208,8 +208,32 @@ func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdm
 	if f.visibility == model.PluginVisibilityPublic {
 		return nil, ErrInvalidRequest
 	}
-	if !validName(f.pluginName) || f.name == "" || !validVersion(f.version) || !validVisibility(f.visibility, systemAdmin) {
+	if !validName(f.pluginName) || f.name == "" || !validVisibility(f.visibility, systemAdmin) {
 		return nil, ErrInvalidRequest
+	}
+	// The version may come from the uploaded package's own frontmatter rather than
+	// from the caller. Since the format was tightened to x.y.z, a zip declaring
+	// `1.0` or `1.0.0-beta.1` — accepted for as long as those packages have
+	// existed — would fail the whole upload over a field the author did not type.
+	//
+	// A caller-SUBMITTED label is still validated, because that one they can fix.
+	// A package-derived one falls back to the default: the upload is the point, and
+	// the author can set a real label when they publish.
+	//
+	// The one exception is the label the row ALREADY holds. A reupload form is
+	// prefilled from the row (octo-web's edit modal seeds the version input from
+	// current_version), so on a package-only reupload the "submitted" label is
+	// routinely the row's own — and on a row minted before the tightening it no
+	// longer parses. Refusing it here would contradict the exemption every other
+	// save path grants (see WriteRequest.grandfatheredVersion) and would leave the
+	// reupload route as the single place a legacy-labeled skill stays unsavable,
+	// 400ing on a value the row already stores.
+	if f.versionSubmitted {
+		if !validVersion(f.version) && !isStoredVersionLabel(old, f.version) {
+			return nil, &ReviewFieldError{Field: "version", Reason: "invalid"}
+		}
+	} else if !validVersion(f.version) {
+		f.version = defaultCurrentVersion
 	}
 	// An upload lands as a DRAFT whatever visibility it declares (buildWrite stamps
 	// listing_state), so the declared value is kept rather than clamped: an author
@@ -229,6 +253,17 @@ func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdm
 		f.visibility = old.Visibility
 	}
 	return f, nil
+}
+
+// isStoredVersionLabel reports whether v is byte-for-byte (modulo surrounding
+// space) the version label the row already holds.
+//
+// Read from the STORED row, never from the request, so a caller cannot smuggle a
+// malformed label past the format gate by asserting it is grandfathered — the
+// same property WriteRequest.grandfatheredVersion relies on.
+func isStoredVersionLabel(old *model.Plugin, v string) bool {
+	return old != nil && old.CurrentVersion != nil &&
+		strings.TrimSpace(*old.CurrentVersion) == strings.TrimSpace(v)
 }
 
 func (s *Service) importConsumedTask(ctx context.Context, caller Caller, task *skillrepo.ParseTaskRow, f *importFields, updateID string, oldPlugin *model.Plugin) (*Detail, error) {
