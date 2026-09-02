@@ -291,6 +291,54 @@ func TestSubmitRefusesTheLiveLabelOfAnAlreadyListedPlugin(t *testing.T) {
 	}
 }
 
+// The forward-only version rule must be enforced under the plugin row lock, not
+// only on the service's earlier unlocked read. This reproduces the exact
+// submit-overlapping-approve interleaving:
+//
+//	current=1.5.0, plugin listed
+//	T2's unlocked service check reads 1.5.0 and accepts label 1.6.0 (the freeze
+//	  window then runs for seconds)
+//	T1 submits 2.0.0 and it is approved  -> current_version = 2.0.0
+//	T2's locked InsertReviewRequest finally runs with label 1.6.0
+//
+// The equality check alone lets 1.6.0 through (it is not in the published set,
+// which is {2.0.0}); without the locked ordering re-check the later approval
+// would stamp 1.6.0 and regress the plugin's public label 1.5.0 -> 2.0.0 ->
+// 1.6.0 permanently. InsertReviewRequest re-derives the rule from the LOCKED
+// current_version, so T2 is refused with ErrVersionRegressed.
+func TestSubmitReRunsForwardOnlyRuleAgainstLockedCurrentVersion(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", currentVersionID: "ver-1", currentVersion: "1.5.0"})
+
+	// T1 submits 2.0.0 and it is approved: current_version moves forward to 2.0.0.
+	// This stands in for the concurrent decision that lands during T2's freeze
+	// window; T2 already passed its unlocked check against the stale 1.5.0.
+	winner := newRequest("plugin-1", "2.0.0")
+	if err := repo.InsertReviewRequest(ctx, tenantScope(), winner, snapshotOf(`{"a":1}`, `{"b":2}`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ApproveReview(ctx, reviewerScope(), pluginrepo.ApproveReviewParams{
+		ReviewID: winner.ID, ReviewerUID: "admin-1", ReviewerName: "Adam",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// T2's delayed locked insert. 1.6.0 is forward of the stale 1.5.0 T2 saw, but
+	// backward of the locked 2.0.0 — it must now be refused rather than queued for
+	// an approval that would regress the public label.
+	err := repo.InsertReviewRequest(ctx, tenantScope(), newRequest("plugin-1", "1.6.0"), snapshotOf(`{"a":1}`, `{"b":2}`, nil))
+	if !errors.Is(err, pluginrepo.ErrVersionRegressed) {
+		t.Fatalf("submit racing an approve = %v, want ErrVersionRegressed", err)
+	}
+
+	// A label forward of the locked current is still accepted.
+	if err := repo.InsertReviewRequest(ctx, tenantScope(), newRequest("plugin-1", "2.1.0"), snapshotOf(`{"a":1}`, `{"b":2}`, nil)); err != nil {
+		t.Fatalf("a label forward of the locked current was refused: %v", err)
+	}
+}
+
 // The whole point of the gate: approve is what makes a plugin org-visible, and it
 // applies the FROZEN documents rather than whatever the draft says now.
 func TestApproveFlipsVisibilityAndAppliesTheFrozenSnapshot(t *testing.T) {

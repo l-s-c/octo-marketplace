@@ -65,10 +65,32 @@ type FrozenSnapshot struct {
 	PluginHash     string
 }
 
+// classifyDeadlock maps InnoDB's deadlock-victim abort (error 1213) to the
+// repository's typed ErrConflict. Submit and the three decision paths (approve/
+// reject/cancel) take the plugin row and the request row in OPPOSITE orders, so
+// a submit overlapping an in-flight decision on the same plugin can deadlock;
+// InnoDB aborts one side with 1213. Without this it surfaces as a raw 500 on the
+// exact concurrent-decision scenario this workflow is designed for. Mapped to
+// ErrConflict, the service returns the same retryable 409 it already returns for
+// the single-pending race, and a retry succeeds. Any non-1213 error passes
+// through unchanged. Applied via defer at each transaction boundary so it catches
+// a deadlock raised by any statement or by commit.
+func classifyDeadlock(err error) error {
+	if err == nil {
+		return nil
+	}
+	var me *mysql.MySQLError
+	if errors.As(err, &me) && me.Number == 1213 {
+		return ErrConflict
+	}
+	return err
+}
+
 // InsertReviewRequest persists a new pending request with its frozen snapshot.
 // Kind and the label-collision check are derived server-side inside the same
 // transaction that takes the single-pending lock.
-func (r *Repo) InsertReviewRequest(ctx context.Context, scope Scope, req *model.PluginReviewRequest, snap FrozenSnapshot) error {
+func (r *Repo) InsertReviewRequest(ctx context.Context, scope Scope, req *model.PluginReviewRequest, snap FrozenSnapshot) (err error) {
+	defer func() { err = classifyDeadlock(err) }()
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -101,6 +123,17 @@ func (r *Repo) InsertReviewRequest(ctx context.Context, scope Scope, req *model.
 		req.Kind = model.ReviewKindFirst
 	} else {
 		req.Kind = model.ReviewKindUpgrade
+	}
+	// Re-run the forward-only ordering rule against the LOCKED current_version.
+	// The service checked this on its earlier unlocked read, but a concurrent
+	// approve (or an admin version edit) can move current_version forward during
+	// the submit's freeze window; without this the equality check below still
+	// passes and a later approval would stamp a LOWER label, regressing the
+	// plugin's public version. Same rule as the service pre-check
+	// (model.VersionNotRegressed), now enforced where it actually holds.
+	if current.CurrentVersion != nil &&
+		!model.VersionNotRegressed(*current.CurrentVersion, req.Version) {
+		return ErrVersionRegressed
 	}
 	published, err := publishedVersionLabels(ctx, tx, req.PluginID, current)
 	if err != nil {
@@ -363,7 +396,8 @@ func (r *Repo) ListReviewRequests(ctx context.Context, scope Scope, f ReviewList
 // makes the default placement exist and be visible, so a legacy row that lacks
 // one (or carries a publish-era visible=0) is actually listed by the approval
 // that promised to list it. See ensureVisibleDefaultPlacement.
-func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewParams) (*model.Plugin, error) {
+func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewParams) (_ *model.Plugin, err error) {
+	defer func() { err = classifyDeadlock(err) }()
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -746,7 +780,8 @@ func classifyMissingPending(ctx context.Context, tx *sql.Tx, reviewID, spaceID s
 // draft stays private, an already-listed version stays live. Returns the frozen
 // attachment sidecar and the live plugin's sidecar so the caller can clean up
 // any objects the submission uploaded that the live row does not reference.
-func (r *Repo) RejectReview(ctx context.Context, scope Scope, p RejectReviewParams) (json.RawMessage, map[string]struct{}, error) {
+func (r *Repo) RejectReview(ctx context.Context, scope Scope, p RejectReviewParams) (_ json.RawMessage, _ map[string]struct{}, err error) {
+	defer func() { err = classifyDeadlock(err) }()
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, nil, err
@@ -860,7 +895,8 @@ func retainedAttachmentKeys(ctx context.Context, tx *sql.Tx, pluginID string, li
 // request was just approved that it vanished. Returns the frozen attachment
 // sidecar and the live plugin's sidecar so the caller can clean up objects the
 // submission uploaded that the live row does not reference.
-func (r *Repo) CancelReview(ctx context.Context, scope Scope, reviewID, callerUID string) (json.RawMessage, map[string]struct{}, error) {
+func (r *Repo) CancelReview(ctx context.Context, scope Scope, reviewID, callerUID string) (_ json.RawMessage, _ map[string]struct{}, err error) {
+	defer func() { err = classifyDeadlock(err) }()
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, nil, err

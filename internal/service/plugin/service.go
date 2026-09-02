@@ -889,6 +889,8 @@ func mapStoreError(err error) error {
 		return ErrReviewPending
 	case errors.Is(err, pluginrepo.ErrListedRequiresReview):
 		return ErrListedRequiresReview
+	case errors.Is(err, pluginrepo.ErrVersionRegressed):
+		return ErrVersionRegressed
 	case errors.Is(err, pluginrepo.ErrInvalidRelation), errors.Is(err, pluginrepo.ErrInvalidCategory), errors.Is(err, pluginrepo.ErrInvalidPlacement):
 		return ErrInvalidRequest
 	default:

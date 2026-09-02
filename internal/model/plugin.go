@@ -126,12 +126,15 @@ type Plugin struct {
 	OwnerUID   string
 	SpaceID    *string
 	Visibility PluginVisibility
-	// ListingState is written by exactly six SQL sites: insertPlugin (every row
+	// ListingState is written by exactly seven SQL sites: insertPlugin (every row
 	// creation, including the fresh embedded children a container reupload
-	// inserts), the conditional `listing_state='draft'` branch of Repo.Update,
-	// PublishPlugin, DelistPlugin, the first-listing branch of ApproveReview, and
+	// inserts — RebuildGraph re-stamps each child's ListingState from the locked
+	// top and that value flows through this same INSERT, so it is not a separate
+	// site), the conditional `listing_state='draft'` branch of Repo.Update,
+	// PublishPlugin, DelistPlugin, the first-listing branch of ApproveReview,
 	// promoteEmbeddedChildren (which lists an approved container's embedded rows
-	// alongside their top).
+	// alongside their top), and demoteEmbeddedChildren (which delists them when
+	// the container is delisted).
 	//
 	// The narrower invariant does hold: a CONTENT-ONLY save cannot change it.
 	// Repo.Update names the column only when Mutation.ResetListingToDraft is set,

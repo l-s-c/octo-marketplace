@@ -27,6 +27,15 @@ var (
 	// between the two and turns a stale-legal edit into unreviewed content on a
 	// live org row. The service maps it back to its own ErrListedRequiresReview.
 	ErrListedRequiresReview = errors.New("a listed plugin must go through review")
+	// ErrVersionRegressed indicates a submit whose label is not strictly forward
+	// of the plugin's CURRENT version. The service performs the same check on its
+	// earlier unlocked read for a fast fail, but that read is not trustworthy: a
+	// concurrent approve (or admin version edit) can move current_version forward
+	// during the submit's freeze window. This is re-derived inside
+	// InsertReviewRequest from the LOCKED plugin row, so the forward-only invariant
+	// holds even under that race. The service maps it back to its own
+	// ErrVersionRegressed so both paths surface identically.
+	ErrVersionRegressed = errors.New("version must not go backwards")
 	// ErrInvalidRelation indicates a relation whose source/target types are incompatible.
 	ErrInvalidRelation = errors.New("invalid plugin relation")
 	// ErrInvalidCategory indicates a missing, inactive, or type-incompatible category.

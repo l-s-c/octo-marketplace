@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"strconv"
 
 	"errors"
 	"fmt"
@@ -124,59 +123,14 @@ func validName(v string) bool {
 
 func validVersion(v string) bool { return versionPattern.MatchString(strings.TrimSpace(v)) }
 
-// parseVersion splits a label into its three ordered parts. ok is false for
-// anything the current pattern would reject, including every label minted before
-// it was tightened — those are unorderable by construction, not merely invalid.
-func parseVersion(v string) ([3]uint64, bool) {
-	var out [3]uint64
-	parts := strings.Split(strings.TrimSpace(v), ".")
-	if len(parts) != 3 {
-		return out, false
-	}
-	for i, part := range parts {
-		n, err := strconv.ParseUint(part, 10, 64)
-		if err != nil {
-			return out, false
-		}
-		out[i] = n
-	}
-	return out, true
-}
-
 // versionNotRegressed reports whether `next` may replace `current`.
 //
-// The rule is "up or unchanged". Unchanged passes FIRST and unconditionally:
-// every save re-sends the stored label, so a plugin carrying a legacy
-// unorderable one (v999, 1.0.0lll) has to stay editable — refusing it would make
-// the tightened format retroactive and brick those rows.
-//
-// A current label that cannot be parsed cannot be compared either, so any
-// well-formed next is accepted; the format check has already run on it.
+// The ordering rule itself lives in model.VersionNotRegressed so the unlocked
+// service pre-check here and the authoritative locked re-check inside
+// repository.InsertReviewRequest share one implementation and cannot drift. This
+// stays a package-local alias so existing call sites read naturally.
 func versionNotRegressed(current, next string) bool {
-	cur, nxt := strings.TrimSpace(current), strings.TrimSpace(next)
-	if cur == nxt {
-		return true
-	}
-	// A malformed NEXT is refused first, and unconditionally. Checking the current
-	// label first would let one legacy value wave another through, which is how a
-	// row carrying an unorderable label could keep acquiring new unorderable ones.
-	// (validVersion normally rejects it earlier; this keeps the predicate honest
-	// on its own terms.)
-	nextParts, ok := parseVersion(nxt)
-	if !ok {
-		return false
-	}
-	// An unorderable CURRENT cannot block anything — see the doc comment.
-	currentParts, ok := parseVersion(cur)
-	if !ok {
-		return true
-	}
-	for i := range currentParts {
-		if nextParts[i] != currentParts[i] {
-			return nextParts[i] > currentParts[i]
-		}
-	}
-	return true
+	return model.VersionNotRegressed(current, next)
 }
 func validRelationID(v string) bool { return relationIDPattern.MatchString(v) }
 
