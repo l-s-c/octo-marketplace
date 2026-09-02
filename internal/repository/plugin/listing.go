@@ -131,6 +131,10 @@ func (r *Repo) PublishPlugin(ctx context.Context, scope Scope, p PublishParams) 
 // the service checks the role, and the row is locked by SPACE rather than by
 // owner because the actor is by definition not the author.
 //
+// It applies only to a STANDALONE, ORG-VISIBLE row: the two guards below refuse
+// an embedded child and anything whose declared visibility is not `space`, each
+// with ErrNotFound.
+//
 // The row stays editable and re-publishable afterwards — delisting is a takedown,
 // not a deletion — and its current_version label stays spent so a republish
 // cannot reuse a label the org already saw.
@@ -145,13 +149,45 @@ func (r *Repo) DelistPlugin(ctx context.Context, scope Scope, p DelistParams) (*
 	if err != nil {
 		return nil, err
 	}
+
+	// An embedded child (a bundled skill, a squad member) is listed and un-listed
+	// by its container, never on its own: ApproveReview promotes the whole graph in
+	// one transaction. Taking a single child down leaves the container published
+	// while a member it declares is hidden, and every non-owner install of the
+	// PARENT then fails with ErrDependencyHidden — a takedown of one row that
+	// silently breaks another. Publish refuses embedded rows for the mirror reason.
+	if current.IsEmbedded {
+		return nil, ErrNotFound
+	}
+	// Delist is moderation of ORG content, and `space` is what makes a row org
+	// content. A private row is not readable by this admin at all — visibilitySQL
+	// admits a private plugin only to its owner — so delisting one is both outside
+	// the takedown rationale (nobody but the author can read it, so there is
+	// nothing to take down) and an existence oracle: an admin who cannot GET the
+	// row would learn that it exists by successfully delisting it, and could
+	// interfere with a colleague's private plugin at will. ErrNotFound keeps the
+	// answer identical to the read the same admin is allowed to make.
+	//
+	// The consequence, stated deliberately: a PUBLISHED PRIVATE plugin has no
+	// takedown path at all, since self-delisting was removed from the write path.
+	// It needs none — published+private means "listed to its owner alone" — and the
+	// owner can still drop it back to a draft by widening the visibility, which
+	// un-lists it (see the ResetListingToDraft branch in the service's Update).
+	if current.Visibility != model.PluginVisibilitySpace {
+		return nil, ErrNotFound
+	}
 	now := r.now()
 
+	// Both guarantees above are re-stated in the CAS predicate, exactly as publish
+	// carries its visibility check into the UPDATE: the checks read the locked row,
+	// and the predicate keeps them if this ever runs without that read in front.
 	res, err := tx.ExecContext(ctx,
 		`UPDATE plugins SET listing_state=?,updated_at=?
-		  WHERE plugin_id=? AND space_id=? AND listing_state=? AND deleted_at IS NULL`,
+		  WHERE plugin_id=? AND space_id=? AND listing_state=? AND deleted_at IS NULL
+		    AND visibility=? AND is_embedded=0`,
 		string(model.PluginListingStateDelisted), now,
-		p.PluginID, scope.SpaceID, string(model.PluginListingStatePublished))
+		p.PluginID, scope.SpaceID, string(model.PluginListingStatePublished),
+		string(model.PluginVisibilitySpace))
 	if err != nil {
 		return nil, wrapped("delist plugin", err)
 	}
@@ -166,13 +202,10 @@ func (r *Repo) DelistPlugin(ctx context.Context, scope Scope, p DelistParams) (*
 	// author can resubmit after editing.
 	reason := p.Reason
 	if reason == "" {
-		reason = "plugin delisted by a Space admin"
+		reason = reasonCanceledOnDelist
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE plugin_review_requests SET status='canceled',reviewer_uid=?,reviewer_name=?,reason=?,reviewed_at=?,updated_at=?
-		  WHERE plugin_id=? AND status='pending' AND deleted_at IS NULL`,
-		p.OperatorID, p.OperatorName, reason, now, now, p.PluginID); err != nil {
-		return nil, wrapped("cancel pending review on delist", err)
+	if err := cancelPendingReviewFor(ctx, tx, now, p.PluginID, p.OperatorID, p.OperatorName, reason); err != nil {
+		return nil, err
 	}
 
 	// Placements are deliberately untouched. Hiding the placement would also hide
@@ -180,9 +213,26 @@ func (r *Repo) DelistPlugin(ctx context.Context, scope Scope, p DelistParams) (*
 	// join), and listing_state already removes it from every other reader.
 	//
 	// Storage objects are deliberately NOT garbage-collected either, unlike reject
-	// and cancel. Those clean up because the APPLICANT's submission is going away;
-	// an admin takedown leaves a row its author is expected to edit and republish,
-	// and the auto-canceled request's frozen objects are content-addressed.
+	// and cancel.
+	//
+	// This is a policy choice, not a safety one, and the distinction matters now
+	// that the GC's retained set is every key the plugin still references (its live
+	// sidecar plus the sidecar frozen onto every plugin_versions row — see
+	// retainedAttachmentKeys). Under those semantics collecting here would not
+	// delete anything the live row or an approved version still points at, so the
+	// data-loss argument that used to justify the omission no longer holds.
+	//
+	// What holds is who is acting: reject and cancel destroy the objects of a
+	// submission that its own reviewer refused or its own author withdrew. A delist
+	// cancels the request as a SIDE EFFECT — the author never abandoned it, is
+	// expected to edit and republish, and can still open the canceled request to
+	// see what they had submitted. Hard-deleting a third party's in-flight upload on
+	// their behalf, from a transaction that was asked to do something else, is not
+	// worth the bounded storage it saves; object-storage deletes do not come back.
+	//
+	// Residual, stated plainly: the canceled submission's spilled objects are
+	// leaked until the plugin's own lifecycle collects them. Bounded by one
+	// submission per takedown.
 	m := Mutation{OperatorID: p.OperatorID, OperatorName: p.OperatorName, RequestID: p.RequestID}
 	if p.Reason != "" {
 		m.Remark = strPtr("reason=" + p.Reason)

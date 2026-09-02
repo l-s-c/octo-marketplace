@@ -92,7 +92,7 @@ func (h *Handler) Publish(c *gin.Context) {
 
 // Delist godoc
 // @Summary Delist plugin
-// @Description Take a published Plugin out of the marketplace. Requires the Space owner or admin role — the same authority as approving a review request. Any pending review request on the Plugin is canceled. The Plugin stays editable and can be published again by its owner.
+// @Description Take a published Plugin out of the marketplace. Requires the Space owner or admin role — the same authority as approving a review request. Only an organization-visible, standalone Plugin can be delisted: a private Plugin is not organization content and an embedded child is listed and un-listed by its container, so both answer 404 rather than confirming they exist. Any pending review request on the Plugin is canceled. The Plugin stays editable and can be published again by its owner.
 // @Tags plugin
 // @ID plugin.delist
 // @Accept json

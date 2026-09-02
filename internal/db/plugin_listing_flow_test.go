@@ -194,6 +194,93 @@ func TestConcurrentPublishAndDelistProduceOneWinner(t *testing.T) {
 	})
 }
 
+// TestDelistRefusesRowsThatAreNotOrgContent pins the two guards that decide WHAT
+// a Space admin's takedown power reaches. The transaction locks by space_id
+// alone, so without them the role check is the only thing standing between an
+// admin and any row in the Space.
+//
+//   - Another member's PRIVATE published plugin is not org content: nobody but
+//     its author can read it (visibilitySQL admits a private row only to its
+//     owner), so there is nothing to take down — and a successful delist would be
+//     an existence oracle for a plugin the admin cannot GET, plus a way to
+//     interfere with a colleague's private work.
+//   - An EMBEDDED child is listed and un-listed by its container. Taking one down
+//     on its own leaves the container published while a member it declares is
+//     hidden, and every non-owner install of the PARENT then fails with
+//     ErrDependencyHidden.
+//
+// Both must be ErrNotFound — the same answer the read the admin is allowed to
+// make would give — and must leave the row and the audit trail untouched.
+func TestDelistRefusesRowsThatAreNotOrgContent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  seedPlugin
+	}{
+		{
+			name: "another member's published private plugin",
+			row:  seedPlugin{id: "p-others-private", visibility: "private", listingState: "published", owner: "user-2", currentVersion: "1.0.0"},
+		},
+		{
+			// The deliberate consequence: a published private row has no takedown
+			// path at all, not even for its own author holding the admin role. It
+			// needs none — published+private is "listed to its owner alone".
+			name: "the admin's own published private plugin",
+			row:  seedPlugin{id: "p-own-private", visibility: "private", listingState: "published", owner: "admin-1", currentVersion: "1.0.0"},
+		},
+		{
+			name: "an embedded child promoted with its container",
+			row:  seedPlugin{id: "p-child", visibility: "space", listingState: "published", embedded: true, currentVersion: "1.0.0"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := reviewDB(t)
+			repo := pluginrepo.New(database)
+			seed(t, database, tc.row)
+
+			_, err := repo.DelistPlugin(context.Background(), reviewerScope(), pluginrepo.DelistParams{
+				PluginID: tc.row.id, OperatorID: "admin-1", OperatorName: "Adam", Reason: "takedown",
+			})
+			if !errors.Is(err, pluginrepo.ErrNotFound) {
+				t.Fatalf("DelistPlugin = %v, want ErrNotFound", err)
+			}
+			var listing string
+			if err := database.QueryRow(`SELECT listing_state FROM plugins WHERE plugin_id=?`, tc.row.id).Scan(&listing); err != nil {
+				t.Fatal(err)
+			}
+			if listing != string(model.PluginListingStatePublished) {
+				t.Errorf("listing_state = %q; the row was taken down anyway", listing)
+			}
+			assertAudit(t, database, tc.row.id, "delist", 0)
+		})
+	}
+}
+
+// A takedown from a DIFFERENT Space must be indistinguishable from a plugin that
+// does not exist: confirming existence across a Space boundary is a leak even to
+// a real admin, and delist is the one listing transaction that does not lock by
+// owner.
+func TestDelistFromAnotherSpaceIsNotFound(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "published", currentVersion: "1.0.0"})
+
+	foreignAdmin := pluginrepo.Scope{CallerUID: "admin-9", SpaceID: "space-b"}
+	_, err := repo.DelistPlugin(context.Background(), foreignAdmin, pluginrepo.DelistParams{
+		PluginID: "plugin-1", OperatorID: "admin-9", OperatorName: "Eve",
+	})
+	if !errors.Is(err, pluginrepo.ErrNotFound) {
+		t.Fatalf("DelistPlugin = %v, want ErrNotFound", err)
+	}
+	var listing string
+	if err := database.QueryRow(`SELECT listing_state FROM plugins WHERE plugin_id='plugin-1'`).Scan(&listing); err != nil {
+		t.Fatal(err)
+	}
+	if listing != string(model.PluginListingStatePublished) {
+		t.Errorf("listing_state = %q; an admin of another Space took the plugin down", listing)
+	}
+	assertAudit(t, database, "plugin-1", "delist", 0)
+}
+
 func raceTwo(fn func() error) []error {
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
