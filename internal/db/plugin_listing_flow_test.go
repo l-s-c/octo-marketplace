@@ -317,3 +317,49 @@ func TestMineListingCarriesTheDerivedStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestReviewQueueHidesRequestsForDeletedPlugins pins a defect found by running
+// the real queue against real data: the list joined `plugins` but never excluded
+// a deleted one, so a reviewer saw rows they could not act on — ApproveReview
+// locks the plugin with `deleted_at IS NULL` and 404s.
+//
+// The count is asserted alongside the page because the two used to disagree:
+// only the page query joined plugins at all, so `total` counted rows the page
+// could never return and the UI paginated against a number that did not exist.
+func TestReviewQueueHidesRequestsForDeletedPlugins(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	owner := tenantScope()
+	reviewer := reviewerScope()
+
+	seed(t, database, seedPlugin{id: "alive", visibility: "space", listingState: "draft", currentVersion: "0.9.0"})
+	seed(t, database, seedPlugin{id: "gone", visibility: "space", listingState: "draft", currentVersion: "0.9.0"})
+	for _, id := range []string{"alive", "gone"} {
+		if err := repo.InsertReviewRequest(ctx, owner, newRequest(id, "1.0.0"),
+			snapshotOf(`{"plugin_name":"P"}`, `{"attachments":[]}`, nil)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.Exec(`UPDATE plugins SET deleted_at=NOW(3) WHERE plugin_id='gone'`); err != nil {
+		t.Fatal(err)
+	}
+
+	items, total, err := repo.ListReviewRequests(ctx, reviewer, pluginrepo.ReviewListFilter{
+		SpaceID: "space-a", Limit: 50,
+	})
+	if err != nil {
+		t.Fatalf("ListReviewRequests: %v", err)
+	}
+	if total != int64(len(items)) {
+		t.Errorf("total=%d but the page returned %d rows; the count and the page disagree", total, len(items))
+	}
+	for _, item := range items {
+		if item.PluginID == "gone" {
+			t.Error("the queue lists a request for a deleted plugin; approving it 404s")
+		}
+	}
+	if len(items) != 1 {
+		t.Errorf("items=%d, want 1 (only the surviving plugin's request)", len(items))
+	}
+}

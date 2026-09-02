@@ -238,7 +238,7 @@ func reviewWhereScope(spaceID, callerUID string, isReviewer bool) (string, []any
 
 func (r *Repo) GetReviewRequest(ctx context.Context, scope Scope, reviewID string, isReviewer bool) (*model.PluginReviewRequest, error) {
 	where, args := reviewWhereScope(scope.SpaceID, scope.CallerUID, isReviewer)
-	q := reviewSelectBase + ` FROM plugin_review_requests rr JOIN plugins p ON p.plugin_id=rr.plugin_id WHERE rr.review_id=? AND rr.deleted_at IS NULL AND ` + where
+	q := reviewSelectBase + ` FROM plugin_review_requests rr JOIN plugins p ON p.plugin_id=rr.plugin_id WHERE rr.review_id=? AND rr.deleted_at IS NULL AND p.deleted_at IS NULL AND ` + where
 	args = append([]any{reviewID}, args...)
 	row := r.db.QueryRowContext(ctx, q, args...)
 	return scanReviewRequest(row.Scan, false)
@@ -248,7 +248,7 @@ func (r *Repo) GetReviewRequest(ctx context.Context, scope Scope, reviewID strin
 // the frozen manifest/package/relations the caller renders a preview from.
 func (r *Repo) LoadReviewSnapshot(ctx context.Context, scope Scope, reviewID string, isReviewer bool) (*model.PluginReviewRequest, error) {
 	where, args := reviewWhereScope(scope.SpaceID, scope.CallerUID, isReviewer)
-	q := reviewSelectSnapshot + ` FROM plugin_review_requests rr JOIN plugins p ON p.plugin_id=rr.plugin_id WHERE rr.review_id=? AND rr.deleted_at IS NULL AND ` + where
+	q := reviewSelectSnapshot + ` FROM plugin_review_requests rr JOIN plugins p ON p.plugin_id=rr.plugin_id WHERE rr.review_id=? AND rr.deleted_at IS NULL AND p.deleted_at IS NULL AND ` + where
 	args = append([]any{reviewID}, args...)
 	row := r.db.QueryRowContext(ctx, q, args...)
 	return scanReviewRequest(row.Scan, true)
@@ -261,7 +261,7 @@ func (r *Repo) LoadReviewSnapshot(ctx context.Context, scope Scope, reviewID str
 // SpaceID before acting on the request; this method performs no authorization of
 // its own and must never back a client-facing read.
 func (r *Repo) GetReviewRequestAnySpace(ctx context.Context, reviewID string) (*model.PluginReviewRequest, error) {
-	q := reviewSelectBase + ` FROM plugin_review_requests rr JOIN plugins p ON p.plugin_id=rr.plugin_id WHERE rr.review_id=? AND rr.deleted_at IS NULL`
+	q := reviewSelectBase + ` FROM plugin_review_requests rr JOIN plugins p ON p.plugin_id=rr.plugin_id WHERE rr.review_id=? AND rr.deleted_at IS NULL AND p.deleted_at IS NULL`
 	row := r.db.QueryRowContext(ctx, q, reviewID)
 	return scanReviewRequest(row.Scan, false)
 }
@@ -295,7 +295,12 @@ func (r *Repo) HasPendingReview(ctx context.Context, scope Scope, pluginID strin
 func (r *Repo) ListReviewRequests(ctx context.Context, scope Scope, f ReviewListFilter) ([]*model.PluginReviewRequest, int64, error) {
 	var where strings.Builder
 	var args []any
-	where.WriteString(`rr.deleted_at IS NULL `)
+	// A request whose plugin was deleted is unreachable: ApproveReview locks the
+	// plugin with `deleted_at IS NULL` and 404s. Listing it anyway shows a
+	// reviewer rows they cannot act on, so it is filtered here — on BOTH the page
+	// and the count, which previously disagreed because only the page joined
+	// plugins at all.
+	where.WriteString(`rr.deleted_at IS NULL AND p.deleted_at IS NULL `)
 	// Space scope is unconditional; ApplicantUID (mode=mine) narrows within it
 	// rather than replacing it.
 	if f.SpaceID != "" {
@@ -311,7 +316,7 @@ func (r *Repo) ListReviewRequests(ctx context.Context, scope Scope, f ReviewList
 		args = append(args, string(f.Status))
 	}
 	var total int64
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_review_requests rr WHERE `+where.String(), args...).Scan(&total); err != nil {
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_review_requests rr JOIN plugins p ON p.plugin_id=rr.plugin_id WHERE `+where.String(), args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	limit := f.Limit
