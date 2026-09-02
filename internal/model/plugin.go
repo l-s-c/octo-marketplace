@@ -126,9 +126,20 @@ type Plugin struct {
 	OwnerUID   string
 	SpaceID    *string
 	Visibility PluginVisibility
-	// ListingState is written by exactly four paths — insertPlugin, ApproveReview,
-	// PublishPlugin, and DelistPlugin. An ordinary save deliberately cannot change
-	// it, so the UPDATE statements omit the column entirely.
+	// ListingState is written by exactly six SQL sites: insertPlugin (every row
+	// creation, including the fresh embedded children a container reupload
+	// inserts), the conditional `listing_state='draft'` branch of Repo.Update,
+	// PublishPlugin, DelistPlugin, the first-listing branch of ApproveReview, and
+	// promoteEmbeddedChildren (which lists an approved container's embedded rows
+	// alongside their top).
+	//
+	// The narrower invariant does hold: a CONTENT-ONLY save cannot change it.
+	// Repo.Update names the column only when Mutation.ResetListingToDraft is set,
+	// and the sole caller setting that flag is Service.update, for an already
+	// published row whose declared visibility DIFFERS from the persisted one — the
+	// condition is "visibility changed", not "visibility widened". Every other
+	// UPDATE omits the column entirely, which is also how a container reupload
+	// preserves its top's listing state.
 	ListingState     PluginListingState
 	CreatorName      string
 	CreatedByType    string

@@ -566,8 +566,16 @@ func (s *Service) update(ctx context.Context, caller Caller, pluginID string, re
 	// taking a listed plugin down is a Space-admin action (Delist). visibility is
 	// otherwise free to change on an unlisted row, since it only declares intent.
 	//
-	// A system admin is exempt: `system` rows are not tenant-owned, and a platform
-	// operator already reaches every one of these transitions through /api/v1/admin.
+	// A system admin is exempt from the two tenant gates below. The residual that
+	// buys is narrower than it looks, and worth naming exactly: a super-admin
+	// cannot LIST anything through this path (listing_state is not settable on the
+	// write path, and changing visibility on a published row still drops it to
+	// draft below), and AdminUpdate stamps old.Visibility via adminEffectiveWrite
+	// rather than taking it from the request. What they CAN do is edit the live
+	// content of an ALREADY-LISTED row with no review request and no
+	// `review_approve` audit row — only the ordinary `update` audit records it.
+	// That is the platform-operator escape hatch, deliberately kept.
+	//
 	// The version label may go up or stay put, never back. Checked against the
 	// STORED label rather than the request's own history, because a client that
 	// forgets to send the field would otherwise silently reset it.
@@ -644,8 +652,11 @@ func (s *Service) update(ctx context.Context, caller Caller, pluginID string, re
 	// was visible only to them) and puts it back on the normal 发布 path, where
 	// the new visibility routes it through review.
 	//
-	// Only WIDENING triggers this. Narrowing, or any content-only edit, leaves the
-	// listing alone.
+	// Any content-only edit leaves the listing alone. The condition is "the
+	// visibility changed", not "it widened": for a tenant the only change that can
+	// reach here IS the widening one (published+space is refused above with
+	// ErrListedRequiresReview), and for the exempt system admin dropping a listed
+	// row back to draft on a narrowing is the safe direction anyway.
 	if old.ListingState == model.PluginListingStatePublished && req.Visibility != old.Visibility {
 		m.ResetListingToDraft = true
 		p.ListingState = model.PluginListingStateDraft
