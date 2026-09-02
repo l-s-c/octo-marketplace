@@ -64,10 +64,16 @@ const maxGraphEdges = 2000
 
 // graphEdgeLimit bounds each edge query server-side at one row past the cap.
 // The mid-scan check in graphEdges.drain still decides the outcome; the LIMIT
-// keeps MySQL from sorting, and the driver from draining off the wire, a result
-// set that the client is going to abandon anyway. One extra row is enough for
-// drain to observe the overflow, because a query returning exactly the limit
-// can only exceed the cap on the row after it.
+// bounds what an abandoned result set costs. It does not remove the sort — the
+// join is still fully evaluated, and the L2 ORDER BY cannot be served from
+// idx_plugin_relations_source_type_order because relation_type is
+// unconstrained — but it lets the optimizer keep a bounded priority-queue
+// filesort instead of spilling, and it stops the driver from draining tens of
+// thousands of rows off the wire (readUntilEOF) to return the connection to the
+// pool. One extra row is enough for drain to observe the overflow, because a
+// query returning exactly the limit can only exceed the cap on the row after
+// it; a limit at or below the cap would silently truncate an exact overflow
+// into a successful partial response instead of a 413.
 var graphEdgeLimit = strconv.Itoa(maxGraphEdges + 1)
 
 // MaxGraphNodes returns the per-response child-node cap for the graph endpoint.

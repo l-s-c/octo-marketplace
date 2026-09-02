@@ -63,12 +63,17 @@ change, no admin surface change in this task.
   (≈40k in a two-hop closure); 2000 allows ~3× the container ceiling for
   shared-target squads and fails closed above it. Both caps are checked while
   draining each result set, and each edge query carries
-  `LIMIT maxGraphEdges + 1`, so an over-cap graph is neither fully materialized
-  in the process nor fully sorted and shipped by MySQL. Exceeding either returns
-  HTTP 413 `PAYLOAD_TOO_LARGE` with `details.max_nodes` and `details.max_edges`;
-  the endpoint fails closed rather than silently truncating, so the UI never
-  renders a partial squad. The repository mirrors the two container constants
-  locally; `TestGraphCapsClearContainerImportCeiling` fails if they drift.
+  `LIMIT maxGraphEdges + 1`, so an over-cap graph is never fully materialized in
+  the process and an abandoned result set is never drained off the wire. The
+  `LIMIT` does not remove the server-side sort — the join is still fully
+  evaluated, and the level-2 `ORDER BY` cannot be served from
+  `idx_plugin_relations_source_type_order` — it only bounds it. Exceeding either
+  cap returns HTTP 413 `PAYLOAD_TOO_LARGE` with `details.max_nodes` and
+  `details.max_edges`; the endpoint fails closed rather than silently
+  truncating, so the UI never renders a partial squad. The repository mirrors
+  the two container constants locally; `TestGraphCapsClearContainerImportCeiling`
+  fails if they drift, and the edge-query expectations pin `LIMIT` to
+  `maxGraphEdges + 1` so the clause and the cap cannot desynchronise.
 - **Hidden related plugins are silently omitted** — edge and node both —
   matching the existing `/plugins/detail` behavior. No truncation flag, no
   error. This is deliberately different from the install path's fail-closed
@@ -119,6 +124,23 @@ change, no admin surface change in this task.
 - Any new migration, model field, plugin type, or relation type.
 - Changing `/plugins/detail` shape or behavior.
 - Re-adding any backend-side secret value scanning.
+- **A byte budget on the response.** Both caps count rows, so the theoretical
+  worst case is bounded only by `maxJSONBytes` (1 MiB) per manifest and per
+  relation payload. Deferred deliberately rather than overlooked: `List` with
+  `maxListLimit = 100` already permits ~100 MB by the identical mechanism today
+  with no setup at all, so a byte ceiling belongs in one change covering both
+  read surfaces — accumulating scanned bytes and failing closed at a fixed
+  budget — not bolted onto this endpoint's row caps. Follow-up.
+- **Reconciling the four relation-count constants.** `maxGraphNodes` (630),
+  `maxInstallRelationTargets` (500), `maxRelations` (200 per plugin), and the
+  backfill's `validateGraph(..., 16, 500)` do not agree, so a maximum-size
+  container is importable and readable but neither installable nor reproducible
+  by backfill. This read cap is anchored to container import, the writer that
+  mints squad graphs; the generic upsert API can still mint a 31-member team
+  (651 children) that exceeds it and fails closed with a diagnosable 413 naming
+  both caps. Widening the anchor to cover the upsert path — or bounding that
+  path so the writers agree on what a legal squad is — is follow-up work that
+  should move all four numbers together.
 
 ## Acceptance
 

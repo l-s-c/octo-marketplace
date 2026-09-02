@@ -441,6 +441,11 @@ WHERE p.status=1 AND p.deleted_at IS NULL AND p.plugin_id IN (` + placeholders(l
 	// Defense-in-depth: if a target was filtered out by the node WHERE
 	// (concurrent delete or corrupted edge), drop edges that referenced it and
 	// do not include it in the node slice.
+	//
+	// The target test also drops any edge pointing back at the root, since the
+	// root never enters targetIDs and so never enters present. The relation
+	// matrix makes such an edge unconstructible (no type admits a container as a
+	// target), so this is a backstop against corrupt data, not a live case.
 	if len(present) != len(targetIDs) {
 		filtered := allRels[:0]
 		for _, rel := range allRels {
