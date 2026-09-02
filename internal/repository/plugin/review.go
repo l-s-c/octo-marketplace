@@ -213,7 +213,7 @@ const reviewSelectBase = `SELECT rr.review_id,rr.plugin_id,rr.space_id,rr.target
         rr.manifest_hash,rr.plugin_hash,
         rr.applicant_uid,rr.applicant_name,rr.reviewer_uid,rr.reviewer_name,rr.reason,rr.decision_source,
         rr.submitted_at,rr.reviewed_at,
-        p.plugin_name,p.plugin_type,p.icon,p.current_version`
+        p.plugin_name,p.plugin_type,p.icon,p.current_version,p.listing_state`
 
 // reviewSelectSnapshot adds the large frozen-snapshot columns. Only the
 // detail read uses it; the list query must never carry a manifest, package and
@@ -222,7 +222,7 @@ const reviewSelectSnapshot = `SELECT rr.review_id,rr.plugin_id,rr.space_id,rr.ta
         rr.manifest_json,rr.plugin_json,rr.attachment_keys_json,rr.relations_json,rr.manifest_hash,rr.plugin_hash,
         rr.applicant_uid,rr.applicant_name,rr.reviewer_uid,rr.reviewer_name,rr.reason,rr.decision_source,
         rr.submitted_at,rr.reviewed_at,
-        p.plugin_name,p.plugin_type,p.icon,p.current_version`
+        p.plugin_name,p.plugin_type,p.icon,p.current_version,p.listing_state`
 
 // reviewWhereScope builds the tenant scope predicate. space_id is ALWAYS
 // constrained — an applicant who belongs to several Spaces must not see their
@@ -805,7 +805,7 @@ func scanReviewRequest(scan func(dest ...any) error, withSnapshot bool) (*model.
 		targetScope, st, knd              string
 		cl, rvu, rvn, rsn, ds             sql.NullString
 		rat                               sql.NullTime
-		pn, pt, pi, cv                    sql.NullString
+		pn, pt, pi, cv, pls               sql.NullString
 		mh, ph                            string
 		au, an                            string
 		sa                                time.Time
@@ -815,7 +815,7 @@ func scanReviewRequest(scan func(dest ...any) error, withSnapshot bool) (*model.
 	if withSnapshot {
 		base = append(base, &manifest, &pkg, &attKeys, &relations)
 	}
-	base = append(base, &mh, &ph, &au, &an, &rvu, &rvn, &rsn, &ds, &sa, &rat, &pn, &pt, &pi, &cv)
+	base = append(base, &mh, &ph, &au, &an, &rvu, &rvn, &rsn, &ds, &sa, &rat, &pn, &pt, &pi, &cv, &pls)
 	if err := scan(base...); err != nil {
 		// A miss must read as "not found", never as an internal error: the scoped
 		// queries fold "wrong Space" and "no such id" into the same empty result so
@@ -872,6 +872,9 @@ func scanReviewRequest(scan func(dest ...any) error, withSnapshot bool) (*model.
 	}
 	if cv.Valid {
 		rr.CurrentVersion = &cv.String
+	}
+	if pls.Valid {
+		rr.PluginListingState = model.PluginListingState(pls.String)
 	}
 	return rr, nil
 }

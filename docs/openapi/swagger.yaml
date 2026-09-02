@@ -764,12 +764,14 @@ components:
       - PluginDisplayStatusRejected
       - PluginDisplayStatusDelisted
     github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginListingState:
-      description: 'ListingState / Status / ReviewID are populated for mode=mine only.
-        On the
+      description: 'PluginListingState is the plugin''s CURRENT listing state, which
+        can have
 
-        marketplace grid every row is published by construction, so the status would
+        moved on since this request was decided — an approved plugin a Space admin
 
-        be a constant and the extra per-row lookups buy nothing.'
+        later delisted reads `delisted`. The review queue renders the row status from
+
+        it and uses it to stop offering 下架 on something already down.'
       enum:
       - draft
       - published
@@ -1928,6 +1930,8 @@ components:
           type: string
         plugin_id:
           type: string
+        plugin_listing_state:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginListingState'
         plugin_name:
           type: string
         plugin_type:

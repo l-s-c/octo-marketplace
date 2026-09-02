@@ -83,6 +83,11 @@ type PluginReviewRequest struct {
 	PluginType     PluginType `json:"plugin_type,omitempty"`
 	PluginIcon     string     `json:"plugin_icon,omitempty"`
 	CurrentVersion *string    `json:"current_version,omitempty"`
+	// PluginListingState is the plugin's CURRENT listing state, which can have
+	// moved on since this request was decided: an approved plugin a Space admin
+	// later took down is `delisted`. The review queue needs it to show the right
+	// status and to stop offering 下架 on something already down.
+	PluginListingState PluginListingState `json:"plugin_listing_state,omitempty"`
 	// ReadmeContent is the primary document extracted from the FROZEN package
 	// snapshot (SKILL.md and friends) — the text a reviewer is actually deciding
 	// on. Populated on the detail read only.

@@ -77,6 +77,11 @@ type reviewRequestResponse struct {
 	// list uses.
 	PluginIcon     string  `json:"plugin_icon,omitempty"`
 	CurrentVersion *string `json:"current_version,omitempty"`
+	// PluginListingState is the plugin's CURRENT listing state, which can have
+	// moved on since this request was decided — an approved plugin a Space admin
+	// later delisted reads `delisted`. The review queue renders the row status from
+	// it and uses it to stop offering 下架 on something already down.
+	PluginListingState model.PluginListingState `json:"plugin_listing_state,omitempty"`
 	// ReadmeContent is the primary document of the FROZEN submission; populated
 	// on the detail read only.
 	ReadmeContent string `json:"readme_content,omitempty"`
@@ -121,29 +126,30 @@ func reviewDTO(r *model.PluginReviewRequest) reviewRequestResponse {
 		return reviewRequestResponse{}
 	}
 	return reviewRequestResponse{
-		ReviewID:       r.ID,
-		PluginID:       r.PluginID,
-		SpaceID:        r.SpaceID,
-		TargetScope:    r.TargetScope,
-		Status:         r.Status,
-		Kind:           r.Kind,
-		Version:        r.Version,
-		Changelog:      r.Changelog,
-		ManifestHash:   r.ManifestHash,
-		PluginHash:     r.PluginHash,
-		ApplicantID:    r.ApplicantUID,
-		ApplicantName:  r.ApplicantName,
-		ReviewerID:     r.ReviewerUID,
-		ReviewerName:   r.ReviewerName,
-		Reason:         r.Reason,
-		DecisionSource: r.DecisionSource,
-		SubmittedAt:    r.SubmittedAt,
-		ReviewedAt:     r.ReviewedAt,
-		PluginName:     r.PluginName,
-		PluginType:     r.PluginType,
-		PluginIcon:     r.PluginIcon,
-		CurrentVersion: r.CurrentVersion,
-		ReadmeContent:  r.ReadmeContent,
+		ReviewID:           r.ID,
+		PluginID:           r.PluginID,
+		SpaceID:            r.SpaceID,
+		TargetScope:        r.TargetScope,
+		Status:             r.Status,
+		Kind:               r.Kind,
+		Version:            r.Version,
+		Changelog:          r.Changelog,
+		ManifestHash:       r.ManifestHash,
+		PluginHash:         r.PluginHash,
+		ApplicantID:        r.ApplicantUID,
+		ApplicantName:      r.ApplicantName,
+		ReviewerID:         r.ReviewerUID,
+		ReviewerName:       r.ReviewerName,
+		Reason:             r.Reason,
+		DecisionSource:     r.DecisionSource,
+		SubmittedAt:        r.SubmittedAt,
+		ReviewedAt:         r.ReviewedAt,
+		PluginName:         r.PluginName,
+		PluginType:         r.PluginType,
+		PluginIcon:         r.PluginIcon,
+		CurrentVersion:     r.CurrentVersion,
+		PluginListingState: r.PluginListingState,
+		ReadmeContent:      r.ReadmeContent,
 	}
 }
 
