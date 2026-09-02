@@ -58,12 +58,14 @@ func TestPluginReviewAttachmentKeysMigrationUpDownMySQL(t *testing.T) {
 		t.Fatalf("insert review with keys: %v", err)
 	}
 
-	// Roll back only THIS migration (the second review migration is last in
-	// order, so ExecMax Down 1 targets it).
-	if n, err := migrate.ExecMax(database, "mysql", source, migrate.Down, 1); err != nil {
+	// Roll back until THIS migration is undone. ExecMax counts from the newest
+	// applied migration, and 20260902-00 (plugin listing_state) is now the tail,
+	// so reaching 20260901-01 takes 2 steps. Appending a later migration means
+	// bumping this count.
+	if n, err := migrate.ExecMax(database, "mysql", source, migrate.Down, 2); err != nil {
 		t.Fatalf("migrate Down: %v", err)
-	} else if n != 1 {
-		t.Fatalf("migrate Down applied %d migrations, want 1", n)
+	} else if n != 2 {
+		t.Fatalf("migrate Down applied %d migrations, want 2", n)
 	}
 
 	// The column must be gone.

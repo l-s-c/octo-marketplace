@@ -138,6 +138,12 @@ func (s *Service) adminEffectiveWrite(ctx context.Context, caller Caller, plugin
 	if req.Type == model.PluginTypeConnector {
 		p.SpaceID = nil
 	}
+	// The marketplace-admin surface has no draft or review step — an admin create
+	// IS the publish, which is why it also auto-attaches a visible default
+	// placement. buildWrite mints the tenant default (draft), so re-stamp it here.
+	// On an AdminUpdate the value is inert: the UPDATE statement never writes
+	// listing_state, so an admin edit cannot delist or republish a row.
+	p.ListingState = model.PluginListingStatePublished
 	return p, rels, nil
 }
 

@@ -25,6 +25,32 @@ const (
 	PluginVisibilitySystem  PluginVisibility = "system"
 )
 
+// PluginListingState is the listing lifecycle axis, independent of review state.
+//
+// visibility says WHO should see a Plugin once it is listed (a declared intent);
+// listing_state says WHETHER it is listed. Splitting them is what makes a draft
+// expressible: before this type `private` doubled as "draft", so saving and
+// publishing were the same act.
+//
+// It is deliberately NOT a review-status field. Review state stays on
+// plugin_review_requests so a listed v1 and an in-review v2 coexist
+// (.octospec/tasks/plugin-space-review/brief.md item 26). Never add a review
+// value here — "审核中" is derived by DisplayStatus from a pending request.
+type PluginListingState string
+
+const (
+	// PluginListingStateDraft is never discoverable by anyone but the owner, and
+	// is excluded even from the owner's marketplace grid — that exclusion is the
+	// only thing distinguishing a private draft from a published private Plugin.
+	PluginListingStateDraft PluginListingState = "draft"
+	// PluginListingStatePublished is listed, subject to visibility.
+	PluginListingStatePublished PluginListingState = "published"
+	// PluginListingStateDelisted was published and was taken down by a Space
+	// admin. It leaves the marketplace but stays editable and re-publishable by
+	// its owner, and its current_version label stays spent.
+	PluginListingStateDelisted PluginListingState = "delisted"
+)
+
 // NormalizeLegacyVisibility maps a row's PRESERVED legacy `public` visibility to
 // the unified `system` global value, passing every current enum value through
 // unchanged. Write paths that carry an existing row's visibility forward — an
@@ -41,16 +67,20 @@ func NormalizeLegacyVisibility(v PluginVisibility) PluginVisibility {
 
 // Plugin is the authoritative mutable current state of a unified Plugin.
 type Plugin struct {
-	ID               string
-	Name             string
-	Type             PluginType
-	IsEmbedded       bool
-	CategoryID       *string
-	Tags             json.RawMessage
-	Publisher        string
-	OwnerUID         string
-	SpaceID          *string
-	Visibility       PluginVisibility
+	ID         string
+	Name       string
+	Type       PluginType
+	IsEmbedded bool
+	CategoryID *string
+	Tags       json.RawMessage
+	Publisher  string
+	OwnerUID   string
+	SpaceID    *string
+	Visibility PluginVisibility
+	// ListingState is written by exactly four paths — insertPlugin, ApproveReview,
+	// PublishPlugin, and DelistPlugin. An ordinary save deliberately cannot change
+	// it, so the UPDATE statements omit the column entirely.
+	ListingState     PluginListingState
 	CreatorName      string
 	CreatedByType    string
 	CreatedByBotUID  *string

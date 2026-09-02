@@ -291,7 +291,7 @@ func scanPluginRow(s interface{ Scan(...any) error }, includePackage, includeMet
 	var category, space, botUID, botName, version, versionName sql.NullString
 	var tags, manifest, pkg, attachKeys []byte
 	var deleted sql.NullTime
-	dest := []any{&p.ID, &p.Name, &p.Type, &p.IsEmbedded, &category, &tags, &p.Publisher, &p.OwnerUID, &space, &p.Visibility, &p.CreatorName, &p.CreatedByType, &botUID, &botName, &p.Icon, &p.ToolCount, &manifest}
+	dest := []any{&p.ID, &p.Name, &p.Type, &p.IsEmbedded, &category, &tags, &p.Publisher, &p.OwnerUID, &space, &p.Visibility, &p.ListingState, &p.CreatorName, &p.CreatedByType, &botUID, &botName, &p.Icon, &p.ToolCount, &manifest}
 	if includePackage {
 		dest = append(dest, &pkg, &attachKeys)
 	}

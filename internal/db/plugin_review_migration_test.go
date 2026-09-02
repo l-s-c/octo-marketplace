@@ -133,11 +133,13 @@ func TestPluginReviewMigrationUpDownMySQL(t *testing.T) {
 	// applied. The feature spans TWO files — 20260901-00 creates the tables and
 	// 20260901-01 adds attachment_keys_json — and ExecMax counts from the newest
 	// applied migration, so rolling back only one would drop the column and leave
-	// both tables standing. Appending a later migration means bumping this count.
-	if n, err := migrate.ExecMax(database, "mysql", source, migrate.Down, 2); err != nil {
+	// both tables standing. Appending a later migration means bumping this count:
+	// 20260902-00 (plugin listing_state) is now the tail, so it is rolled back
+	// first and the count is 3.
+	if n, err := migrate.ExecMax(database, "mysql", source, migrate.Down, 3); err != nil {
 		t.Fatalf("migrate Down: %v", err)
-	} else if n != 2 {
-		t.Fatalf("migrate Down applied %d migrations, want 2", n)
+	} else if n != 3 {
+		t.Fatalf("migrate Down applied %d migrations, want 3", n)
 	}
 	for _, table := range pluginReviewTables {
 		var count int
