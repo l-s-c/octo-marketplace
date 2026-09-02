@@ -348,7 +348,7 @@ func (h *Handler) Get(c *gin.Context) {
 
 // GetGraph godoc
 // @Summary Get plugin relation graph
-// @Description Return one Plugin (full projection identical to GET /plugins/detail) together with the flat, deduplicated transitive closure of its relation graph and every edge in that closure, up to the fixed depth enforced by the relation matrix. Hidden related plugins are silently omitted; bundled (embedded) children are visible when reachable through an already-authorized ancestor.
+// @Description Return one Plugin (full projection identical to GET /plugins/detail) together with the flat, deduplicated transitive closure of its relation graph and every edge in that closure, up to the fixed depth enforced by the relation matrix. Every related plugin — bundled (embedded) children included — is filtered by the same per-row visibility predicate GET /plugins/detail applies; hidden ones are silently omitted, edge and node. related_plugins is a lookup table keyed by plugin_id rather than a tree: an entry is not guaranteed to be referenced by an edge.
 // @Tags plugin
 // @ID plugin.graph.get
 // @Accept json
@@ -369,7 +369,11 @@ func (h *Handler) GetGraph(c *gin.Context) {
 		unauthorized(c)
 		return
 	}
-	pluginID := strings.TrimSpace(c.Query("plugin_id"))
+	// No TrimSpace: parseStorageID in the service is the single validation
+	// boundary for plugin_id, and /plugins/detail passes the raw query value
+	// through to it. Trimming here would make the two sibling GETs disagree on
+	// whether a padded ID is acceptable.
+	pluginID := c.Query("plugin_id")
 	if pluginID == "" {
 		validation(c, "plugin_id")
 		return

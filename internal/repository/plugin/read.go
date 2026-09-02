@@ -350,6 +350,12 @@ func stringSliceAsAny(in []string) []any {
 // relations carries every visible edge in the closure (both levels, sorted by
 // source then sort_order), and nodes carries the deduplicated set of visible
 // child plugins (light projection: no package blob), in first-seen order.
+//
+// nodes is not guaranteed to be edge-reachable from the root: when an
+// intermediate ancestor vanishes between the edge scan and the node query, its
+// edges are dropped while its own children — which passed the caller's
+// visibility check independently — remain. Consumers must treat nodes as a
+// lookup table keyed by plugin_id, not as a tree derived from relations.
 func (r *Repo) GetGraphClosure(ctx context.Context, scope Scope, rootID string) (*model.Plugin, []model.PluginRelation, []*model.Plugin, error) {
 	root, err := r.Get(ctx, scope, rootID)
 	if err != nil {
@@ -366,7 +372,8 @@ func (r *Repo) GetGraphClosure(ctx context.Context, scope Scope, rootID string) 
 	edgeWhere, edgeWhereArgs := graphEdgeWhere(scope)
 	l1Q := `SELECT ` + graphEdgeColumns + ` FROM plugin_relations r JOIN plugins p ON p.plugin_id=r.target_plugin_id
 WHERE r.source_plugin_id=? AND r.status=1 AND r.deleted_at IS NULL AND p.status=1 AND p.deleted_at IS NULL AND ` + edgeWhere + `
-ORDER BY r.sort_order,r.relation_id`
+ORDER BY r.sort_order,r.relation_id
+LIMIT ` + graphEdgeLimit
 	l1Args := append([]any{rootID}, edgeWhereArgs...)
 	l1Rows, err := r.db.QueryContext(ctx, l1Q, l1Args...)
 	if err != nil {
@@ -389,7 +396,8 @@ ORDER BY r.sort_order,r.relation_id`
 	if root.Type == model.PluginTypeExpertTeam && len(l1Targets) > 0 {
 		l2Q := `SELECT ` + graphEdgeColumns + ` FROM plugin_relations r JOIN plugins p ON p.plugin_id=r.target_plugin_id
 WHERE r.source_plugin_id IN (` + placeholders(len(l1Targets)) + `) AND r.status=1 AND r.deleted_at IS NULL AND p.status=1 AND p.deleted_at IS NULL AND ` + edgeWhere + `
-ORDER BY r.source_plugin_id,r.sort_order,r.relation_id`
+ORDER BY r.source_plugin_id,r.sort_order,r.relation_id
+LIMIT ` + graphEdgeLimit
 		l2Args := append(append([]any(nil), stringSliceAsAny(l1Targets)...), edgeWhereArgs...)
 		l2Rows, err := r.db.QueryContext(ctx, l2Q, l2Args...)
 		if err != nil {

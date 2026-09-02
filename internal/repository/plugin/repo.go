@@ -4,6 +4,7 @@ package plugin
 import (
 	"database/sql"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/id"
@@ -21,21 +22,53 @@ var (
 	// ErrInvalidPlacement indicates a category not enabled for the Plugin type and placement.
 	ErrInvalidPlacement = errors.New("invalid plugin placement")
 	// ErrGraphTooLarge indicates a plugin's transitive relation closure exceeds the
-	// per-request node cap. The read path fails closed (rather than truncating) so
-	// callers never render a partially-missing squad/agent.
-	ErrGraphTooLarge = errors.New("plugin graph exceeds node cap")
+	// per-request node or edge cap. The read path fails closed (rather than
+	// truncating) so callers never render a partially-missing squad/agent.
+	ErrGraphTooLarge = errors.New("plugin graph exceeds node or edge cap")
+)
+
+// containerImportMaxMembers and containerImportMaxSkillsPerMember mirror
+// containerMaxMembers / containerMaxSkills in internal/service/plugin/container.go.
+// Container import is the writer that mints squad graphs, so its ceiling — not
+// the install budget — is what the read caps below must clear.
+// TestGraphCapsClearContainerImportCeiling (internal/service/plugin) fails if
+// the two ever drift apart.
+const (
+	containerImportMaxMembers         = 30
+	containerImportMaxSkillsPerMember = 20
 )
 
 // maxGraphNodes caps the total number of related (non-root) plugins returned by
-// a single detail_graph response. It matches maxInstallRelationTargets so the
-// read surface cannot describe a graph the install surface would refuse.
-const maxGraphNodes = 500
+// a single detail_graph response. A maximum-size legal container import mints
+// containerImportMaxMembers members plus containerImportMaxSkillsPerMember
+// embedded skills each (skills dedupe only by (file,name), so distinct names
+// mint distinct nodes), and that squad's detail page must render rather than
+// 413 forever. Note this sits above maxInstallRelationTargets (500): a
+// maximum-size container is currently importable and readable but not
+// installable — a pre-existing mismatch on the install side, not a read cap to
+// reconcile downward.
+const maxGraphNodes = containerImportMaxMembers * (1 + containerImportMaxSkillsPerMember) // 630
 
 // maxGraphEdges caps the total number of edges (across both levels) returned by
 // a single detail_graph response, as a defense against graphs that stay well
 // under the node cap by sharing many nodes while still fanning out a huge edge
 // set against pre-existing standalone catalog plugins.
-const maxGraphEdges = 1000
+//
+// The container ceiling above produces exactly one edge per child (630), since
+// every embedded child has a single parent. Sharing targets is what decouples
+// the two counts, and only the upsert API can build that shape — where
+// maxRelations (200 per plugin) would otherwise admit ~40k edges in a two-hop
+// closure, far past what one detail page should render. This allows ~3x the
+// container ceiling for member-shared-target squads and fails closed above it.
+const maxGraphEdges = 2000
+
+// graphEdgeLimit bounds each edge query server-side at one row past the cap.
+// The mid-scan check in graphEdges.drain still decides the outcome; the LIMIT
+// keeps MySQL from sorting, and the driver from draining off the wire, a result
+// set that the client is going to abandon anyway. One extra row is enough for
+// drain to observe the overflow, because a query returning exactly the limit
+// can only exceed the cap on the row after it.
+var graphEdgeLimit = strconv.Itoa(maxGraphEdges + 1)
 
 // MaxGraphNodes returns the per-response child-node cap for the graph endpoint.
 func MaxGraphNodes() int { return maxGraphNodes }

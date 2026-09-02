@@ -9,6 +9,23 @@ import (
 	pluginrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/plugin"
 )
 
+// The detail_graph caps live in the repository package, but the shape they must
+// clear is defined here: container import is the writer that mints squad graphs,
+// and a maximum-size legal import must remain renderable rather than 413 forever.
+// This pins the two together, since the repository can only mirror these limits.
+func TestGraphCapsClearContainerImportCeiling(t *testing.T) {
+	// Skills dedupe only by (file,name), so members declaring distinct names each
+	// mint their own embedded skill node: members + members*skills children, and
+	// one edge per child (every embedded child has exactly one parent).
+	maxChildren := containerMaxMembers * (1 + containerMaxSkills)
+	if got := pluginrepo.MaxGraphNodes(); got < maxChildren {
+		t.Fatalf("node cap %d is below the container import ceiling %d: a maximum-size squad would 413 forever", got, maxChildren)
+	}
+	if got := pluginrepo.MaxGraphEdges(); got < maxChildren {
+		t.Fatalf("edge cap %d is below the container import ceiling %d: a maximum-size squad would 413 forever", got, maxChildren)
+	}
+}
+
 func TestDetailGraph_ValidatesCaller(t *testing.T) {
 	svc := fixedService(&fakeStore{})
 	if _, err := svc.DetailGraph(context.Background(), Caller{}, "id"); !errors.Is(err, ErrInvalidRequest) {

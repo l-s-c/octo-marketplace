@@ -338,7 +338,7 @@ func TestGetGraphClosure_EdgeCapCatchesWideShallowGraph(t *testing.T) {
 
 	const (
 		members         = 20
-		skillsPerMember = 51
+		skillsPerMember = 101
 	)
 	// members + skillsPerMember unique nodes (skills are shared across every
 	// member), vs members*skillsPerMember + members edges.
@@ -378,6 +378,76 @@ func TestGetGraphClosure_EdgeCapCatchesWideShallowGraph(t *testing.T) {
 	_, _, _, err := r.GetGraphClosure(context.Background(), scope, "team-1")
 	if !errors.Is(err, ErrGraphTooLarge) {
 		t.Fatalf("want ErrGraphTooLarge for a wide-but-shallow graph, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet: %v", err)
+	}
+}
+
+// A maximum-size legal container import — containerMaxMembers members, each
+// declaring containerMaxSkills skills under distinct (file,name) pairs, so no
+// embedded skill node is shared — must render, not 413. This is the shape the
+// endpoint exists to serve, and the caps are chosen to clear it; the assertion
+// below fails if either cap is ever lowered under the import ceiling.
+func TestGetGraphClosure_MaxContainerImport_Renders(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+	const (
+		members         = containerImportMaxMembers
+		skillsPerMember = containerImportMaxSkillsPerMember
+	)
+	nodeCount := members + members*skillsPerMember
+	edgeCount := nodeCount // every embedded child has exactly one parent
+
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\?`).
+		WithArgs("team-1", "space", "caller").
+		WillReturnRows(sqlmock.NewRows(pluginTestColumnsWithMetrics()).
+			AddRow("team-1", "Team", model.PluginTypeExpertTeam, 0, nil, []byte(`[]`), "", "owner", "space", model.PluginVisibilitySpace, "C", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0))
+
+	summaryRow := func(rows *sqlmock.Rows, id string, typ model.PluginType) {
+		rows.AddRow(id, id, typ, 1, nil, []byte(`[]`), "", "owner", "space", model.PluginVisibilitySpace, "C", "human", nil, nil, "", 0, []byte(`{}`), "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0)
+	}
+	l1 := sqlmock.NewRows(graphEdgeTestColumns())
+	nodeRows := sqlmock.NewRows(pluginSummaryTestColumns())
+	for i := 0; i < members; i++ {
+		mid := "m" + strconv.Itoa(i)
+		l1.AddRow("rel-"+mid, "team-1", mid, model.PluginTypeExpert, "expert_team_expert", i, nil, 1, "owner", now, now, nil)
+		summaryRow(nodeRows, mid, model.PluginTypeExpert)
+	}
+	mock.ExpectQuery(`WHERE r.source_plugin_id=\? AND .*`+visibilityPredicateRE).
+		WithArgs("team-1", "space", "caller").
+		WillReturnRows(l1)
+
+	l2 := sqlmock.NewRows(graphEdgeTestColumns())
+	for i := 0; i < members; i++ {
+		mid := "m" + strconv.Itoa(i)
+		for j := 0; j < skillsPerMember; j++ {
+			// Embedded skills are per-member copies: distinct (file,name) pairs
+			// mint distinct nodes, so nothing dedupes across members.
+			sid := mid + "-s" + strconv.Itoa(j)
+			l2.AddRow("rel-"+sid, mid, sid, model.PluginTypeSkill, "expert_skill", j, nil, 1, "owner", now, now, nil)
+			summaryRow(nodeRows, sid, model.PluginTypeSkill)
+		}
+	}
+	mock.ExpectQuery(`r.source_plugin_id IN \(.*` + visibilityPredicateRE).WillReturnRows(l2)
+	mock.ExpectQuery(`p.plugin_id IN \(.*` + visibilityPredicateRE).WillReturnRows(nodeRows)
+
+	root, rels, nodes, err := r.GetGraphClosure(context.Background(), scope, "team-1")
+	if err != nil {
+		t.Fatalf("a maximum-size legal container import must render, got %v", err)
+	}
+	if root.ID != "team-1" {
+		t.Fatalf("root = %+v", root)
+	}
+	if len(rels) != edgeCount {
+		t.Fatalf("rels = %d, want %d", len(rels), edgeCount)
+	}
+	if len(nodes) != nodeCount {
+		t.Fatalf("nodes = %d, want %d", len(nodes), nodeCount)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet: %v", err)

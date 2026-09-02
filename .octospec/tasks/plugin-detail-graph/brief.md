@@ -49,16 +49,26 @@ change, no admin surface change in this task.
   (optional) level-2 edges → one batch payload fetch for all related nodes using
   `pluginSummaryColumns` (which deliberately omits `plugin_json`, reusing an
   existing column list).
-- **Two caps, both enforced mid-scan**: node cap 500 (matching
-  `maxInstallRelationTargets`) and edge cap 1000. The node cap alone does not
-  bound cost — a graph whose members share targets (the common case for system
-  skills) keeps the unique-node count low while edges grow as
-  members × targets-per-member, and `maxRelations` permits 200 edges per plugin.
-  Both caps are therefore checked while draining each result set, so an over-cap
-  graph is never fully materialized. Exceeding either returns HTTP 413
-  `PAYLOAD_TOO_LARGE` with `details.max_nodes` and `details.max_edges`; the
-  endpoint fails closed rather than silently truncating, so the UI never renders
-  a partial squad.
+- **Two caps, both enforced mid-scan**: node cap 630 and edge cap 2000. Both are
+  anchored to the writer that actually mints squad graphs — container import,
+  which admits `containerMaxMembers` (30) members each declaring up to
+  `containerMaxSkills` (20) skills, and dedupes embedded skills only by
+  `(file, name)`. A maximum-size legal import is therefore 30 + 30×20 = 630
+  child nodes and one edge per child, and that squad's detail page must render
+  rather than 413 forever; the install budget (`maxInstallRelationTargets` = 500)
+  is the wrong anchor and sits below what import accepts. The edge cap is
+  separate because the node cap alone does not bound cost — a graph whose members
+  share targets keeps the unique-node count low while edges grow as
+  members × targets-per-member, and `maxRelations` permits 200 edges per plugin
+  (≈40k in a two-hop closure); 2000 allows ~3× the container ceiling for
+  shared-target squads and fails closed above it. Both caps are checked while
+  draining each result set, and each edge query carries
+  `LIMIT maxGraphEdges + 1`, so an over-cap graph is neither fully materialized
+  in the process nor fully sorted and shipped by MySQL. Exceeding either returns
+  HTTP 413 `PAYLOAD_TOO_LARGE` with `details.max_nodes` and `details.max_edges`;
+  the endpoint fails closed rather than silently truncating, so the UI never
+  renders a partial squad. The repository mirrors the two container constants
+  locally; `TestGraphCapsClearContainerImportCeiling` fails if they drift.
 - **Hidden related plugins are silently omitted** — edge and node both —
   matching the existing `/plugins/detail` behavior. No truncation flag, no
   error. This is deliberately different from the install path's fail-closed
@@ -125,10 +135,12 @@ change, no admin surface change in this task.
 - Children the caller cannot see are silently omitted (edge + node both),
   embedded and standalone alike; a node that vanishes between the edge scan and
   the payload query drops both itself and every edge touching it.
-- Node cap (500) and edge cap (1000) both fire mid-scan, before the payload
+- Node cap (630) and edge cap (2000) both fire mid-scan, before the payload
   query issues; over-cap returns 413 with `details.max_nodes` /
   `details.max_edges`. A wide-but-shallow graph that stays under the node cap
-  while exceeding the edge cap is pinned by test.
+  while exceeding the edge cap is pinned by test, and a maximum-size legal
+  container import (30 members × 20 embedded skills = 630 nodes, 630 edges) is
+  pinned as renderable.
 - Missing `plugin_id` → 400; unknown id → 404. 401 is enforced by the router's
   authenticator middleware and is not exercised by the handler tests, whose
   shared `testEngine` always stamps a fixed dev identity.
