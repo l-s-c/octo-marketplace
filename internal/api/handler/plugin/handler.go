@@ -709,6 +709,10 @@ func writeServiceError(c *gin.Context, err error, operation string) {
 	// Zip package name mismatch.
 	case errors.Is(err, pluginsvc.ErrReviewNameMismatch):
 		apiresponse.Fail(c, http.StatusBadRequest, errcode.BadRequest, "the uploaded package name does not match the plugin", map[string]any{"field": "parse_task_id", "reason": "name_mismatch"}, "Upload a package whose name matches the existing plugin.")
+	// Names the field so the form can mark the version input rather than
+	// reporting a generic bad body.
+	case errors.Is(err, pluginsvc.ErrVersionRegressed):
+		apiresponse.Fail(c, http.StatusBadRequest, errcode.BadRequest, "version must not go backwards", map[string]any{"field": "version", "reason": "must_not_decrease"}, "Use the current version or a higher one.")
 	// A state conflict, not a permission problem: the owner may change this
 	// plugin, but only through a review request. Self-delisting is no longer an
 	// option, so the hint points at the two things that actually work.

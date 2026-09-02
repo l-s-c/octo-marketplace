@@ -54,6 +54,10 @@ var (
 	// just through a review request. Self-delisting is no longer an escape hatch:
 	// taking a listed plugin down is a Space-admin action.
 	ErrListedRequiresReview = errors.New("a listed plugin may only be changed through review")
+	// ErrVersionRegressed is returned when a write would move a plugin's version
+	// label backwards. It names the field so the form can point at the input
+	// rather than failing the whole body.
+	ErrVersionRegressed = errors.New("version must not go backwards")
 	// ErrReviewPending is returned when a change cannot be applied while a review
 	// request is open on the plugin. Content edits during a pending review are
 	// deliberately fine — the reviewer acts on a frozen snapshot — so this covers
@@ -151,6 +155,13 @@ func (s *Service) SubmitReview(ctx context.Context, caller Caller, params Review
 	}
 	if detail.Plugin.OwnerUID != caller.UID {
 		return nil, ErrNotFound
+	}
+	// A submission cannot carry a label older than what the plugin already shows.
+	// publishedVersionLabels separately refuses REUSING a label the org has seen,
+	// so together they force an upgrade strictly forward.
+	if detail.Plugin.CurrentVersion != nil &&
+		!versionNotRegressed(*detail.Plugin.CurrentVersion, params.Version) {
+		return nil, ErrVersionRegressed
 	}
 	// An embedded child versions with its container and is never independently
 	// reviewable, matching Update/Delete.

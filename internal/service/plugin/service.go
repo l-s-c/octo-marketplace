@@ -210,6 +210,14 @@ type RelationResult struct {
 }
 
 type WriteRequest struct {
+	// grandfatheredVersion is the plugin's STORED version label, set only by
+	// Service.update. A label minted before the format was tightened (v999,
+	// 1.0.0lll) no longer passes validVersion, and every save re-sends the stored
+	// value — so without this exemption tightening the format would retroactively
+	// make those rows permanently unsavable. Unexported on purpose: a request body
+	// must never be able to claim its own value is grandfathered.
+	grandfatheredVersion string
+
 	Name       string
 	Type       model.PluginType
 	CategoryID *string
@@ -560,6 +568,17 @@ func (s *Service) update(ctx context.Context, caller Caller, pluginID string, re
 	//
 	// A system admin is exempt: `system` rows are not tenant-owned, and a platform
 	// operator already reaches every one of these transitions through /api/v1/admin.
+	// The version label may go up or stay put, never back. Checked against the
+	// STORED label rather than the request's own history, because a client that
+	// forgets to send the field would otherwise silently reset it.
+	if old.CurrentVersion != nil {
+		if strings.TrimSpace(req.Version) != "" && !versionNotRegressed(*old.CurrentVersion, req.Version) {
+			return nil, ErrVersionRegressed
+		}
+		// Lets buildWrite accept an unchanged pre-tightening label; see the field.
+		req.grandfatheredVersion = *old.CurrentVersion
+	}
+
 	if !caller.IsSystemAdmin {
 		if !validVisibility(req.Visibility, false) {
 			return nil, ErrInvalidRequest
@@ -726,11 +745,13 @@ func (s *Service) buildWrite(ctx context.Context, c Caller, pluginID string, req
 		return nil, nil, ErrInvalidRequest
 	}
 	// current_version is caller-declared: use the submitted version, defaulting to
-	// "1.0.0" when none is passed. Reject a malformed non-empty label.
+	// "1.0.0" when none is passed. Reject a malformed non-empty label — unless it
+	// is byte-for-byte the label already stored, which is how an edit to a plugin
+	// carrying a pre-tightening label stays possible.
 	currentVersion := strings.TrimSpace(req.Version)
 	if currentVersion == "" {
 		currentVersion = defaultCurrentVersion
-	} else if !validVersion(currentVersion) {
+	} else if !validVersion(currentVersion) && currentVersion != strings.TrimSpace(req.grandfatheredVersion) {
 		return nil, nil, ErrInvalidRequest
 	}
 	toolCount := 0
