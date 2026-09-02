@@ -199,13 +199,62 @@ ORDER BY r.sort_order,r.relation_id`, relArgs...)
 	if err != nil {
 		return nil, nil, err
 	}
+	rels, _, err := scanRelationRows(rows, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	return p, rels, nil
+}
+
+// graphEdgeRow is the column set used by graph edge queries: the standard
+// relation columns plus the target's is_embedded flag so the traversal can
+// decide whether a child inherits its parent's visibility.
+const graphEdgeColumns = `r.relation_id,r.source_plugin_id,r.target_plugin_id,p.plugin_type,r.relation_type,r.sort_order,
+ r.relation_json,r.status,r.created_by,r.created_at,r.updated_at,r.deleted_at,p.is_embedded`
+
+// graphEdgeWhere returns the target-visibility predicate and bind args for edge
+// queries (used after the source-selection clause). Admin sees every live edge;
+// non-admin exposes standalone targets under the caller's visibilitySQL and
+// exposes all embedded targets reachable from an already-authorized source.
+//
+// Embedded children are per-parent copies owned by a single container graph:
+// the write-path gate lockRelationTargets rejects cross-container embedded
+// edges, so an embedded target returned here is always a part of the container
+// we just authorized. An extra space_id predicate would incorrectly hide
+// admin-created (system-visibility, NULL-space) embedded members from a
+// caller who can legitimately see their system-visible parent, so we rely on
+// the write-path invariant rather than re-checking Space here.
+func graphEdgeWhere(scope Scope) (string, []any) {
+	if scope.Admin {
+		return "1=1", nil
+	}
+	relWhere := `((p.is_embedded=0 AND ` + visibilitySQL + `) OR p.is_embedded=1)`
+	return relWhere, []any{scope.SpaceID, scope.CallerUID}
+}
+
+// scanRelationRows drains a relation-edge result set. When withEmbedded is
+// true the SELECT is expected to end with p.is_embedded; otherwise the
+// is_embedded column is absent (as in GetWithRelations) and all targets are
+// reported as standalone (isEmbedded=false). It returns the relations in row
+// order plus the IDs of embedded targets in the order they were seen.
+func scanRelationRows(rows *sql.Rows, withEmbedded bool) ([]model.PluginRelation, []string, error) {
 	defer rows.Close()
-	var rels []model.PluginRelation
+	var (
+		rels        []model.PluginRelation
+		embeddedIDs []string
+	)
 	for rows.Next() {
-		var x model.PluginRelation
-		var data []byte
-		var deleted sql.NullTime
-		if err := rows.Scan(&x.ID, &x.SourcePluginID, &x.TargetPluginID, &x.TargetPluginType, &x.Type, &x.SortOrder, &data, &x.Status, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &deleted); err != nil {
+		var (
+			x       model.PluginRelation
+			data    []byte
+			deleted sql.NullTime
+		)
+		dest := []any{&x.ID, &x.SourcePluginID, &x.TargetPluginID, &x.TargetPluginType, &x.Type, &x.SortOrder, &data, &x.Status, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &deleted}
+		var isEmbedded bool
+		if withEmbedded {
+			dest = append(dest, &isEmbedded)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, nil, err
 		}
 		x.Data = cloneJSON(data)
@@ -213,8 +262,223 @@ ORDER BY r.sort_order,r.relation_id`, relArgs...)
 			x.DeletedAt = &deleted.Time
 		}
 		rels = append(rels, x)
+		if withEmbedded && isEmbedded {
+			embeddedIDs = append(embeddedIDs, x.TargetPluginID)
+		}
 	}
-	return p, rels, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return rels, embeddedIDs, nil
+}
+
+// graphNodeWhere returns the visibility predicate (excluding the mandatory
+// p.plugin_id IN (…) source-list bound by the caller) and bind args for the
+// batch node-payload query. Non-admin re-checks visibility per node as defense
+// in depth: standalone targets must satisfy visibilitySQL; embedded targets
+// must appear in embeddedAuth (the set of embedded IDs reached through an
+// already-authorized edge). A space_id match is NOT required on embedded
+// targets — admin/system containers own their embedded children in the global
+// Space, and lockRelationTargets already guarantees those children were
+// created in the same container graph.
+func graphNodeWhere(scope Scope, embeddedAuth []string) (string, []any) {
+	if scope.Admin {
+		return "1=1", nil
+	}
+	embeddedClause := "FALSE"
+	args := []any{scope.SpaceID, scope.CallerUID}
+	if len(embeddedAuth) > 0 {
+		embeddedClause = `p.plugin_id IN (` + placeholders(len(embeddedAuth)) + `)`
+		args = append(args, stringSliceAsAny(embeddedAuth)...)
+	}
+	where := `( (p.is_embedded=0 AND ` + visibilitySQL + `) OR (p.is_embedded=1 AND ` + embeddedClause + `) )`
+	return where, args
+}
+
+func stringSliceAsAny(in []string) []any {
+	out := make([]any, len(in))
+	for i, v := range in {
+		out[i] = v
+	}
+	return out
+}
+
+// GetGraphClosure returns the transitive closure of the relation graph rooted
+// at rootID, with a fixed maximum depth of two hops (expert_team -> expert ->
+// skill/connector) enforced by the relation-type matrix.
+//
+// Visibility:
+//   - The root must be visible under scope (this is the authorization anchor).
+//   - Standalone (is_embedded=0) descendants must satisfy the caller-scoped
+//     visibility predicate.
+//   - Embedded (is_embedded=1) descendants are visible when reachable through an
+//     already-authorized ancestor chain AND when they live in the caller's
+//     Space — they are part of the container, not independent catalog entries.
+//
+// The method always performs at most four SQL round-trips regardless of fan-out,
+// and fails closed with ErrGraphTooLarge when the deduplicated child count
+// exceeds maxGraphNodes. On success relations carries every visible edge in the
+// closure (both levels, sorted by source then sort_order), and nodes carries
+// the deduplicated set of visible child plugins (light projection: no package
+// blob), in first-seen order.
+func (r *Repo) GetGraphClosure(ctx context.Context, scope Scope, rootID string) (*model.Plugin, []model.PluginRelation, []*model.Plugin, error) {
+	root, err := r.Get(ctx, scope, rootID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Leaves (skill/connector) have no valid outgoing edges per the relation
+	// matrix; short-circuit without issuing an edge query.
+	if root.Type == model.PluginTypeSkill || root.Type == model.PluginTypeConnector {
+		return root, nil, nil, nil
+	}
+
+	// ---- Level 1: edges directly from root ---------------------------------
+	edgeWhere, edgeWhereArgs := graphEdgeWhere(scope)
+	l1Q := `SELECT ` + graphEdgeColumns + ` FROM plugin_relations r JOIN plugins p ON p.plugin_id=r.target_plugin_id
+WHERE r.source_plugin_id=? AND r.status=1 AND r.deleted_at IS NULL AND p.status=1 AND p.deleted_at IS NULL AND ` + edgeWhere + `
+ORDER BY r.sort_order,r.relation_id`
+	l1Args := append([]any{rootID}, edgeWhereArgs...)
+	l1Rows, err := r.db.QueryContext(ctx, l1Q, l1Args...)
+	if err != nil {
+		return nil, nil, nil, wrapped("graph l1 edges", err)
+	}
+	l1Rels, l1Embedded, err := scanRelationRows(l1Rows, true)
+	if err != nil {
+		return nil, nil, nil, wrapped("graph l1 scan", err)
+	}
+
+	// Partition level-1 targets by embedded-ness for the next hop. Use an
+	// insertion-ordered set so dedup preserves the edge-discovery order.
+	var (
+		level1IDs     []string
+		level1Seen    = map[string]bool{}
+		embeddedSet   = map[string]bool{}
+		embeddedOrder []string
+		// We need the target plugin types to stamp SourcePluginType on level-2
+		// edges and to decide whether further hops are possible.
+		targetType = map[string]model.PluginType{}
+	)
+	addEmbedded := func(id string) {
+		if embeddedSet[id] {
+			return
+		}
+		embeddedSet[id] = true
+		embeddedOrder = append(embeddedOrder, id)
+	}
+	addTarget := func(id string, t model.PluginType, isEmbedded bool) {
+		targetType[id] = t
+		if isEmbedded {
+			addEmbedded(id)
+		}
+		if !level1Seen[id] {
+			level1Seen[id] = true
+			level1IDs = append(level1IDs, id)
+		}
+	}
+	for i := range l1Rels {
+		x := &l1Rels[i]
+		x.SourcePluginType = root.Type
+		addTarget(x.TargetPluginID, x.TargetPluginType, containsStr(l1Embedded, x.TargetPluginID))
+	}
+
+	allRels := make([]model.PluginRelation, 0, len(l1Rels))
+	allRels = append(allRels, l1Rels...)
+
+	// ---- Level 2: edges from level-1 sources (expert_team roots only) ------
+	// The relation matrix only allows expert_team -> expert -> skill/connector to
+	// nest two hops; expert roots already reached leaves in level 1.
+	if root.Type == model.PluginTypeExpertTeam && len(level1IDs) > 0 {
+		sourcePh := placeholders(len(level1IDs))
+		l2Q := `SELECT ` + graphEdgeColumns + ` FROM plugin_relations r JOIN plugins p ON p.plugin_id=r.target_plugin_id
+WHERE r.source_plugin_id IN (` + sourcePh + `) AND r.status=1 AND r.deleted_at IS NULL AND p.status=1 AND p.deleted_at IS NULL AND ` + edgeWhere + `
+ORDER BY r.source_plugin_id,r.sort_order,r.relation_id`
+		l2Args := append(append([]any(nil), stringSliceAsAny(level1IDs)...), edgeWhereArgs...)
+		l2Rows, err := r.db.QueryContext(ctx, l2Q, l2Args...)
+		if err != nil {
+			return nil, nil, nil, wrapped("graph l2 edges", err)
+		}
+		l2Rels, l2Embedded, err := scanRelationRows(l2Rows, true)
+		if err != nil {
+			return nil, nil, nil, wrapped("graph l2 scan", err)
+		}
+		for i := range l2Rels {
+			x := &l2Rels[i]
+			if st, ok := targetType[x.SourcePluginID]; ok {
+				x.SourcePluginType = st
+			}
+			allRels = append(allRels, *x)
+			isEmb := containsStr(l2Embedded, x.TargetPluginID)
+			addTarget(x.TargetPluginID, x.TargetPluginType, isEmb)
+		}
+	}
+
+	// ---- Node cap ----------------------------------------------------------
+	// level1IDs by this point contains the deduped union of L1 and L2 targets in
+	// first-seen order. Cap BEFORE fetching payloads.
+	if len(level1IDs) > maxGraphNodes {
+		return nil, nil, nil, ErrGraphTooLarge
+	}
+	if len(level1IDs) == 0 {
+		return root, allRels, nil, nil
+	}
+
+	// ---- Batch node payloads (light projection) ---------------------------
+	nodeWhere, nodeArgs := graphNodeWhere(scope, embeddedOrder)
+	nodeQ := `SELECT ` + pluginSummaryColumns + pluginMetricColumns + ` FROM plugins p
+WHERE p.status=1 AND p.deleted_at IS NULL AND p.plugin_id IN (` + placeholders(len(level1IDs)) + `) AND ` + nodeWhere
+	fullArgs := append(append([]any(nil), stringSliceAsAny(level1IDs)...), nodeArgs...)
+	nRows, err := r.db.QueryContext(ctx, nodeQ, fullArgs...)
+	if err != nil {
+		return nil, nil, nil, wrapped("graph nodes", err)
+	}
+	defer nRows.Close()
+	present := map[string]*model.Plugin{}
+	var returnOrder []string
+	for nRows.Next() {
+		p, err := scanPluginSummary(nRows)
+		if err != nil {
+			return nil, nil, nil, wrapped("graph node scan", err)
+		}
+		present[p.ID] = p
+		returnOrder = append(returnOrder, p.ID)
+	}
+	if err := nRows.Err(); err != nil {
+		return nil, nil, nil, wrapped("graph node iter", err)
+	}
+
+	// Defense-in-depth: if a target was filtered out by the node WHERE
+	// (concurrent delete or corrupted edge), drop edges that referenced it and
+	// do not include it in the node slice.
+	if len(present) != len(level1IDs) {
+		filtered := allRels[:0]
+		for _, rel := range allRels {
+			if rel.SourcePluginID != root.ID && present[rel.SourcePluginID] == nil {
+				continue // edge from a vanished ancestor; drop
+			}
+			if present[rel.TargetPluginID] == nil {
+				continue
+			}
+			filtered = append(filtered, rel)
+		}
+		allRels = filtered
+	}
+	nodes := make([]*model.Plugin, 0, len(returnOrder))
+	for _, id := range level1IDs {
+		if p, ok := present[id]; ok {
+			nodes = append(nodes, p)
+		}
+	}
+	return root, allRels, nodes, nil
+}
+
+func containsStr(hay []string, needle string) bool {
+	for _, v := range hay {
+		if v == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // CountMemberRelations returns per-team counts of live expert_team_expert

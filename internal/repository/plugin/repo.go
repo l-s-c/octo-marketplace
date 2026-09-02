@@ -20,7 +20,19 @@ var (
 	ErrInvalidCategory = errors.New("invalid plugin category")
 	// ErrInvalidPlacement indicates a category not enabled for the Plugin type and placement.
 	ErrInvalidPlacement = errors.New("invalid plugin placement")
+	// ErrGraphTooLarge indicates a plugin's transitive relation closure exceeds the
+	// per-request node cap. The read path fails closed (rather than truncating) so
+	// callers never render a partially-missing squad/agent.
+	ErrGraphTooLarge = errors.New("plugin graph exceeds node cap")
 )
+
+// maxGraphNodes caps the total number of related (non-root) plugins returned by
+// a single detail_graph response. It matches maxInstallRelationTargets so the
+// read surface cannot describe a graph the install surface would refuse.
+const maxGraphNodes = 500
+
+// MaxGraphNodes returns the per-response child-node cap for the graph endpoint.
+func MaxGraphNodes() int { return maxGraphNodes }
 
 // Scope is authoritative caller context; it must never come from request data.
 type Scope struct {

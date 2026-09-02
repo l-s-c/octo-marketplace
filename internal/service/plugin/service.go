@@ -30,6 +30,10 @@ var (
 	// content_hash/content_size recorded for it at publish time — a
 	// content-addressed object must never be served under a mismatched digest.
 	ErrIntegrity = errors.New("plugin artifact integrity check failed")
+	// ErrGraphTooLarge is returned when a plugin's transitive relation closure
+	// exceeds the per-request node cap; the detail_graph endpoint fails closed
+	// so a caller never renders a partially-missing squad or agent.
+	ErrGraphTooLarge = errors.New("plugin graph exceeds node cap")
 )
 
 // Caller is populated from verified authentication context, never request JSON.
@@ -58,6 +62,7 @@ type Store interface {
 	CountMemberRelations(context.Context, []string) (map[string]int, error)
 	CountDeclaredRelations(context.Context, string) (int, error)
 	ListTags(context.Context, pluginrepo.Scope, pluginrepo.TagListFilter) ([]model.TagFilter, error)
+	GetGraphClosure(context.Context, pluginrepo.Scope, string) (*model.Plugin, []model.PluginRelation, []*model.Plugin, error)
 }
 
 var _ Store = (*pluginrepo.Repo)(nil)
@@ -133,6 +138,16 @@ type Detail struct {
 	Relations []model.PluginRelation
 	// RelationResult reports upsert relation synchronization; nil on reads.
 	RelationResult *RelationResult
+}
+
+// DetailGraph is the flat transitive closure returned by DetailGraph: the
+// root plugin in full projection (carrying plugin_json), every edge in the
+// closure, and related plugins in light projection (manifest only, no
+// plugin_json), deduplicated by plugin_id.
+type DetailGraph struct {
+	Plugin    *model.Plugin
+	Relations []model.PluginRelation
+	Related   []*model.Plugin
 }
 
 // RelationResult mirrors the target-state relation sync outcome on the wire:
@@ -367,6 +382,61 @@ func (s *Service) Detail(ctx context.Context, caller Caller, pluginID string, in
 		}
 	}
 	return &Detail{Plugin: p, Relations: rels}, nil
+}
+
+// DetailGraph returns a plugin together with the flat, deduplicated transitive
+// closure of its relation graph. The root carries the full projection
+// (plugin_json included); related plugins carry the light list projection
+// (manifest only, no plugin_json). Icons are resolved once per unique key.
+// Member counts for team-typed nodes are filled in-memory from the edge slice.
+func (s *Service) DetailGraph(ctx context.Context, caller Caller, pluginID string) (*DetailGraph, error) {
+	if err := validateCaller(caller); err != nil {
+		return nil, ErrInvalidRequest
+	}
+	storageID, err := parseStorageID(pluginID)
+	if err != nil {
+		return nil, err
+	}
+	root, rels, nodes, err := s.repo.GetGraphClosure(ctx, scope(caller), storageID)
+	if err != nil {
+		return nil, mapStoreError(err)
+	}
+	// Resolve icons once per unique raw icon key across root and related so a
+	// shared icon does not trigger repeated presign work.
+	iconCache := map[string]string{}
+	resolve := func(icon string) string {
+		if icon == "" {
+			return ""
+		}
+		if u, ok := iconCache[icon]; ok {
+			return u
+		}
+		u := s.resolveIcon(ctx, icon)
+		iconCache[icon] = u
+		return u
+	}
+	root.IconURL = resolve(root.Icon)
+	for _, n := range nodes {
+		n.IconURL = resolve(n.Icon)
+	}
+	// Fill member_count in-memory from the closure edges — cheaper and
+	// visibility-correct vs. CountMemberRelations (which counts ALL live edges
+	// regardless of caller visibility).
+	memberCounts := map[string]int{}
+	for _, rel := range rels {
+		if rel.Type == "expert_team_expert" {
+			memberCounts[rel.SourcePluginID]++
+		}
+	}
+	if root.Type == model.PluginTypeExpertTeam {
+		root.MemberCount = memberCounts[root.ID]
+	}
+	for _, n := range nodes {
+		if n.Type == model.PluginTypeExpertTeam {
+			n.MemberCount = memberCounts[n.ID]
+		}
+	}
+	return &DetailGraph{Plugin: root, Relations: rels, Related: nodes}, nil
 }
 
 func (s *Service) Create(ctx context.Context, caller Caller, req WriteRequest) (*Detail, error) {
@@ -681,6 +751,8 @@ func mapStoreError(err error) error {
 		return ErrNotFound
 	case errors.Is(err, pluginrepo.ErrConflict):
 		return ErrConflict
+	case errors.Is(err, pluginrepo.ErrGraphTooLarge):
+		return ErrGraphTooLarge
 	case errors.Is(err, pluginrepo.ErrInvalidRelation), errors.Is(err, pluginrepo.ErrInvalidCategory), errors.Is(err, pluginrepo.ErrInvalidPlacement):
 		return ErrInvalidRequest
 	default:

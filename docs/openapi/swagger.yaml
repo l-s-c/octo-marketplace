@@ -155,6 +155,11 @@ components:
         data:
           $ref: '#/components/schemas/internal_api_handler_plugin.deleteResponse'
       type: object
+    github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailGraphResponse:
+      properties:
+        data:
+          $ref: '#/components/schemas/internal_api_handler_plugin.detailGraphResponse'
+      type: object
     github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse:
       properties:
         data:
@@ -1468,6 +1473,21 @@ components:
           type: boolean
         plugin_id:
           type: string
+      type: object
+    internal_api_handler_plugin.detailGraphResponse:
+      properties:
+        plugin:
+          $ref: '#/components/schemas/internal_api_handler_plugin.pluginResponse'
+        related_plugins:
+          items:
+            $ref: '#/components/schemas/internal_api_handler_plugin.listItemResponse'
+          type: array
+          uniqueItems: false
+        relations:
+          items:
+            $ref: '#/components/schemas/internal_api_handler_plugin.relationResponse'
+          type: array
+          uniqueItems: false
       type: object
     internal_api_handler_plugin.detailResponse:
       properties:
@@ -5241,6 +5261,74 @@ paths:
       security:
       - Bearer: []
       summary: Get plugin
+      tags:
+      - plugin
+  /plugins/detail_graph:
+    get:
+      description: Return one Plugin (full projection identical to GET /plugins/detail)
+        together with the flat, deduplicated transitive closure of its relation graph
+        and every edge in that closure, up to the fixed depth enforced by the relation
+        matrix. Hidden related plugins are silently omitted; bundled (embedded) children
+        are visible when reachable through an already-authorized ancestor.
+      operationId: plugin.graph.get
+      parameters:
+      - description: Plugin ID
+        in: query
+        name: plugin_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailGraphResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: PAYLOAD_TOO_LARGE
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Get plugin relation graph
       tags:
       - plugin
   /plugins/download:

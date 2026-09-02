@@ -18,6 +18,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/logging"
 	marketmiddleware "github.com/Mininglamp-OSS/octo-marketplace/internal/middleware"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+	pluginrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/plugin"
 	pluginsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/plugin"
 	"github.com/gin-gonic/gin"
 )
@@ -37,6 +38,7 @@ type Service interface {
 	SkillMarkdown(context.Context, pluginsvc.Caller, string) (string, error)
 	OpenSkillPackage(context.Context, pluginsvc.Caller, string) (*pluginsvc.SkillPackageStream, error)
 	ListTags(context.Context, pluginsvc.Caller, pluginsvc.TagListParams) ([]model.TagFilter, error)
+	DetailGraph(context.Context, pluginsvc.Caller, string) (*pluginsvc.DetailGraph, error)
 }
 
 // CategoryService is separate because category listing is a read-only operation
@@ -64,6 +66,7 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	rg.GET("/plugin_tags", h.ListTags)
 	plugins := rg.Group("/plugins")
 	plugins.GET("/detail", h.Get)
+	plugins.GET("/detail_graph", h.GetGraph)
 	plugins.POST("/upsert", h.Upsert)
 	plugins.POST("/delete", h.Delete)
 	plugins.GET("/versions", h.ListVersions)
@@ -204,6 +207,12 @@ type detailResponse struct {
 	RelationResult *relationResultResponse `json:"relation_result,omitempty"`
 }
 
+type detailGraphResponse struct {
+	Plugin         pluginResponse     `json:"plugin"`
+	Relations      []relationResponse `json:"relations"`
+	RelatedPlugins []listItemResponse `json:"related_plugins"`
+}
+
 type relationResultResponse struct {
 	Created []string `json:"created"`
 	Updated []string `json:"updated"`
@@ -336,6 +345,42 @@ func (h *Handler) Get(c *gin.Context) {
 		return
 	}
 	apiresponse.OK(c, detailDTO(v))
+}
+
+// GetGraph godoc
+// @Summary Get plugin relation graph
+// @Description Return one Plugin (full projection identical to GET /plugins/detail) together with the flat, deduplicated transitive closure of its relation graph and every edge in that closure, up to the fixed depth enforced by the relation matrix. Hidden related plugins are silently omitted; bundled (embedded) children are visible when reachable through an already-authorized ancestor.
+// @Tags plugin
+// @ID plugin.graph.get
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param plugin_id query string true "Plugin ID"
+// @Success 200 {object} apiresponse.Data[detailGraphResponse]
+// @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
+// @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
+// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
+// @Failure 404 {object} apiresponse.Error "NOT_FOUND"
+// @Failure 413 {object} apiresponse.Error "PAYLOAD_TOO_LARGE"
+// @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
+// @Router /plugins/detail_graph [get]
+func (h *Handler) GetGraph(c *gin.Context) {
+	caller, ok := caller(c)
+	if !ok {
+		unauthorized(c)
+		return
+	}
+	pluginID := strings.TrimSpace(c.Query("plugin_id"))
+	if pluginID == "" {
+		validation(c, "plugin_id")
+		return
+	}
+	v, err := h.svc.DetailGraph(c.Request.Context(), caller, pluginID)
+	if err != nil {
+		writeServiceError(c, err, "plugin.graph.get")
+		return
+	}
+	apiresponse.OK(c, detailGraphDTO(v))
 }
 
 // Upsert godoc
@@ -633,6 +678,8 @@ func writeServiceError(c *gin.Context, err error, operation string) {
 		apiresponse.Fail(c, http.StatusNotFound, errcode.NotFound, "plugin not found", map[string]any{"resource": "plugin"}, "Verify the plugin_id and try again.")
 	case errors.Is(err, pluginsvc.ErrTooLarge):
 		apiresponse.Fail(c, http.StatusRequestEntityTooLarge, errcode.FileTooLarge, "plugin artifact exceeds the size limit", nil, "Reduce the attachment size and try again.")
+	case errors.Is(err, pluginsvc.ErrGraphTooLarge):
+		apiresponse.Fail(c, http.StatusRequestEntityTooLarge, errcode.FileTooLarge, "plugin graph exceeds the node cap", map[string]any{"max_nodes": pluginrepo.MaxGraphNodes()}, "The plugin references too many related plugins; contact the publisher to reduce the graph size.")
 	case errors.Is(err, pluginsvc.ErrConflict):
 		apiresponse.Fail(c, http.StatusConflict, errcode.Conflict, "plugin state conflicts with an existing resource", map[string]any{"conflict_reason": "state"}, "Refresh the resource and try again.")
 	default:
@@ -685,6 +732,20 @@ func detailDTO(d *pluginsvc.Detail) detailResponse {
 		out.RelationResult = &relationResultResponse{Created: d.RelationResult.Created, Updated: d.RelationResult.Updated, Deleted: d.RelationResult.Deleted}
 	}
 	return out
+}
+func detailGraphDTO(d *pluginsvc.DetailGraph) detailGraphResponse {
+	if d == nil {
+		return detailGraphResponse{Relations: []relationResponse{}, RelatedPlugins: []listItemResponse{}}
+	}
+	rels := make([]relationResponse, len(d.Relations))
+	for i, x := range d.Relations {
+		rels[i] = relationResponse{RelationID: x.ID, SourcePluginID: x.SourcePluginID, TargetPluginID: x.TargetPluginID, RelationType: x.Type, SortOrder: x.SortOrder, Data: normalizedObjectRaw(x.Data)}
+	}
+	related := make([]listItemResponse, len(d.Related))
+	for i, p := range d.Related {
+		related[i] = listItemDTO(p)
+	}
+	return detailGraphResponse{Plugin: pluginDTO(d.Plugin), Relations: rels, RelatedPlugins: related}
 }
 func versionDTO(x model.PluginVersion) versionResponse {
 	return versionResponse{VersionID: x.ID, PluginID: x.PluginID, Version: x.Version, ManifestHash: x.ManifestHash, PluginHash: x.PluginHash, Relations: versionRelationSlice(x.Relations), Changelog: x.Changelog, CreatedBy: x.CreatedBy, CreatedAt: x.CreatedAt}
