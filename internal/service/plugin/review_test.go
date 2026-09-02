@@ -27,7 +27,7 @@ func reviewFixture(t *testing.T) (*fakeStore, *Service) {
 	store := &fakeStore{relations: map[string][]model.PluginRelation{}, plugins: map[string]*model.Plugin{
 		"plugin-1": {
 			ID: "plugin-1", Name: "Demo", Type: model.PluginTypeSkill,
-			OwnerUID: "user-1", SpaceID: &space, Visibility: model.PluginVisibilityPrivate,
+			OwnerUID: "user-1", SpaceID: &space, Visibility: model.PluginVisibilitySpace,
 			Manifest:     json.RawMessage(`{"plugin_name":"Demo","description":"manifest fallback"}`),
 			Package:      json.RawMessage(reviewPackage),
 			ManifestHash: "sha256:m", PluginHash: "sha256:p",
@@ -108,6 +108,23 @@ func TestSubmitReviewRejectsEmbeddedChild(t *testing.T) {
 	}
 	if store.review.insertReq != nil {
 		t.Error("embedded submit reached the repository")
+	}
+}
+
+// A private plugin has no org audience to review, and approving its request
+// could never list it (ApproveReview would either no-op a published+private row
+// or, on a draft, stamp org visibility the author never asked for). Review is a
+// `space`-intent gate, so a submission whose declared visibility is not `space`
+// is refused before it reaches the repository. Publish routes only `space` here,
+// but the direct endpoint must hold the invariant on its own.
+func TestSubmitReviewRefusesNonSpaceVisibility(t *testing.T) {
+	store, svc := reviewFixture(t)
+	store.plugins["plugin-1"].Visibility = model.PluginVisibilityPrivate
+	if _, err := svc.SubmitReview(context.Background(), reviewApplicant, ReviewSubmitParams{PluginID: "plugin-1", Version: "1.0.0"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("error = %v, want ErrInvalidRequest", err)
+	}
+	if store.review.insertReq != nil {
+		t.Error("private-visibility submit reached the repository")
 	}
 }
 

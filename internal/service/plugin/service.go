@@ -642,6 +642,13 @@ func (s *Service) update(ctx context.Context, caller Caller, pluginID string, re
 	m := mutation(*p, rels, audit)
 	m.SnapshotVersion = true
 	m.Changelog = req.Changelog
+	// The unlocked pending guard above (non-admin visibility change) is a fast
+	// pre-check; make it authoritative by re-checking under the plugin row lock in
+	// the write transaction. Same condition as that guard so a content-only save
+	// and the exempt system admin skip the extra read.
+	if !caller.IsSystemAdmin && req.Visibility != old.Visibility {
+		m.RefusePendingReview = true
+	}
 	// Widening the declared audience of a LISTED plugin un-lists it.
 	//
 	// The refusal above only covers a published plugin that is already `space`.
@@ -868,6 +875,8 @@ func mapStoreError(err error) error {
 		return ErrNotFound
 	case errors.Is(err, pluginrepo.ErrConflict):
 		return ErrConflict
+	case errors.Is(err, pluginrepo.ErrReviewPending):
+		return ErrReviewPending
 	case errors.Is(err, pluginrepo.ErrInvalidRelation), errors.Is(err, pluginrepo.ErrInvalidCategory), errors.Is(err, pluginrepo.ErrInvalidPlacement):
 		return ErrInvalidRequest
 	default:

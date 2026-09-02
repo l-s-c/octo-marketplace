@@ -14,6 +14,11 @@ var (
 	ErrNotFound = errors.New("plugin not found")
 	// ErrConflict indicates an immutable version or placement uniqueness conflict.
 	ErrConflict = errors.New("plugin conflict")
+	// ErrReviewPending indicates a state change refused because an open review
+	// request exists on the plugin. Reported from inside a transaction that holds
+	// the plugin row lock, so it closes the window the service's own unlocked
+	// pre-check leaves open. The service maps it back to its own ErrReviewPending.
+	ErrReviewPending = errors.New("a review request is pending on this plugin")
 	// ErrInvalidRelation indicates a relation whose source/target types are incompatible.
 	ErrInvalidRelation = errors.New("invalid plugin relation")
 	// ErrInvalidCategory indicates a missing, inactive, or type-incompatible category.

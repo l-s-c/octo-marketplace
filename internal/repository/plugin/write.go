@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strconv"
 
@@ -32,6 +33,15 @@ type Mutation struct {
 	// CHANGED (not merely widened); see the comment at the UPDATE statement for
 	// why that case cannot leave the row published.
 	ResetListingToDraft bool
+	// RefusePendingReview aborts the update with ErrReviewPending if an open
+	// review request exists on the plugin, checked under the plugin row's lock.
+	// Set by Service.update for a non-admin visibility CHANGE: the service already
+	// refuses that case from an UNLOCKED HasPendingReview, but a concurrent
+	// SubmitReview can land between that read and this transaction, after which
+	// ApproveReview would stamp visibility=space against the author's since-changed
+	// intent (or, on a private target, strand the row). Re-checking under lock here
+	// closes the window in the same idiom PublishPlugin uses.
+	RefusePendingReview bool
 }
 
 // RelationSync reports the outcome of synchronizing a Plugin's one-level
@@ -492,6 +502,23 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	before, err := getOwnedForUpdate(ctx, tx, scope, m.Plugin.ID)
 	if err != nil {
 		return nil, err
+	}
+	// A visibility change while a review is pending is refused by the service, but
+	// from an UNLOCKED read. Re-check under the plugin row lock this transaction now
+	// holds so a SubmitReview that committed after the service's read cannot slip a
+	// pending request past the guard and have ApproveReview publish against the
+	// author's since-changed intent. The service passes this only for the
+	// visibility-change case; a content-only save leaves it false.
+	if m.RefusePendingReview {
+		var pendingID string
+		if err := tx.QueryRowContext(ctx,
+			`SELECT review_id FROM plugin_review_requests
+			  WHERE plugin_id=? AND status='pending' AND deleted_at IS NULL LIMIT 1`,
+			m.Plugin.ID).Scan(&pendingID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, wrapped("check pending review", err)
+		} else if pendingID != "" {
+			return nil, ErrReviewPending
+		}
 	}
 	now := r.now()
 	p := m.Plugin

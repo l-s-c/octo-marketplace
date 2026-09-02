@@ -423,19 +423,25 @@ func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewPa
 		return nil, err
 	}
 
-	// A first listing is what turns a draft into a listed plugin, so it stamps
-	// listing_state alongside the frozen content. visibility is stamped too, but
-	// only as a defensive normalization: under the current model the author already
-	// declared `space` on the draft, so this is a no-op for every request submitted
-	// after listing_state shipped. It stays because a request that was already
-	// pending across the upgrade may still carry the old private-draft shape.
-	isFirst := model.ReviewKind(kind) == model.ReviewKindFirst && current.ListingState != model.PluginListingStatePublished
+	// A first listing is what turns an unlisted row into a listed plugin, so it
+	// stamps visibility=space AND listing_state=published together. The "already
+	// listed to the org" state is BOTH axes at once — visibility=space AND
+	// listing_state=published — not listing_state alone: a published+PRIVATE row
+	// (reachable only through a lost publish-vs-submit race, which PublishPlugin now
+	// refuses in-transaction, but derived defensively here regardless) is NOT org
+	// content, so approving its request must still stamp `space` rather than take
+	// the content-only upgrade branch and leave it invisible forever. Restated in
+	// the UPDATE predicate the way PublishPlugin/DelistPlugin carry theirs, so the
+	// branch the code took is the branch the row commits to.
+	isFirst := !(current.Visibility == model.PluginVisibilitySpace && current.ListingState == model.PluginListingStatePublished)
 	if isFirst {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE plugins SET manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,visibility=?,listing_state=?,updated_at=?
-			  WHERE plugin_id=? AND space_id=? AND deleted_at IS NULL`,
+			  WHERE plugin_id=? AND space_id=? AND deleted_at IS NULL
+			    AND NOT (visibility=? AND listing_state=?)`,
 			string(manifest), string(pkg), jsonColumn(attKeys), manifestHash, pluginHash,
-			string(model.PluginVisibilitySpace), string(model.PluginListingStatePublished), now, pluginID, scope.SpaceID); err != nil {
+			string(model.PluginVisibilitySpace), string(model.PluginListingStatePublished), now, pluginID, scope.SpaceID,
+			string(model.PluginVisibilitySpace), string(model.PluginListingStatePublished)); err != nil {
 			return nil, wrapped("apply approved snapshot", err)
 		}
 	} else {

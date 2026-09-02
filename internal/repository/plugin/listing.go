@@ -83,6 +83,30 @@ func (r *Repo) PublishPlugin(ctx context.Context, scope Scope, p PublishParams) 
 		return nil, ErrConflict
 	}
 
+	// The service also refused a plugin with a pending review from an UNLOCKED
+	// read taken several round trips earlier. Between that read and this
+	// transaction the owner can fire a concurrent SubmitReview: its request commits
+	// a first-listing row (kind derived from the still-draft plugin) while this
+	// publish sees "no pending" and stamps `published` onto the private row. The
+	// plugin lands private+published+pending — a state where the reviewer's later
+	// approval takes the content-only branch and never lists it, stranding an
+	// approved-but-invisible row exactly like the failures earlier rounds closed.
+	// Re-checking the pending request under the plugin row's lock closes the
+	// window; the request row was inserted inside its own transaction, so once we
+	// hold the plugin lock a committed request is visible and an uncommitted one
+	// cannot race past this read. ErrReviewPending mirrors the service's own error
+	// for the case it already handles.
+	var pendingID string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT review_id FROM plugin_review_requests
+		  WHERE plugin_id=? AND status='pending' AND deleted_at IS NULL LIMIT 1`,
+		p.PluginID).Scan(&pendingID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, wrapped("check pending review", err)
+	}
+	if pendingID != "" {
+		return nil, ErrReviewPending
+	}
+
 	// State CAS rather than a blind write, so a double-click loses with
 	// ErrConflict instead of appending a second audit row for the same event.
 	// `visibility` is in the predicate too: the check above reads the locked row,

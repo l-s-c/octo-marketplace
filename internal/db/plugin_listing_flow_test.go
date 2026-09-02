@@ -559,3 +559,120 @@ func TestPublishRefusesAPluginThatBecameOrgVisibleMidFlight(t *testing.T) {
 		t.Errorf("a colleague can read it (%v); the review gate was bypassed", err)
 	}
 }
+
+// TestPublishRefusesAPluginWithAReviewSubmittedMidFlight closes the sibling
+// TOCTOU: Service.Publish reads "no pending review" UNLOCKED, several round trips
+// before the transaction. A concurrent SubmitReview can commit a first-listing
+// request in that window; publish then stamps `published` onto the still-private
+// row, landing it in private+published+pending — a state where the reviewer's
+// later approval takes the content-only branch and never lists it, an
+// approved-but-invisible row. PublishPlugin now re-checks the pending request
+// under the plugin row lock and refuses. Simulated by inserting the request
+// between the service's read and the repository call.
+func TestPublishRefusesAPluginWithAReviewSubmittedMidFlight(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	// A private draft that a concurrent SubmitReview would have flipped to `space`
+	// intent — but the interleaving that matters is the request landing while the
+	// publish still sees the private draft, so seed it private and insert the
+	// pending request the way a raced submit would leave it.
+	seed(t, database, seedPlugin{id: "p1", visibility: "private", listingState: "draft", currentVersion: "1.0.0"})
+	if err := repo.InsertReviewRequest(ctx, tenantScope(), newRequest("p1", "1.0.0"),
+		snapshotOf(`{"plugin_name":"V1"}`, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatalf("InsertReviewRequest: %v", err)
+	}
+
+	_, err := repo.PublishPlugin(ctx, tenantScope(), pluginrepo.PublishParams{
+		PluginID: "p1", OperatorID: "user-1", OperatorName: "Alice",
+	})
+	if !errors.Is(err, pluginrepo.ErrReviewPending) {
+		t.Fatalf("PublishPlugin = %v, want ErrReviewPending", err)
+	}
+	var listing string
+	if err := database.QueryRow(`SELECT listing_state FROM plugins WHERE plugin_id='p1'`).Scan(&listing); err != nil {
+		t.Fatal(err)
+	}
+	if listing != string(model.PluginListingStateDraft) {
+		t.Fatalf("listing_state = %q; publish raced past the pending review", listing)
+	}
+	assertAudit(t, database, "p1", "publish", 0)
+}
+
+// TestUpdateRefusesAVisibilityChangeWithAReviewSubmittedMidFlight closes the
+// TOCTOU on the guard Service.update added: a visibility change while a review is
+// pending is refused, but from an UNLOCKED read. A concurrent SubmitReview can
+// land after that read; ApproveReview would then stamp visibility=space against
+// the author's since-changed intent. Repo.Update now re-checks the pending
+// request under the plugin row lock when the service flags a visibility change.
+func TestUpdateRefusesAVisibilityChangeWithAReviewSubmittedMidFlight(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	owner := tenantScope()
+	// A space-intent draft with a submission in flight.
+	seed(t, database, seedPlugin{id: "p1", visibility: "space", listingState: "draft", currentVersion: "1.0.0"})
+	if err := repo.InsertReviewRequest(ctx, owner, newRequest("p1", "1.0.0"),
+		snapshotOf(`{"plugin_name":"V1"}`, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatalf("InsertReviewRequest: %v", err)
+	}
+
+	current, err := repo.Get(ctx, owner, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	narrowed := *current
+	narrowed.Visibility = model.PluginVisibilityPrivate
+	_, err = repo.Update(ctx, owner, pluginrepo.Mutation{
+		Plugin: narrowed, OperatorID: "user-1", RefusePendingReview: true,
+	})
+	if !errors.Is(err, pluginrepo.ErrReviewPending) {
+		t.Fatalf("Update = %v, want ErrReviewPending", err)
+	}
+	// The row is untouched: still space-intent, so the pending approval matches
+	// the author's stated intent.
+	after, err := repo.Get(ctx, owner, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Visibility != model.PluginVisibilitySpace {
+		t.Errorf("visibility = %q; the change slipped past the pending guard", after.Visibility)
+	}
+}
+
+// TestApproveListsAStrandedPublishedPrivateRow pins the both-axes isFirst
+// derivation. A published+PRIVATE row is not org content (only its owner reads
+// it), so approving its first-listing request must STAMP visibility=space rather
+// than take the content-only upgrade branch and leave it invisible forever. The
+// state is reachable only through a lost race that PublishPlugin now refuses, but
+// ApproveReview derives the branch defensively from both axes regardless.
+func TestApproveListsAStrandedPublishedPrivateRow(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	owner := tenantScope()
+	colleague := pluginrepo.Scope{CallerUID: "user-2", SpaceID: "space-a"}
+	seed(t, database, seedPlugin{id: "p1", visibility: "private", listingState: "published", currentVersion: "1.0.0"})
+	req := newRequest("p1", "2.0.0")
+	if err := repo.InsertReviewRequest(ctx, owner, req,
+		snapshotOf(`{"plugin_name":"V2"}`, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatalf("InsertReviewRequest: %v", err)
+	}
+
+	out, err := repo.ApproveReview(ctx, reviewerScope(), pluginrepo.ApproveReviewParams{
+		ReviewID: req.ID, ReviewerUID: "admin-1", ReviewerName: "Adam",
+	})
+	if err != nil {
+		t.Fatalf("ApproveReview: %v", err)
+	}
+	if out.Visibility != model.PluginVisibilitySpace {
+		t.Errorf("visibility = %q; approval left a published+private row unlisted", out.Visibility)
+	}
+	if out.ListingState != model.PluginListingStatePublished {
+		t.Errorf("listing_state = %q, want published", out.ListingState)
+	}
+	// The consequence that matters: a colleague can now read it.
+	if _, err := repo.Get(ctx, colleague, "p1"); err != nil {
+		t.Errorf("colleague cannot read the approved plugin (%v); approval was a silent no-op", err)
+	}
+}

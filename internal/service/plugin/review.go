@@ -168,6 +168,19 @@ func (s *Service) SubmitReview(ctx context.Context, caller Caller, params Review
 	if detail.Plugin.IsEmbedded {
 		return nil, ErrNotFound
 	}
+	// Review exists to gate ORG exposure, and `space` is the only declared
+	// visibility that asks for it: a private plugin is readable by nobody but its
+	// author, so there is nothing for a reviewer to admit to the org. Approving
+	// such a request cannot list it either — ApproveReview derives isFirst from the
+	// row's own state and would either no-op a published+private row or, on a
+	// draft, stamp `space` against an author who never asked for org visibility.
+	// Publish already routes `private` to the immediate branch and only `space` to
+	// here; this refuses the direct SubmitReview endpoint the same way so the
+	// invariant does not depend on the caller. Not ErrNotFound — the plugin is
+	// visible to its owner, this is a state conflict on that plugin.
+	if detail.Plugin.Visibility != model.PluginVisibilitySpace {
+		return nil, ErrInvalidRequest
+	}
 	if hasParseTask && detail.Plugin.Type != model.PluginTypeSkill {
 		// Parse tasks exist only for skill zip uploads; connectors and experts
 		// carry declared JSON through manifest_json/plugin_json.
