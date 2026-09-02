@@ -869,13 +869,22 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 		})
 		state = cardStateApproved
 	} else {
-		_, _, applyErr = s.repo.RejectReview(ctx, adminScope, pluginrepo.RejectReviewParams{
+		var frozenKeys json.RawMessage
+		var retained map[string]struct{}
+		frozenKeys, retained, applyErr = s.repo.RejectReview(ctx, adminScope, pluginrepo.RejectReviewParams{
 			ReviewID:       reviewID,
 			ReviewerUID:    operatorUID,
 			ReviewerName:   operatorUID,
 			Reason:         model.DefaultIMDenyReason,
 			DecisionSource: model.ReviewDecisionSourceIM,
 		})
+		if applyErr == nil {
+			// The same GC the web reject runs. RejectReview already returns both
+			// sidecars out of its own transaction, so wiring it here costs no extra
+			// round trip — an earlier comment claimed it did and used that to justify
+			// leaving IM denies leaking every object their submission spilled.
+			s.cleanupOrphanedReviewObjects(context.WithoutCancel(ctx), frozenKeys, retained)
+		}
 		state = cardStateDenied
 	}
 	if applyErr != nil {
@@ -883,11 +892,6 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 		// (or a web decision) already settled this request. Report the authoritative
 		// terminal state so the card renders correctly, rather than returning 5xx
 		// and having the event retried into the DLQ.
-		// NOTE: IM-side rejects do not GC objects; the frozen keys are only reachable
-		// by loading the snapshot, and doing that inside the card callback adds a
-		// round trip to every IM deny. The web RejectReview handles GC; orphaned
-		// objects from IM rejects are bounded (content-addressed, deduped across
-		// versions) and acceptable.
 		mapped := mapStoreError(applyErr)
 		if errors.Is(mapped, ErrConflict) || errors.Is(mapped, ErrNotFound) {
 			return s.cardConflict(ctx, req), nil

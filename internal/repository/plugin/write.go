@@ -461,6 +461,16 @@ func softDeleteRebuiltChild(ctx context.Context, tx *sql.Tx, newID func() string
 WHERE source_plugin_id=? AND deleted_at IS NULL`, now, now, id); err != nil {
 		return wrapped("rebuild delete child relations", err)
 	}
+	// Cascade the same way the single-row Delete does, so the invariant is
+	// structural: no path that soft-deletes a plugins row leaves a pending review
+	// request pointing at it. Reaching it through the SERVICE requires a row that
+	// became embedded after submitting (SubmitReview refuses is_embedded), so in
+	// practice this matches zero rows — that is the point. Placing the cascade at
+	// the soft-delete itself rather than at the two callers also covers RebuildGraph,
+	// whose replaced children are removed exactly as permanently.
+	if err = cancelPendingReviewFor(ctx, tx, now, id, top.OperatorID, top.OperatorName, reasonCanceledOnDelete); err != nil {
+		return err
+	}
 	m := Mutation{OperatorID: top.OperatorID, OperatorName: top.OperatorName, RequestID: top.RequestID, Remark: top.Remark}
 	return insertAudit(ctx, tx, newID(), now, *before, "delete", m, before.PluginHash, "")
 }
@@ -605,6 +615,51 @@ WHERE source_plugin_id=? AND deleted_at IS NULL`, now, now, pluginID)
 	if err != nil {
 		return err
 	}
+	// Cascade onto any open review request, in this transaction. Without it the
+	// request stays `pending` forever and NOBODY can settle it — see
+	// cancelPendingReviewFor for why every read and every decision path refuses a
+	// deleted plugin's request, and why relaxing one of them instead would be dead
+	// code. Same cascade DelistPlugin performs, deliberately through the same
+	// helper rather than a second idiom.
+	//
+	// Storage objects are deliberately NOT collected, and the argument is a
+	// DIFFERENT one from delist's.
+	//
+	// Delist keeps its hands off because the author never abandoned the submission:
+	// a third party's takedown cancelled it as a side effect. That test does not
+	// protect anything here. Delete is the author acting on their own content — the
+	// same actor and the same submission that CancelReview destroys objects for —
+	// so on who-is-acting alone this belongs on the collecting side of the line.
+	//
+	// What decides it instead is that this is a SOFT delete. The plugins row, its
+	// whole plugin_versions history and its live attachment sidecar all survive on
+	// purpose, and nothing in this service ever deletes a plugin's own objects:
+	// neither Service.Delete nor the admin delete touches storage at all. So
+	// collecting only the pending submission's spill would make this transaction the
+	// single place a soft delete performs an irreversible external side effect — on
+	// the smallest slice of the objects it is knowingly leaving behind, while the
+	// larger leak it sits inside stays untouched.
+	//
+	// The asymmetry settles it. NOT collecting is recoverable: every row a sweeper
+	// would need survives the soft delete, so the same difference (a canceled
+	// request's frozen sidecar minus retainedAttachmentKeys, which reads the live
+	// sidecar and every version snapshot and is not filtered by deleted_at) can
+	// still be computed later, with more context. Collecting now is not —
+	// object-storage deletes do not come back — and it would prejudge a question
+	// nobody has answered: whether `deleted_at` on a plugin means "recoverable".
+	// There is no undelete path in this repository today, but
+	// migrations/sql/20260902-00-plugin-listing-state.sql deliberately fails CLOSED
+	// against a manual one ("so an accidental undelete does not republish it"),
+	// which is not the posture of a codebase that treats a soft-deleted plugin as
+	// destroyed.
+	//
+	// Residual, stated plainly: the canceled submission's spilled objects leak, as
+	// do the plugin's own. Reclaiming them is one deliberate decision about
+	// plugin-delete object GC — live sidecar, version sidecars and any frozen
+	// submission together — not a fragment of it bolted onto this cascade.
+	if err = cancelPendingReviewFor(ctx, tx, now, pluginID, operatorID, operatorName, reasonCanceledOnDelete); err != nil {
+		return err
+	}
 	m := Mutation{OperatorID: operatorID, OperatorName: operatorName, RequestID: requestID, Remark: remark}
 	if err = insertAudit(ctx, tx, r.id(), now, *before, "delete", m, before.PluginHash, ""); err != nil {
 		return err
@@ -662,6 +717,14 @@ func (r *Repo) DeleteGraph(ctx context.Context, scope Scope, topID string, opera
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE plugin_relations SET deleted_at=?,updated_at=?
 WHERE source_plugin_id=? AND deleted_at IS NULL`, now, now, topID); err != nil {
+		return err
+	}
+	// The top takes the same cascade as the single-row Delete, including its
+	// deliberate refusal to collect the submission's storage objects; the argument
+	// is written out there. Each embedded child gets its own inside
+	// softDeleteRebuiltChild, so no plugins row this transaction soft-deletes is
+	// left with a pending request pointing at it.
+	if err = cancelPendingReviewFor(ctx, tx, now, topID, operatorID, operatorName, reasonCanceledOnDelete); err != nil {
 		return err
 	}
 	if err = insertAudit(ctx, tx, r.id(), now, *before, "delete", m, before.PluginHash, ""); err != nil {

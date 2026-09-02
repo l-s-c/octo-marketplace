@@ -589,6 +589,7 @@ func TestDeleteInvalidatesOnlyOutgoingRelationsAfterReferenceCheck(t *testing.T)
 	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?.*WHERE source_plugin_id=\? AND deleted_at IS NULL`).
 		WithArgs(now, now, "plugin-id").
 		WillReturnResult(sqlmock.NewResult(0, 2))
+	expectCancelPendingReview(mock, now, "plugin-id", "caller", "Caller")
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
@@ -699,6 +700,23 @@ func TestUpdateRejectsAdoptingForeignEmbeddedChild(t *testing.T) {
 
 func pluginTestColumns() []string {
 	return []string{"plugin_id", "plugin_name", "plugin_type", "is_embedded", "category_id", "tags_json", "publisher", "owner_uid", "space_id", "visibility", "listing_state", "creator_name", "created_by_type", "created_by_bot_uid", "created_by_bot_name", "icon", "tool_count", "manifest_json", "plugin_json", "attachment_keys_json", "manifest_hash", "plugin_hash", "current_version_id", "current_version", "status", "created_at", "updated_at", "deleted_at"}
+}
+
+// expectCancelPendingReview scripts the review cascade EVERY plugin teardown
+// runs, immediately after that row's outgoing relations are invalidated.
+//
+// A pending request must not outlive its plugin: once plugins.deleted_at is set,
+// every review read filters the row out and every decision path refuses the
+// deleted plugin, so nobody — not even the applicant — can ever settle it. The
+// statement is scripted here rather than left implicit because these tests assert
+// the exact transaction shape; a teardown that skips it fails on the audit insert.
+//
+// Zero rows affected is the normal case (most plugins have no open request), which
+// is why the cascade never treats it as an error.
+func expectCancelPendingReview(mock sqlmock.Sqlmock, now time.Time, pluginID, operatorID, operatorName string) {
+	mock.ExpectExec(`UPDATE plugin_review_requests SET status='canceled'`).
+		WithArgs(operatorID, operatorName, reasonCanceledOnDelete, now, now, pluginID).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 }
 
 func TestUpdateSynchronizesRelationsToTargetState(t *testing.T) {
@@ -1071,6 +1089,7 @@ func TestRebuildGraphSwapsChildrenPreservesTopAndSoftDeletesOld(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("skill-old", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "admin", "", model.PluginVisibilitySystem, model.PluginListingStatePublished, "Root", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:som", "sha256:sop", nil, nil, 1, now, now, nil))
 	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-old").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-old").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectCancelPendingReview(mock, now, "skill-old", "admin", "Root")
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-del", "skill-old", "delete", "admin", "Root", "req", "sha256:sop", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	// Phase 6: update audit for the top, create audit for the new child.
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-top", "expert-9", "update", "admin", "Root", "req", "sha256:pold", "sha256:p2", `{"m":2}`, `{"p":2}`, nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
@@ -1193,6 +1212,7 @@ func TestDeleteGraphSoftDeletesTopAndEmbeddedChildren(t *testing.T) {
 	// Soft-delete the top + its outgoing relations, then the top delete audit.
 	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "expert-9").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "expert-9").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectCancelPendingReview(mock, now, "expert-9", "admin", "Root")
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-top", "expert-9", "delete", "admin", "Root", "req", "sha256:ptop", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	// The embedded child: lock, soft-delete + its relations, delete audit.
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
@@ -1200,6 +1220,7 @@ func TestDeleteGraphSoftDeletesTopAndEmbeddedChildren(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("skill-emb", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilitySystem, model.PluginListingStatePublished, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:sm", "sha256:pemb", nil, nil, 1, now, now, nil))
 	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-emb").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-emb").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectCancelPendingReview(mock, now, "skill-emb", "admin", "Root")
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-child", "skill-emb", "delete", "admin", "Root", "req", "sha256:pemb", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
@@ -1284,6 +1305,7 @@ func TestRebuildGraphSoftDeletesCurrentChildFromCommittedGraph(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("skill-current", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "admin", "", model.PluginVisibilitySystem, model.PluginListingStatePublished, "Root", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:som", "sha256:sop", nil, nil, 1, now, now, nil))
 	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-current").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "skill-current").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectCancelPendingReview(mock, now, "skill-current", "admin", "Root")
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-del", "skill-current", "delete", "admin", "Root", "req", "sha256:sop", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-top", "expert-9", "update", "admin", "Root", "req", "sha256:pold", "sha256:p2", `{"m":2}`, `{"p":2}`, nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-child", "skill-new", "create", "admin", "Root", "req", nil, "sha256:sp", "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
@@ -1335,6 +1357,7 @@ func TestDeleteGraphDerivesEmbeddedSquadChildrenUnderLock(t *testing.T) {
 	// Soft-delete the top + its outgoing relations, top delete audit.
 	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "team-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "team-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectCancelPendingReview(mock, now, "team-1", "admin", "Root")
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-top", "team-1", "delete", "admin", "Root", "req", "sha256:ptop", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	// Child member: lock, soft-delete + relations, delete audit.
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
@@ -1342,6 +1365,7 @@ func TestDeleteGraphDerivesEmbeddedSquadChildrenUnderLock(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("member-1", "M", model.PluginTypeExpert, 1, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilitySystem, model.PluginListingStatePublished, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:mm", "sha256:pmem", nil, nil, 1, now, now, nil))
 	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "member-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "member-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectCancelPendingReview(mock, now, "member-1", "admin", "Root")
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-member", "member-1", "delete", "admin", "Root", "req", "sha256:pmem", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	// Child member-skill: lock, soft-delete + relations, delete audit.
 	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL FOR UPDATE`).
@@ -1349,6 +1373,7 @@ func TestDeleteGraphDerivesEmbeddedSquadChildrenUnderLock(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(pluginTestColumns()).AddRow("mskill-1", "S", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "owner-1", "", model.PluginVisibilitySystem, model.PluginListingStatePublished, "Orig", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "sha256:sm", "sha256:pms", nil, nil, 1, now, now, nil))
 	mock.ExpectExec(`UPDATE plugins SET deleted_at=\?,updated_at=\? WHERE plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "mskill-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE plugin_relations SET deleted_at=\?,updated_at=\?\s+WHERE source_plugin_id=\? AND deleted_at IS NULL`).WithArgs(now, now, "mskill-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectCancelPendingReview(mock, now, "mskill-1", "admin", "Root")
 	mock.ExpectExec(`INSERT INTO plugin_audit_logs`).WithArgs("audit-mskill", "mskill-1", "delete", "admin", "Root", "req", "sha256:pms", nil, "{}", "{}", nil, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 

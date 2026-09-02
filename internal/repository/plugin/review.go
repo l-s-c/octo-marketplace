@@ -827,6 +827,42 @@ func (r *Repo) CancelReview(ctx context.Context, scope Scope, reviewID, callerUI
 	return frozenKeys, retained, nil
 }
 
+// Reasons recorded on a request that some OTHER transaction cancelled. They are
+// stored on the row, so keep them descriptions of what happened rather than of
+// who read them.
+const (
+	reasonCanceledOnDelist = "plugin delisted by a Space admin"
+	reasonCanceledOnDelete = "plugin deleted"
+)
+
+// cancelPendingReviewFor settles a plugin's pending review request inside the
+// caller's transaction, recording who caused it and why.
+//
+// EVERY transaction that takes a plugin out of circulation has to call it,
+// because a pending request outlives its plugin in a state nobody can leave.
+// Once plugins.deleted_at is set: ListReviewRequests (:303), GetReviewRequest
+// (:241) and LoadReviewSnapshot (:251) all carry `p.deleted_at IS NULL`, so
+// neither the applicant nor a reviewer can even SEE the row; and CancelReview,
+// ApproveReview and RejectReview each load the plugin through
+// getReviewedPluginForUpdate, which refuses a deleted one. Relaxing any single
+// one of those would be dead code — the request is undiscoverable before it is
+// unsettleable — so the only fix that reaches the row is a cascade from the
+// transaction that removed the plugin, in that same transaction.
+//
+// The UPDATE is a CAS on `pending`, not a blind write, so a request another
+// transaction just approved or rejected keeps the decision it actually got.
+// Zero rows is the ordinary case (most plugins have no open request) and is
+// deliberately not an error.
+func cancelPendingReviewFor(ctx context.Context, tx *sql.Tx, now any, pluginID, operatorID, operatorName, reason string) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE plugin_review_requests SET status='canceled',reviewer_uid=?,reviewer_name=?,reason=?,reviewed_at=?,updated_at=?
+		  WHERE plugin_id=? AND status='pending' AND deleted_at IS NULL`,
+		operatorID, operatorName, reason, now, now, pluginID); err != nil {
+		return wrapped("cancel pending review", err)
+	}
+	return nil
+}
+
 // --- Card-action receipts ---------------------------------------------------
 
 func (r *Repo) GetCardActionReceipt(ctx context.Context, eventID string) (*model.CardActionReceipt, error) {
