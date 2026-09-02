@@ -18,9 +18,9 @@ type publishRequest struct {
 }
 
 type publishResponse struct {
-	PluginID     string                    `json:"plugin_id"`
-	ListingState model.PluginListingState  `json:"listing_state"`
-	Status       model.PluginDisplayStatus `json:"status"`
+	PluginID      string                    `json:"plugin_id"`
+	ListingState  model.PluginListingState  `json:"listing_state"`
+	DisplayStatus model.PluginDisplayStatus `json:"display_status"`
 	// ReviewID is present only when the publish opened a review request, which is
 	// how the client knows which branch fired without a second call.
 	ReviewID *string `json:"review_id,omitempty"`
@@ -32,9 +32,9 @@ type delistRequest struct {
 }
 
 type delistResponse struct {
-	PluginID     string                    `json:"plugin_id"`
-	ListingState model.PluginListingState  `json:"listing_state"`
-	Status       model.PluginDisplayStatus `json:"status"`
+	PluginID      string                    `json:"plugin_id"`
+	ListingState  model.PluginListingState  `json:"listing_state"`
+	DisplayStatus model.PluginDisplayStatus `json:"display_status"`
 }
 
 // Publish godoc
@@ -83,9 +83,9 @@ func (h *Handler) Publish(c *gin.Context) {
 	}
 	if result.Review != nil {
 		out.ReviewID = &result.Review.ID
-		out.Status = result.Plugin.Plugin.DisplayStatus(true, result.Review.Status)
+		out.DisplayStatus = result.Plugin.Plugin.DisplayStatus(true, result.Review.Status)
 	} else {
-		out.Status = result.Plugin.Plugin.DisplayStatus(false, "")
+		out.DisplayStatus = result.Plugin.Plugin.DisplayStatus(false, "")
 	}
 	apiresponse.OK(c, out)
 }
@@ -130,6 +130,6 @@ func (h *Handler) Delist(c *gin.Context) {
 		ListingState: detail.Plugin.ListingState,
 		// Delist cancels any pending request in the same transaction, so there is
 		// never an open review to fold in here.
-		Status: detail.Plugin.DisplayStatus(false, ""),
+		DisplayStatus: detail.Plugin.DisplayStatus(false, ""),
 	})
 }

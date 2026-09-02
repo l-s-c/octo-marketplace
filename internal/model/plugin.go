@@ -151,8 +151,16 @@ type Plugin struct {
 	ViewCount     int
 	InstallCount  int
 	DownloadCount int
-	Manifest      json.RawMessage
-	Package       json.RawMessage
+	// HasPendingReview / LatestReviewID / LatestReviewStatus are the review half of
+	// the displayed status. They are DERIVED at read time and never persisted on
+	// this row — review state lives on plugin_review_requests so a listed v1 and an
+	// in-review v2 can coexist. Populated only where a client needs a status badge
+	// (the mine listing and the detail read); zero elsewhere.
+	HasPendingReview   bool
+	LatestReviewID     string
+	LatestReviewStatus ReviewStatus
+	Manifest           json.RawMessage
+	Package            json.RawMessage
 	// AttachmentKeys is the host-private sidecar for storage attachments: a JSON
 	// object mapping a package attachment path to its managed object key. The
 	// octo-plugin-lib 2.0 package forbids host fields inside attachments, so the

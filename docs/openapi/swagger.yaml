@@ -736,6 +736,14 @@ components:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.Visibility'
       type: object
     github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginDisplayStatus:
+      description: 'DisplayStatus is the single DERIVED status a client shows: draft
+        /
+
+        pending_review / published / rejected / delisted. It folds the listing axis
+
+        together with the review axis so clients do not have to fetch the review list
+
+        and join. Distinct from `status`, which is the row''s soft-active flag.'
       enum:
       - draft
       - pending_review
@@ -756,6 +764,12 @@ components:
       - PluginDisplayStatusRejected
       - PluginDisplayStatusDelisted
     github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginListingState:
+      description: 'ListingState / Status / ReviewID are populated for mode=mine only.
+        On the
+
+        marketplace grid every row is published by construction, so the status would
+
+        be a constant and the extra per-row lookups buy nothing.'
       enum:
       - draft
       - published
@@ -1561,12 +1575,12 @@ components:
       type: object
     internal_api_handler_plugin.delistResponse:
       properties:
+        display_status:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginDisplayStatus'
         listing_state:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginListingState'
         plugin_id:
           type: string
-        status:
-          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginDisplayStatus'
       type: object
     internal_api_handler_plugin.detailResponse:
       properties:
@@ -1642,6 +1656,8 @@ components:
           type: string
         current_version_id:
           type: string
+        display_status:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginDisplayStatus'
         download_count:
           type: integer
         icon:
@@ -1652,6 +1668,8 @@ components:
           type: integer
         is_embedded:
           type: boolean
+        listing_state:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginListingState'
         manifest_hash:
           type: string
         manifest_json:
@@ -1669,6 +1687,8 @@ components:
         plugin_type:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginType'
         publisher:
+          type: string
+        review_id:
           type: string
         space_id:
           type: string
@@ -1706,6 +1726,8 @@ components:
           type: string
         current_version_id:
           type: string
+        display_status:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginDisplayStatus'
         download_count:
           type: integer
         icon:
@@ -1721,6 +1743,8 @@ components:
           type: integer
         is_embedded:
           type: boolean
+        listing_state:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginListingState'
         manifest_hash:
           type: string
         manifest_json:
@@ -1738,6 +1762,8 @@ components:
         plugin_type:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginType'
         publisher:
+          type: string
+        review_id:
           type: string
         space_id:
           type: string
@@ -1802,6 +1828,8 @@ components:
       type: object
     internal_api_handler_plugin.publishResponse:
       properties:
+        display_status:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginDisplayStatus'
         listing_state:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginListingState'
         plugin_id:
@@ -1812,8 +1840,6 @@ components:
 
             how the client knows which branch fired without a second call.'
           type: string
-        status:
-          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginDisplayStatus'
       type: object
     internal_api_handler_plugin.relationRequest:
       properties:

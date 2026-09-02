@@ -148,20 +148,27 @@ type deleteResponse struct {
 }
 
 type pluginResponse struct {
-	PluginID         string                 `json:"plugin_id"`
-	PluginName       string                 `json:"plugin_name"`
-	PluginType       model.PluginType       `json:"plugin_type"`
-	IsEmbedded       bool                   `json:"is_embedded"`
-	CategoryID       *string                `json:"category_id,omitempty"`
-	Tags             []string               `json:"tags"`
-	Publisher        string                 `json:"publisher,omitempty"`
-	OwnerID          string                 `json:"owner_id"`
-	SpaceID          *string                `json:"space_id,omitempty"`
-	Visibility       model.PluginVisibility `json:"visibility"`
-	CreatorName      string                 `json:"creator_name"`
-	CreatedByType    string                 `json:"created_by_type"`
-	CreatedByBotID   *string                `json:"created_by_bot_id,omitempty"`
-	CreatedByBotName *string                `json:"created_by_bot_name,omitempty"`
+	PluginID     string                   `json:"plugin_id"`
+	PluginName   string                   `json:"plugin_name"`
+	PluginType   model.PluginType         `json:"plugin_type"`
+	IsEmbedded   bool                     `json:"is_embedded"`
+	CategoryID   *string                  `json:"category_id,omitempty"`
+	Tags         []string                 `json:"tags"`
+	Publisher    string                   `json:"publisher,omitempty"`
+	OwnerID      string                   `json:"owner_id"`
+	SpaceID      *string                  `json:"space_id,omitempty"`
+	Visibility   model.PluginVisibility   `json:"visibility"`
+	ListingState model.PluginListingState `json:"listing_state"`
+	// DisplayStatus is the single DERIVED status a client shows: draft /
+	// pending_review / published / rejected / delisted. It folds the listing axis
+	// together with the review axis so clients do not have to fetch the review list
+	// and join. Distinct from `status`, which is the row's soft-active flag.
+	DisplayStatus    model.PluginDisplayStatus `json:"display_status"`
+	ReviewID         *string                   `json:"review_id,omitempty"`
+	CreatorName      string                    `json:"creator_name"`
+	CreatedByType    string                    `json:"created_by_type"`
+	CreatedByBotID   *string                   `json:"created_by_bot_id,omitempty"`
+	CreatedByBotName *string                   `json:"created_by_bot_name,omitempty"`
 	// Icon is the stored write-canonical value clients must echo on updates;
 	// IconURL is the resolved display URL (presigned when Icon is an object key).
 	Icon             string          `json:"icon,omitempty"`
@@ -184,35 +191,41 @@ type pluginResponse struct {
 // listItemResponse is the list-page projection: it carries the manifest for
 // display but never the full plugin_json package.
 type listItemResponse struct {
-	PluginID         string                 `json:"plugin_id"`
-	PluginName       string                 `json:"plugin_name"`
-	PluginType       model.PluginType       `json:"plugin_type"`
-	IsEmbedded       bool                   `json:"is_embedded"`
-	CategoryID       *string                `json:"category_id,omitempty"`
-	Tags             []string               `json:"tags"`
-	Publisher        string                 `json:"publisher,omitempty"`
-	OwnerID          string                 `json:"owner_id"`
-	SpaceID          *string                `json:"space_id,omitempty"`
-	Visibility       model.PluginVisibility `json:"visibility"`
-	CreatorName      string                 `json:"creator_name"`
-	CreatedByType    string                 `json:"created_by_type"`
-	CreatedByBotID   *string                `json:"created_by_bot_id,omitempty"`
-	CreatedByBotName *string                `json:"created_by_bot_name,omitempty"`
-	Icon             string                 `json:"icon,omitempty"`
-	IconURL          string                 `json:"icon_url,omitempty"`
-	ToolCount        *int                   `json:"tool_count,omitempty"`
-	MemberCount      *int                   `json:"member_count,omitempty"`
-	ViewCount        int                    `json:"view_count"`
-	InstallCount     int                    `json:"install_count"`
-	DownloadCount    int                    `json:"download_count"`
-	ManifestJSON     json.RawMessage        `json:"manifest_json" swaggertype:"object"`
-	ManifestHash     string                 `json:"manifest_hash"`
-	PluginHash       string                 `json:"plugin_hash"`
-	CurrentVersionID *string                `json:"current_version_id,omitempty"`
-	CurrentVersion   *string                `json:"current_version,omitempty"`
-	Status           int                    `json:"status"`
-	CreatedAt        time.Time              `json:"created_at" swaggertype:"string,date-time"`
-	UpdatedAt        time.Time              `json:"updated_at" swaggertype:"string,date-time"`
+	PluginID   string           `json:"plugin_id"`
+	PluginName string           `json:"plugin_name"`
+	PluginType model.PluginType `json:"plugin_type"`
+	IsEmbedded bool             `json:"is_embedded"`
+	CategoryID *string          `json:"category_id,omitempty"`
+	Tags       []string         `json:"tags"`
+	Publisher  string           `json:"publisher,omitempty"`
+	// ListingState / Status / ReviewID are populated for mode=mine only. On the
+	// marketplace grid every row is published by construction, so the status would
+	// be a constant and the extra per-row lookups buy nothing.
+	ListingState     model.PluginListingState  `json:"listing_state"`
+	DisplayStatus    model.PluginDisplayStatus `json:"display_status"`
+	ReviewID         *string                   `json:"review_id,omitempty"`
+	OwnerID          string                    `json:"owner_id"`
+	SpaceID          *string                   `json:"space_id,omitempty"`
+	Visibility       model.PluginVisibility    `json:"visibility"`
+	CreatorName      string                    `json:"creator_name"`
+	CreatedByType    string                    `json:"created_by_type"`
+	CreatedByBotID   *string                   `json:"created_by_bot_id,omitempty"`
+	CreatedByBotName *string                   `json:"created_by_bot_name,omitempty"`
+	Icon             string                    `json:"icon,omitempty"`
+	IconURL          string                    `json:"icon_url,omitempty"`
+	ToolCount        *int                      `json:"tool_count,omitempty"`
+	MemberCount      *int                      `json:"member_count,omitempty"`
+	ViewCount        int                       `json:"view_count"`
+	InstallCount     int                       `json:"install_count"`
+	DownloadCount    int                       `json:"download_count"`
+	ManifestJSON     json.RawMessage           `json:"manifest_json" swaggertype:"object"`
+	ManifestHash     string                    `json:"manifest_hash"`
+	PluginHash       string                    `json:"plugin_hash"`
+	CurrentVersionID *string                   `json:"current_version_id,omitempty"`
+	CurrentVersion   *string                   `json:"current_version,omitempty"`
+	Status           int                       `json:"status"`
+	CreatedAt        time.Time                 `json:"created_at" swaggertype:"string,date-time"`
+	UpdatedAt        time.Time                 `json:"updated_at" swaggertype:"string,date-time"`
 }
 
 type relationResponse struct {
@@ -730,13 +743,13 @@ func pluginDTO(p *model.Plugin) pluginResponse {
 	if p == nil {
 		return pluginResponse{}
 	}
-	return pluginResponse{PluginID: p.ID, PluginName: p.Name, PluginType: p.Type, IsEmbedded: p.IsEmbedded, CategoryID: p.CategoryID, Tags: stringSlice(p.Tags), Publisher: p.Publisher, OwnerID: p.OwnerUID, SpaceID: p.SpaceID, Visibility: p.Visibility, CreatorName: p.CreatorName, CreatedByType: p.CreatedByType, CreatedByBotID: p.CreatedByBotUID, CreatedByBotName: p.CreatedByBotName, Icon: p.Icon, IconURL: p.IconURL, ToolCount: connectorCount(p), ViewCount: p.ViewCount, InstallCount: p.InstallCount, DownloadCount: p.DownloadCount, ManifestJSON: normalizedObjectRaw(p.Manifest), PluginJSON: normalizedObjectRaw(p.Package), ManifestHash: p.ManifestHash, PluginHash: p.PluginHash, CurrentVersionID: p.CurrentVersionID, CurrentVersion: p.CurrentVersion, Status: p.Status, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
+	return pluginResponse{PluginID: p.ID, PluginName: p.Name, PluginType: p.Type, IsEmbedded: p.IsEmbedded, CategoryID: p.CategoryID, Tags: stringSlice(p.Tags), Publisher: p.Publisher, OwnerID: p.OwnerUID, SpaceID: p.SpaceID, Visibility: p.Visibility, ListingState: p.ListingState, DisplayStatus: p.DisplayStatus(p.HasPendingReview, p.LatestReviewStatus), ReviewID: optionalID(p.LatestReviewID), CreatorName: p.CreatorName, CreatedByType: p.CreatedByType, CreatedByBotID: p.CreatedByBotUID, CreatedByBotName: p.CreatedByBotName, Icon: p.Icon, IconURL: p.IconURL, ToolCount: connectorCount(p), ViewCount: p.ViewCount, InstallCount: p.InstallCount, DownloadCount: p.DownloadCount, ManifestJSON: normalizedObjectRaw(p.Manifest), PluginJSON: normalizedObjectRaw(p.Package), ManifestHash: p.ManifestHash, PluginHash: p.PluginHash, CurrentVersionID: p.CurrentVersionID, CurrentVersion: p.CurrentVersion, Status: p.Status, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
 }
 func listItemDTO(p *model.Plugin) listItemResponse {
 	if p == nil {
 		return listItemResponse{}
 	}
-	return listItemResponse{PluginID: p.ID, PluginName: p.Name, PluginType: p.Type, IsEmbedded: p.IsEmbedded, CategoryID: p.CategoryID, Tags: stringSlice(p.Tags), Publisher: p.Publisher, OwnerID: p.OwnerUID, SpaceID: p.SpaceID, Visibility: p.Visibility, CreatorName: p.CreatorName, CreatedByType: p.CreatedByType, CreatedByBotID: p.CreatedByBotUID, CreatedByBotName: p.CreatedByBotName, Icon: p.Icon, IconURL: p.IconURL, ToolCount: connectorCount(p), MemberCount: teamMemberCount(p), ViewCount: p.ViewCount, InstallCount: p.InstallCount, DownloadCount: p.DownloadCount, ManifestJSON: normalizedObjectRaw(p.Manifest), ManifestHash: p.ManifestHash, PluginHash: p.PluginHash, CurrentVersionID: p.CurrentVersionID, CurrentVersion: p.CurrentVersion, Status: p.Status, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
+	return listItemResponse{PluginID: p.ID, PluginName: p.Name, PluginType: p.Type, IsEmbedded: p.IsEmbedded, CategoryID: p.CategoryID, Tags: stringSlice(p.Tags), Publisher: p.Publisher, OwnerID: p.OwnerUID, SpaceID: p.SpaceID, Visibility: p.Visibility, ListingState: p.ListingState, DisplayStatus: p.DisplayStatus(p.HasPendingReview, p.LatestReviewStatus), ReviewID: optionalID(p.LatestReviewID), CreatorName: p.CreatorName, CreatedByType: p.CreatedByType, CreatedByBotID: p.CreatedByBotUID, CreatedByBotName: p.CreatedByBotName, Icon: p.Icon, IconURL: p.IconURL, ToolCount: connectorCount(p), MemberCount: teamMemberCount(p), ViewCount: p.ViewCount, InstallCount: p.InstallCount, DownloadCount: p.DownloadCount, ManifestJSON: normalizedObjectRaw(p.Manifest), ManifestHash: p.ManifestHash, PluginHash: p.PluginHash, CurrentVersionID: p.CurrentVersionID, CurrentVersion: p.CurrentVersion, Status: p.Status, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
 }
 
 // connectorCount and teamMemberCount emit typed counts only for the plugin
@@ -860,4 +873,12 @@ func versionRelationSlice(raw json.RawMessage) []map[string]any {
 		})
 	}
 	return out
+}
+
+// optionalID omits an empty derived id from the response rather than sending "".
+func optionalID(id string) *string {
+	if id == "" {
+		return nil
+	}
+	return &id
 }

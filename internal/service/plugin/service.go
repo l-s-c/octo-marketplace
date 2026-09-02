@@ -73,6 +73,7 @@ type Store interface {
 	LoadReviewSnapshot(context.Context, pluginrepo.Scope, string, bool) (*model.PluginReviewRequest, error)
 	ListReviewRequests(context.Context, pluginrepo.Scope, pluginrepo.ReviewListFilter) ([]*model.PluginReviewRequest, int64, error)
 	HasPendingReview(context.Context, pluginrepo.Scope, string) (bool, error)
+	LatestReviewForPlugin(context.Context, pluginrepo.Scope, string) (string, model.ReviewStatus, error)
 
 	// Listing lifecycle. These are the only two writers of listing_state besides
 	// insertPlugin and ApproveReview.
@@ -278,7 +279,7 @@ func (s *Service) List(ctx context.Context, caller Caller, p ListParams) ([]mode
 	if err != nil {
 		return nil, 0, err
 	}
-	items, total, err := s.repo.List(ctx, scope(caller), pluginrepo.ListFilter{PlacementCode: strings.TrimSpace(p.PlacementCode), Type: p.Type, CategoryID: strings.TrimSpace(p.CategoryID), Tags: tags, Keyword: strings.TrimSpace(p.Keyword), Mine: p.Mine, Sort: strings.TrimSpace(p.Sort), Limit: p.Limit, Offset: p.Offset})
+	items, total, err := s.repo.List(ctx, scope(caller), pluginrepo.ListFilter{PlacementCode: strings.TrimSpace(p.PlacementCode), Type: p.Type, CategoryID: strings.TrimSpace(p.CategoryID), Tags: tags, Keyword: strings.TrimSpace(p.Keyword), Mine: p.Mine, Sort: strings.TrimSpace(p.Sort), Limit: p.Limit, Offset: p.Offset, IncludeReviewState: p.Mine})
 	if err != nil {
 		return nil, 0, mapStoreError(err)
 	}
@@ -423,6 +424,21 @@ func (s *Service) Detail(ctx context.Context, caller Caller, pluginID string, in
 		return nil, mapStoreError(err)
 	}
 	p.IconURL = s.resolveIcon(ctx, p.Icon)
+	// The detail read carries the same derived status as the mine listing, or a card
+	// would show 审核中 and the detail page it opens would show nothing.
+	//
+	// Owner-only, deliberately. Everyone in the Space can read a listed plugin, but
+	// only its author has any business knowing that an update is sitting in the
+	// review queue. LatestReviewForPlugin orders pending first, so one lookup
+	// answers both "is there an open request" and "what happened last".
+	if p.OwnerUID == caller.UID {
+		reviewID, status, err := s.repo.LatestReviewForPlugin(ctx, scope(caller), p.ID)
+		if err != nil {
+			return nil, mapStoreError(err)
+		}
+		p.LatestReviewID, p.LatestReviewStatus = reviewID, status
+		p.HasPendingReview = status == model.ReviewStatusPending
+	}
 	if !includeRelations {
 		rels = []model.PluginRelation{}
 	} else {

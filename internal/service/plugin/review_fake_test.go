@@ -38,6 +38,8 @@ type reviewFake struct {
 	pendingScope   pluginrepo.Scope
 	pendingPlugin  string
 	pendingCalls   int
+	latestScope    pluginrepo.Scope
+	latestPlugin   string
 
 	// Canned outputs.
 	stored      *model.PluginReviewRequest
@@ -50,6 +52,8 @@ type reviewFake struct {
 	// reads, so a test can model "the row changed under us" (a lost race).
 	anySpaceSecond *model.PluginReviewRequest
 	hasPending     bool
+	latestID       string
+	latestStatus   model.ReviewStatus
 
 	insertErr    error
 	getErr       error
@@ -61,6 +65,7 @@ type reviewFake struct {
 	anySpaceErr  error
 	insertRecErr error
 	pendingErr   error
+	latestErr    error
 }
 
 func (f *fakeStore) HasPendingReview(_ context.Context, s pluginrepo.Scope, pluginID string) (bool, error) {
@@ -71,6 +76,15 @@ func (f *fakeStore) HasPendingReview(_ context.Context, s pluginrepo.Scope, plug
 		return false, f.review.pendingErr
 	}
 	return f.review.hasPending, nil
+}
+
+func (f *fakeStore) LatestReviewForPlugin(_ context.Context, s pluginrepo.Scope, pluginID string) (string, model.ReviewStatus, error) {
+	f.review.latestScope = s
+	f.review.latestPlugin = pluginID
+	if f.review.latestErr != nil {
+		return "", "", f.review.latestErr
+	}
+	return f.review.latestID, f.review.latestStatus, nil
 }
 
 // listingFake records the two listing_state writers. Like the review half these

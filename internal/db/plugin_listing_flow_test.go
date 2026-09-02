@@ -241,3 +241,79 @@ func assertAudit(t *testing.T, database *sql.DB, pluginID, action string, want i
 		t.Errorf("%s audit rows = %d, want %d", action, got, want)
 	}
 }
+
+// TestMineListingCarriesTheDerivedStatus is what lets 我的发布 render a status column
+// without fetching the review list and joining client-side. It also pins the
+// precedence that mattered most in review: a LISTED plugin with a pending upgrade
+// reads 审核中, not 已发布.
+func TestMineListingCarriesTheDerivedStatus(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	owner := tenantScope()
+
+	seed(t, database, seedPlugin{id: "p-draft", visibility: "private", listingState: "draft", currentVersion: "1.0.0"})
+	seed(t, database, seedPlugin{id: "p-live", visibility: "space", listingState: "published", currentVersion: "1.0.0"})
+	seed(t, database, seedPlugin{id: "p-gone", visibility: "space", listingState: "delisted", currentVersion: "1.0.0"})
+	seed(t, database, seedPlugin{id: "p-pending", visibility: "space", listingState: "draft", currentVersion: "0.9.0"})
+	seed(t, database, seedPlugin{id: "p-rejected", visibility: "space", listingState: "draft", currentVersion: "0.9.0"})
+	// A listed plugin whose NEXT version is under review.
+	seed(t, database, seedPlugin{id: "p-upgrading", visibility: "space", listingState: "published", currentVersion: "1.0.0"})
+
+	if err := repo.InsertReviewRequest(ctx, owner, newRequest("p-pending", "1.0.0"),
+		snapshotOf(`{"plugin_name":"P"}`, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.InsertReviewRequest(ctx, owner, newRequest("p-upgrading", "2.0.0"),
+		snapshotOf(`{"plugin_name":"P"}`, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	rejected := newRequest("p-rejected", "1.0.0")
+	if err := repo.InsertReviewRequest(ctx, owner, rejected,
+		snapshotOf(`{"plugin_name":"P"}`, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := repo.RejectReview(ctx, reviewerScope(), pluginrepo.RejectReviewParams{
+		ReviewID: rejected.ID, ReviewerUID: "admin-1", ReviewerName: "Adam", Reason: "no",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	items, _, err := repo.List(ctx, owner, pluginrepo.ListFilter{
+		PlacementCode: "default", Mine: true, IncludeReviewState: true, Limit: 100,
+	})
+	if err != nil {
+		t.Fatalf("List(mine): %v", err)
+	}
+	got := map[string]model.PluginDisplayStatus{}
+	for i := range items {
+		got[items[i].ID] = items[i].DisplayStatus(items[i].HasPendingReview, items[i].LatestReviewStatus)
+	}
+	for id, want := range map[string]model.PluginDisplayStatus{
+		"p-draft":     model.PluginDisplayStatusDraft,
+		"p-live":      model.PluginDisplayStatusPublished,
+		"p-gone":      model.PluginDisplayStatusDelisted,
+		"p-pending":   model.PluginDisplayStatusPendingReview,
+		"p-rejected":  model.PluginDisplayStatusRejected,
+		"p-upgrading": model.PluginDisplayStatusPendingReview,
+	} {
+		if got[id] != want {
+			t.Errorf("%s display status = %q, want %q", id, got[id], want)
+		}
+	}
+
+	// The marketplace grid must NOT pay for the extra lookups, and does not need
+	// them: every row it returns is published by construction.
+	grid, _, err := repo.List(ctx, owner, pluginrepo.ListFilter{PlacementCode: "default", Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range grid {
+		if grid[i].HasPendingReview || grid[i].LatestReviewID != "" {
+			t.Errorf("%s carries review state on the grid path", grid[i].ID)
+		}
+		if grid[i].ListingState != model.PluginListingStatePublished {
+			t.Errorf("%s is on the grid with listing_state %q", grid[i].ID, grid[i].ListingState)
+		}
+	}
+}

@@ -33,8 +33,8 @@ func TestPublishWireContractDistinguishesTheTwoBranches(t *testing.T) {
 		if got := data["listing_state"]; got != "published" {
 			t.Errorf("listing_state = %v, want published", got)
 		}
-		if got := data["status"]; got != "published" {
-			t.Errorf("status = %v, want published", got)
+		if got := data["display_status"]; got != "published" {
+			t.Errorf("display_status = %v, want published", got)
 		}
 		if _, present := data["review_id"]; present {
 			t.Error("review_id is present on an immediate publish; the client will think it needs approval")
@@ -58,8 +58,8 @@ func TestPublishWireContractDistinguishesTheTwoBranches(t *testing.T) {
 		if got := data["listing_state"]; got != "draft" {
 			t.Errorf("listing_state = %v, want draft — approval is what lists it", got)
 		}
-		if got := data["status"]; got != "pending_review" {
-			t.Errorf("status = %v, want pending_review", got)
+		if got := data["display_status"]; got != "pending_review" {
+			t.Errorf("display_status = %v, want pending_review", got)
 		}
 		if got := data["review_id"]; got != "review-9" {
 			t.Errorf("review_id = %v, want review-9", got)
@@ -81,8 +81,8 @@ func TestDelistWireContract(t *testing.T) {
 	if got := data["listing_state"]; got != "delisted" {
 		t.Errorf("listing_state = %v, want delisted", got)
 	}
-	if got := data["status"]; got != "delisted" {
-		t.Errorf("status = %v, want delisted", got)
+	if got := data["display_status"]; got != "delisted" {
+		t.Errorf("display_status = %v, want delisted", got)
 	}
 	if f.listing.delistParams.Reason != "policy" {
 		t.Errorf("reason passed down = %q", f.listing.delistParams.Reason)
