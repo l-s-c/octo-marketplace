@@ -266,6 +266,32 @@ func (r *Repo) GetReviewRequestAnySpace(ctx context.Context, reviewID string) (*
 	return scanReviewRequest(row.Scan, false)
 }
 
+// HasPendingReview reports whether an open review request exists for a plugin the
+// caller owns. It is a cheap pre-check for write paths that must not contradict a
+// pending decision; the authoritative single-pending guarantee remains the UNIQUE
+// index on the generated pending_plugin_id column, taken inside the submit
+// transaction.
+//
+// Scoped through the plugin, not just the request: the plugin_id alone would let
+// any caller probe whether an arbitrary plugin has a review open.
+func (r *Repo) HasPendingReview(ctx context.Context, scope Scope, pluginID string) (bool, error) {
+	var found string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT rr.review_id FROM plugin_review_requests rr
+		   JOIN plugins p ON p.plugin_id=rr.plugin_id
+		  WHERE rr.plugin_id=? AND rr.status='pending' AND rr.deleted_at IS NULL
+		    AND p.owner_uid=? AND p.space_id=? AND p.deleted_at IS NULL
+		  LIMIT 1`,
+		pluginID, scope.CallerUID, scope.SpaceID).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, wrapped("check pending review", err)
+	}
+	return true, nil
+}
+
 func (r *Repo) ListReviewRequests(ctx context.Context, scope Scope, f ReviewListFilter) ([]*model.PluginReviewRequest, int64, error) {
 	var where strings.Builder
 	var args []any

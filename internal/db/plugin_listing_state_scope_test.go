@@ -227,6 +227,58 @@ func TestDelistedPluginLeavesTheMarketButStaysReadableByItsOwner(t *testing.T) {
 	}
 }
 
+// TestHasPendingReviewIsScopedThroughThePlugin covers the pre-check the write
+// path uses to refuse a visibility change mid-review. It is scoped through the
+// plugin rather than keyed on plugin_id alone, so it cannot be used to probe
+// whether an arbitrary plugin has a review open.
+func TestHasPendingReviewIsScopedThroughThePlugin(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft", currentVersion: "0.9.0"})
+
+	owner := pluginrepo.Scope{CallerUID: "user-1", SpaceID: "space-a"}
+
+	if pending, err := repo.HasPendingReview(ctx, owner, "plugin-1"); err != nil || pending {
+		t.Fatalf("HasPendingReview before submit = %v, %v; want false", pending, err)
+	}
+
+	req := newRequest("plugin-1", "1.0.0")
+	if err := repo.InsertReviewRequest(ctx, owner, req, snapshotOf(`{"plugin_name":"Frozen"}`, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	if pending, err := repo.HasPendingReview(ctx, owner, "plugin-1"); err != nil || !pending {
+		t.Fatalf("HasPendingReview after submit = %v, %v; want true", pending, err)
+	}
+	for _, tc := range []struct {
+		name  string
+		scope pluginrepo.Scope
+	}{
+		{"a colleague in the same Space", pluginrepo.Scope{CallerUID: "user-2", SpaceID: "space-a"}},
+		{"the owner acting in another Space", pluginrepo.Scope{CallerUID: "user-1", SpaceID: "space-b"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pending, err := repo.HasPendingReview(ctx, tc.scope, "plugin-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pending {
+				t.Error("a non-owner learned that a review is open on someone else's plugin")
+			}
+		})
+	}
+
+	// A settled request releases it: cancel is how an author gets back to a
+	// state where they can change visibility again.
+	if _, _, err := repo.CancelReview(ctx, owner, req.ID, "user-1"); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := repo.HasPendingReview(ctx, owner, "plugin-1"); err != nil || pending {
+		t.Fatalf("HasPendingReview after cancel = %v, %v; want false", pending, err)
+	}
+}
+
 func containsPlugin(items []model.Plugin, id string) bool {
 	for _, item := range items {
 		if item.ID == id {
@@ -235,7 +287,6 @@ func containsPlugin(items []model.Plugin, id string) bool {
 	}
 	return false
 }
-
 func seedVersionRow(t *testing.T, database *sql.DB, versionID, pluginID, seq string) {
 	t.Helper()
 	if _, err := database.Exec(`INSERT INTO plugin_versions

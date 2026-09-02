@@ -100,22 +100,14 @@ func validVisibility(v model.PluginVisibility, systemAdmin bool) bool {
 	}
 }
 
-// tenantVisibilityAllowed reports whether a tenant update may move a plugin from
-// `current` to `next`. `validVisibility` says which values exist; this says which
-// TRANSITIONS a tenant may perform.
-//
-// A tenant may keep what the row already has, or lower it to private (delisting
-// their own plugin). Raising to `space` is reserved for ApproveReview: it is the
-// only remaining direct route to org visibility, and leaving it open makes the
-// whole review workflow bypassable with a single upsert. Raising to `system` is
-// separately impossible — validVisibility already requires IsSystemAdmin — but it
-// is rejected here too so this predicate is complete on its own terms.
-//
-// A legacy `public` row is unreachable here anyway (validVisibility refuses to
-// write `public`), so keeping it means keeping the value the caller cannot send.
-func tenantVisibilityAllowed(current, next model.PluginVisibility) bool {
-	return next == model.PluginVisibilityPrivate || next == current
-}
+// tenantVisibilityAllowed was removed with the introduction of listing_state.
+// It encoded "a tenant may keep its visibility or lower it to private, never
+// raise it", which was the gate that kept a single upsert from bypassing review
+// while `private` doubled as the draft state. visibility is now a declared intent
+// that lists nothing on its own, so raising it on an unlisted row is meaningless
+// and lowering it is no longer a way to self-delist. The gate that replaced it is
+// listing_state: ErrListedRequiresReview refuses edits to a published org-visible
+// row, and only ApproveReview and Publish can set published.
 
 func validName(v string) bool {
 	return v != "" && utf8.ValidString(v) && len(v) <= maxNameBytes && !strings.ContainsRune(v, '\x00')

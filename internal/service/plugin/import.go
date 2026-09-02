@@ -199,7 +199,10 @@ func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdm
 		_ = json.Unmarshal(task.ResultTags, &f.tags)
 	}
 	if f.visibility == "" {
-		f.visibility = model.PluginVisibilitySpace
+		// Default to the narrowest intent. This used to default to `space` and get
+		// clamped to `private` afterwards, which amounted to the same thing; now that
+		// the declared value survives, the default has to be the safe one directly.
+		f.visibility = model.PluginVisibilityPrivate
 	}
 	// Match the legacy skill upload rule: uploads never publish publicly.
 	if f.visibility == model.PluginVisibilityPublic {
@@ -208,27 +211,22 @@ func resolveImportFields(p ImportParams, task *skillrepo.ParseTaskRow, systemAdm
 	if !validName(f.pluginName) || f.name == "" || !validVersion(f.version) || !validVisibility(f.visibility, systemAdmin) {
 		return nil, ErrInvalidRequest
 	}
-	// A tenant upload is a private, self-testable draft: Space visibility is
-	// granted only by an approved review request. Clamped LAST — after the checks
-	// above — so an explicit `public`/garbage value is still a 400 rather than
-	// being silently downgraded, and so the request field cannot smuggle `space`
-	// in either. The admin import (systemAdmin) sets its own visibility and is not
-	// a tenant-owned row, so it is left alone.
+	// An upload lands as a DRAFT whatever visibility it declares (buildWrite stamps
+	// listing_state), so the declared value is kept rather than clamped: an author
+	// who uploads intending 仅本组织可见 says so once, here, and Publish routes it
+	// through review.
 	//
 	// A re-import keeps whatever visibility the plugin already has, because
-	// demoting a listed plugin mid-edit would silently delist it. It does NOT let
-	// the re-import through: `Service.update` refuses a LISTED plugin outright with
-	// ErrListedRequiresReview (409), so re-importing a listed plugin never replaces
-	// live content — the author submits a review request (skills via
-	// `parse_task_id`) and approval is what swaps it. Re-importing a PRIVATE draft
-	// still replaces the draft directly; nobody else can read it.
+	// silently rewriting the intent of a row mid-edit is surprising. It does NOT
+	// let the re-import through: `Service.update` refuses a PUBLISHED org-visible
+	// plugin outright with ErrListedRequiresReview (409), so re-importing a listed
+	// plugin never replaces live content — the author submits a review request
+	// (skills via `parse_task_id`) and approval is what swaps it. Re-importing a
+	// draft or delisted row still replaces it directly; nobody else can read it.
 	// Tests: TestReimportOfAListedPluginIsRefused,
 	// TestReimportPreservesTheExistingVisibility.
-	if !systemAdmin {
-		f.visibility = model.PluginVisibilityPrivate
-		if old != nil && old.Visibility != "" {
-			f.visibility = old.Visibility
-		}
+	if !systemAdmin && old != nil && old.Visibility != "" {
+		f.visibility = old.Visibility
 	}
 	return f, nil
 }

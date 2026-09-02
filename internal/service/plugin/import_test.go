@@ -525,20 +525,31 @@ func TestSkillMarkdownRefObjectWinsOverInlineStub(t *testing.T) {
 	}
 }
 
-// A tenant upload is a private draft. This was the other half of the old
-// auto-listing behaviour: resolveImportFields defaulted to `space`, so every
-// upload appeared in the org market with no review at all.
-func TestImportLandsPrivateRegardlessOfTheRequestedVisibility(t *testing.T) {
-	for _, asked := range []model.PluginVisibility{"", model.PluginVisibilitySpace, model.PluginVisibilityPrivate} {
+// A tenant upload lands as a DRAFT and keeps the visibility it declared. The old
+// behaviour clamped the value to private, which under the current model would
+// throw away the author's stated intent — the thing Publish reads to decide
+// whether the upload needs org review.
+func TestImportLandsDraftAndKeepsTheDeclaredVisibility(t *testing.T) {
+	for _, tc := range []struct {
+		asked model.PluginVisibility
+		want  model.PluginVisibility
+	}{
+		{"", model.PluginVisibilityPrivate}, // unset defaults to the narrowest intent
+		{model.PluginVisibilitySpace, model.PluginVisibilitySpace},
+		{model.PluginVisibilityPrivate, model.PluginVisibilityPrivate},
+	} {
 		store, _, _, svc := importFixtures(t)
-		if _, err := svc.Import(context.Background(), testCaller, ImportParams{ParseTaskID: "task-1", Visibility: asked}); err != nil {
-			t.Fatalf("visibility=%q import err = %v", asked, err)
+		if _, err := svc.Import(context.Background(), testCaller, ImportParams{ParseTaskID: "task-1", Visibility: tc.asked}); err != nil {
+			t.Fatalf("visibility=%q import err = %v", tc.asked, err)
 		}
 		if store.create == nil {
-			t.Fatalf("visibility=%q: nothing persisted", asked)
+			t.Fatalf("visibility=%q: nothing persisted", tc.asked)
 		}
-		if store.create.Visibility != model.PluginVisibilityPrivate {
-			t.Fatalf("import asked %q, PERSISTED %q; a fresh upload must not be org-visible", asked, store.create.Visibility)
+		if store.create.Visibility != tc.want {
+			t.Errorf("import asked %q, PERSISTED visibility %q, want %q", tc.asked, store.create.Visibility, tc.want)
+		}
+		if store.create.ListingState != model.PluginListingStateDraft {
+			t.Errorf("import asked %q, PERSISTED listing_state %q; a fresh upload must not be listed", tc.asked, store.create.ListingState)
 		}
 	}
 }
@@ -575,15 +586,16 @@ func TestReimportPreservesTheExistingVisibility(t *testing.T) {
 }
 
 // resolveImportFields is the import path's own visibility decision, tested
-// directly because Service.createWithID independently forces private on a fresh
-// create: without this the import-side clamp could be deleted and the
+// directly because Service.createWithID independently validates it on a fresh
+// create: without this the import-side default could be deleted and the
 // end-to-end import tests would still pass on the create path alone.
-func TestResolveImportFieldsClampsTenantVisibility(t *testing.T) {
+func TestResolveImportFieldsDefaultsToPrivateAndPreservesIntent(t *testing.T) {
 	task := &skillrepo.ParseTaskRow{ID: "task-1", ResultName: "My Skill", ResultVersion: "2.0.0"}
 	space := "space-a"
 	listed := &model.Plugin{
 		ID: "plugin-1", Name: "My Skill", Visibility: model.PluginVisibilitySpace, SpaceID: &space,
-		Manifest: json.RawMessage(`{"plugin_name":"My Skill","name":"my-skill","description":"d"}`),
+		ListingState: model.PluginListingStatePublished,
+		Manifest:     json.RawMessage(`{"plugin_name":"My Skill","name":"my-skill","description":"d"}`),
 	}
 	tests := []struct {
 		name        string
@@ -593,8 +605,8 @@ func TestResolveImportFieldsClampsTenantVisibility(t *testing.T) {
 		want        model.PluginVisibility
 	}{
 		{name: "fresh tenant import defaults private", want: model.PluginVisibilityPrivate},
-		{name: "fresh tenant import asking for space still lands private",
-			params: ImportParams{Visibility: model.PluginVisibilitySpace}, want: model.PluginVisibilityPrivate},
+		{name: "fresh tenant import asking for space keeps space",
+			params: ImportParams{Visibility: model.PluginVisibilitySpace}, want: model.PluginVisibilitySpace},
 		{name: "reupload of a listed plugin keeps space",
 			params: ImportParams{Visibility: model.PluginVisibilityPrivate}, old: listed, want: model.PluginVisibilitySpace},
 		{name: "system admin import is untouched",
@@ -626,7 +638,8 @@ func TestReimportOfAListedPluginIsRefused(t *testing.T) {
 	store.plugins["plugin-1"] = &model.Plugin{
 		ID: "plugin-1", Name: "My Skill", Type: model.PluginTypeSkill,
 		OwnerUID: "user-1", SpaceID: &space, Visibility: model.PluginVisibilitySpace,
-		Tags: json.RawMessage(`[]`), Manifest: json.RawMessage(`{"plugin_name":"My Skill","name":"my-skill","description":"d"}`),
+		ListingState: model.PluginListingStatePublished,
+		Tags:         json.RawMessage(`[]`), Manifest: json.RawMessage(`{"plugin_name":"My Skill","name":"my-skill","description":"d"}`),
 		Package: json.RawMessage(`{"attachments":[]}`),
 	}
 	_, err := svc.Import(context.Background(), testCaller, ImportParams{ParseTaskID: "task-1", PluginID: "plugin-1"})

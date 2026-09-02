@@ -49,10 +49,17 @@ var (
 	// only mint a version label for something that shipped days ago.
 	ErrReviewContentRequired = errors.New("review submission must carry the reviewed content")
 	// ErrListedRequiresReview is returned when a tenant tries to modify an
-	// already-listed plugin through the ordinary write path. It is a STATE
-	// conflict, not a permission problem — the owner may change this plugin, just
-	// through a review request. Delisting it first (space -> private) also works.
+	// already-listed, org-visible plugin through the ordinary write path. It is a
+	// STATE conflict, not a permission problem — the owner may change this plugin,
+	// just through a review request. Self-delisting is no longer an escape hatch:
+	// taking a listed plugin down is a Space-admin action.
 	ErrListedRequiresReview = errors.New("a listed plugin may only be changed through review")
+	// ErrReviewPending is returned when a change cannot be applied while a review
+	// request is open on the plugin. Content edits during a pending review are
+	// deliberately fine — the reviewer acts on a frozen snapshot — so this covers
+	// only changes that would contradict the pending request's own outcome, namely
+	// switching visibility out from under an approval that is about to stamp it.
+	ErrReviewPending = errors.New("a review request is pending on this plugin")
 	// ErrReviewFieldConflict is returned when mutually exclusive submit fields are
 	// sent together (e.g. both parse_task_id and manifest_json). It maps to
 	// VALIDATION_ERROR with the conflicting field named.

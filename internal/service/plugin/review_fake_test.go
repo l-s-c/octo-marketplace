@@ -35,6 +35,9 @@ type reviewFake struct {
 	cancelScope    pluginrepo.Scope
 	receiptInserts []*model.CardActionReceipt
 	anySpaceCalls  int
+	pendingScope   pluginrepo.Scope
+	pendingPlugin  string
+	pendingCalls   int
 
 	// Canned outputs.
 	stored      *model.PluginReviewRequest
@@ -46,6 +49,7 @@ type reviewFake struct {
 	// anySpaceSecond, when set, is returned by the SECOND and later AnySpace
 	// reads, so a test can model "the row changed under us" (a lost race).
 	anySpaceSecond *model.PluginReviewRequest
+	hasPending     bool
 
 	insertErr    error
 	getErr       error
@@ -56,6 +60,17 @@ type reviewFake struct {
 	receiptErr   error
 	anySpaceErr  error
 	insertRecErr error
+	pendingErr   error
+}
+
+func (f *fakeStore) HasPendingReview(_ context.Context, s pluginrepo.Scope, pluginID string) (bool, error) {
+	f.review.pendingScope = s
+	f.review.pendingPlugin = pluginID
+	f.review.pendingCalls++
+	if f.review.pendingErr != nil {
+		return false, f.review.pendingErr
+	}
+	return f.review.hasPending, nil
 }
 
 func (f *fakeStore) InsertReviewRequest(_ context.Context, s pluginrepo.Scope, req *model.PluginReviewRequest, snap pluginrepo.FrozenSnapshot) error {

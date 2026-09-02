@@ -72,6 +72,7 @@ type Store interface {
 	GetReviewRequest(context.Context, pluginrepo.Scope, string, bool) (*model.PluginReviewRequest, error)
 	LoadReviewSnapshot(context.Context, pluginrepo.Scope, string, bool) (*model.PluginReviewRequest, error)
 	ListReviewRequests(context.Context, pluginrepo.Scope, pluginrepo.ReviewListFilter) ([]*model.PluginReviewRequest, int64, error)
+	HasPendingReview(context.Context, pluginrepo.Scope, string) (bool, error)
 	ApproveReview(context.Context, pluginrepo.Scope, pluginrepo.ApproveReviewParams) (*model.Plugin, error)
 	RejectReview(context.Context, pluginrepo.Scope, pluginrepo.RejectReviewParams) (json.RawMessage, json.RawMessage, error)
 	CancelReview(context.Context, pluginrepo.Scope, string, string) (json.RawMessage, json.RawMessage, error)
@@ -441,21 +442,18 @@ func (s *Service) createWithID(ctx context.Context, caller Caller, req WriteRequ
 	if err := validateCaller(caller); err != nil {
 		return nil, err
 	}
-	// A fresh tenant plugin is a private, self-testable draft. Space visibility is
-	// granted only by an approved review request (SubmitReview -> ApproveReview),
-	// and this is one of exactly two paths that could otherwise mint a
-	// Space-visible row directly.
+	// A fresh tenant plugin is always a DRAFT, whatever visibility it declares.
+	// visibility is an intent ("who should see this once it is listed"), and
+	// listing_state is what actually lists it — so there is no longer anything to
+	// clamp here: declaring 仅本组织可见 on a draft is legal and lists nothing until
+	// Publish routes it through review and ApproveReview stamps published.
 	//
-	// The requested value is VALIDATED before it is overridden: silently accepting
-	// `public` or a garbage value and storing `private` would hide a client bug and
-	// contradict the tenant contract those inputs already had. A system admin is
-	// left alone — `system` rows are not tenant-owned and not subject to Space
-	// review, matching the import path and AdminCreate.
-	if !caller.IsSystemAdmin {
-		if !validVisibility(req.Visibility, false) {
-			return nil, ErrInvalidRequest
-		}
-		req.Visibility = model.PluginVisibilityPrivate
+	// The value is still validated, so `public` and garbage stay 400s rather than
+	// being silently rewritten. buildWrite stamps listing_state=draft; a system
+	// admin is left alone because `system` rows are not tenant-owned and not
+	// subject to Space review.
+	if !caller.IsSystemAdmin && !validVisibility(req.Visibility, false) {
+		return nil, ErrInvalidRequest
 	}
 	now := s.now()
 	p, rels, err := s.buildWrite(ctx, caller, "", req, now, false)
@@ -522,32 +520,45 @@ func (s *Service) update(ctx context.Context, caller Caller, pluginID string, re
 	if req.Type != old.Type {
 		return nil, ErrInvalidRequest
 	}
-	// A tenant update may keep the row's current visibility or lower it to
-	// private (a legitimate self-delisting), but never RAISE it. Together with
-	// createWithID above this closes the second and last path to org visibility
-	// that bypasses review: without it, `POST /plugins/upsert` with
-	// visibility:"space" lists a plugin in one call and the whole workflow is
-	// decorative. Reviewed promotion happens in ApproveReview, which writes the
-	// visibility column directly rather than through this path.
+	// A LISTED, org-visible plugin may not be modified through this path at all.
+	// Every field a tenant can change here is org-visible — the documents, and
+	// through the manifest the name/description/labels, plus category, publisher
+	// and icon — so an edit that lands here is an unreviewed change to what the
+	// whole Space is reading. Reviewed content arrives through SubmitReview.
 	//
-	// A system admin is exempt for the same reason as createWithID: `system` rows
-	// are not tenant-owned, and a platform operator already reaches every one of
-	// these transitions through /api/v1/admin.
+	// The gate is (published AND space), not published alone. A PRIVATE published
+	// plugin has no review channel by design — Publish lists it directly — so
+	// refusing edits there would leave it permanently uneditable, and the
+	// justification for the refusal does not hold anyway: nobody else can read it.
+	// A DRAFT or DELISTED row is freely editable, which is what makes "edit and
+	// publish again" work after a takedown.
+	//
+	// Self-delisting by lowering visibility to private is NO LONGER a way out:
+	// taking a listed plugin down is a Space-admin action (Delist). visibility is
+	// otherwise free to change on an unlisted row, since it only declares intent.
+	//
+	// A system admin is exempt: `system` rows are not tenant-owned, and a platform
+	// operator already reaches every one of these transitions through /api/v1/admin.
 	if !caller.IsSystemAdmin {
-		if !tenantVisibilityAllowed(old.Visibility, req.Visibility) {
+		if !validVisibility(req.Visibility, false) {
 			return nil, ErrInvalidRequest
 		}
-		// And a LISTED plugin may not be modified through this path at all. Every
-		// field a tenant can change here is org-visible — the documents, and through
-		// the manifest the name/description/labels, plus category, publisher and icon
-		// — so an edit that lands here is an unreviewed change to what the whole
-		// Space is reading. Reviewed content arrives through SubmitReview instead.
-		//
-		// Lowering to private in the same call is deliberately still allowed: that is
-		// how an author takes their plugin down in order to work on it, and the
-		// content then lands on a row nobody else can see.
-		if old.Visibility == model.PluginVisibilitySpace && req.Visibility != model.PluginVisibilityPrivate {
+		if old.ListingState == model.PluginListingStatePublished && old.Visibility == model.PluginVisibilitySpace {
 			return nil, ErrListedRequiresReview
+		}
+		// While a review is pending, the frozen snapshot is what the reviewer will
+		// act on, so content edits stay allowed (that is the whole point of freezing
+		// it). Changing VISIBILITY is different: ApproveReview stamps
+		// visibility=space, so approving a request whose author has since switched to
+		// 仅自己可见 would publish a row against the author's last stated intent.
+		if req.Visibility != old.Visibility {
+			pending, err := s.repo.HasPendingReview(ctx, scope(caller), old.ID)
+			if err != nil {
+				return nil, mapStoreError(err)
+			}
+			if pending {
+				return nil, ErrReviewPending
+			}
 		}
 	}
 	now := s.now()

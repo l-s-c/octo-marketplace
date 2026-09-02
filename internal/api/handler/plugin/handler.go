@@ -683,9 +683,14 @@ func writeServiceError(c *gin.Context, err error, operation string) {
 	case errors.Is(err, pluginsvc.ErrReviewNameMismatch):
 		apiresponse.Fail(c, http.StatusBadRequest, errcode.BadRequest, "the uploaded package name does not match the plugin", map[string]any{"field": "parse_task_id", "reason": "name_mismatch"}, "Upload a package whose name matches the existing plugin.")
 	// A state conflict, not a permission problem: the owner may change this
-	// plugin, but only through a review request (or after delisting it).
+	// plugin, but only through a review request. Self-delisting is no longer an
+	// option, so the hint points at the two things that actually work.
 	case errors.Is(err, pluginsvc.ErrListedRequiresReview):
-		apiresponse.Fail(c, http.StatusConflict, errcode.Conflict, "a plugin listed to the organization cannot be edited directly", map[string]any{"conflict_reason": "listed_requires_review"}, "Submit a review request, or set visibility to private first.")
+		apiresponse.Fail(c, http.StatusConflict, errcode.Conflict, "a plugin listed to the organization cannot be edited directly", map[string]any{"conflict_reason": "listed_requires_review"}, "Publish a new version through review, or ask a Space admin to delist it first.")
+	// Also a state conflict: the pending request has to be resolved or canceled
+	// before this particular change is coherent.
+	case errors.Is(err, pluginsvc.ErrReviewPending):
+		apiresponse.Fail(c, http.StatusConflict, errcode.Conflict, "a review request is pending on this plugin", map[string]any{"conflict_reason": "review_pending"}, "Cancel the pending review request first.")
 	// Authorization refusal, distinct from "not found": the caller is in the right
 	// Space and may know the resource exists, they simply lack the reviewer role.
 	// Without this branch a permission error falls through to 500.
