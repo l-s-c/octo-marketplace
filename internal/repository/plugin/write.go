@@ -309,12 +309,16 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 		return nil, err
 	}
 	// P2-1: the service stamped the top's preserved identity and each child's
-	// visibility/Space/owner from an UNLOCKED pre-parse read. Re-derive the
-	// race-sensitive fields from the row locked here (`before`) so a concurrent
-	// visibility/Space/owner change during the multi-second parse cannot be
-	// silently reverted or promoted. The top's owner_uid/space_id are preserved by
-	// omission from its UPDATE, but visibility IS written, so re-stamp it; every
-	// new child is freshly inserted below, so re-stamp all three. A preserved legacy
+	// visibility/listing_state/Space/owner from an UNLOCKED pre-parse read.
+	// Re-derive the race-sensitive fields from the row locked here (`before`) so a
+	// concurrent visibility/Space/owner change — or a delist/approve — during the
+	// multi-second parse cannot be silently reverted or promoted. The top's
+	// owner_uid/space_id are preserved by omission from its UPDATE, and so is its
+	// listing_state; visibility IS written, so re-stamp it. Every new child is
+	// freshly inserted below, so re-stamp all four there: a child whose listing
+	// state disagrees with the top is either independently readable (child
+	// published under a draft top) or breaks every non-owner install with
+	// ErrDependencyHidden (child draft under a published top). A preserved legacy
 	// `public` visibility on the locked row is normalized to `system` here (the
 	// single NormalizeLegacyVisibility helper) so a reupload stops persisting the
 	// retired value. Residual: the top's icon and category still come from the
@@ -327,6 +331,7 @@ func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newC
 	topPlugin.OwnerUID = before.OwnerUID
 	for i := range newChildren {
 		newChildren[i].Plugin.Visibility = lockedVisibility
+		newChildren[i].Plugin.ListingState = before.ListingState
 		newChildren[i].Plugin.SpaceID = before.SpaceID
 		newChildren[i].Plugin.OwnerUID = before.OwnerUID
 	}

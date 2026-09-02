@@ -1049,7 +1049,7 @@ func TestRebuildGraphSwapsChildrenPreservesTopAndSoftDeletesOld(t *testing.T) {
 	r.id = func() string { x := ids[0]; ids = ids[1:]; return x }
 	scope := Scope{CallerUID: "admin", Admin: true}
 	space := ""
-	newSkill := model.Plugin{ID: "skill-new", Name: "S2", Type: model.PluginTypeSkill, IsEmbedded: true, Tags: []byte(`[]`), OwnerUID: "admin", SpaceID: &space, Visibility: model.PluginVisibilitySystem, CreatorName: "Root", CreatedByType: "human", Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:sm", PluginHash: "sha256:sp", Status: 1}
+	newSkill := model.Plugin{ID: "skill-new", Name: "S2", Type: model.PluginTypeSkill, IsEmbedded: true, Tags: []byte(`[]`), OwnerUID: "admin", SpaceID: &space, Visibility: model.PluginVisibilitySystem, ListingState: model.PluginListingStateDraft, CreatorName: "Root", CreatedByType: "human", Manifest: []byte(`{}`), Package: []byte(`{}`), ManifestHash: "sha256:sm", PluginHash: "sha256:sp", Status: 1}
 	top := model.Plugin{ID: "expert-9", Name: "E2", Type: model.PluginTypeExpert, Tags: []byte(`["ops"]`), Visibility: model.PluginVisibilityPublic, Icon: "icons/e.png", Manifest: []byte(`{"m":2}`), Package: []byte(`{"p":2}`), ManifestHash: "sha256:m2", PluginHash: "sha256:p2", Status: 1}
 
 	mock.ExpectBegin()
@@ -1066,11 +1066,14 @@ func TestRebuildGraphSwapsChildrenPreservesTopAndSoftDeletesOld(t *testing.T) {
 	mock.ExpectQuery(`SELECT r.target_plugin_id FROM plugin_relations r\s+JOIN plugins p ON p.plugin_id=r.target_plugin_id\s+WHERE r.source_plugin_id=\? AND r.relation_type=\? AND r.deleted_at IS NULL\s+AND p.is_embedded=1 AND p.status=1 AND p.deleted_at IS NULL\s+ORDER BY r.sort_order,r.relation_id`).
 		WithArgs("expert-9", "expert_skill").
 		WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}).AddRow("skill-old"))
-	// Phase 1: insert the new embedded child row. Its visibility/owner are
-	// re-stamped from the locked top (`before`: owner-1), not the caller's pre-parse
-	// System/admin stamping — the P2-1 locked-snapshot guard. A legacy `public`
-	// locked visibility is normalized to `system` (NormalizeLegacyVisibility).
-	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-new", "S2", model.PluginTypeSkill, true, nil, "[]", "", "owner-1", "", model.PluginVisibilitySystem, model.PluginListingStateDraft, "Root", "human", nil, nil, "", 0, "{}", "{}", nil, "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	// Phase 1: insert the new embedded child row. Its visibility/listing state/owner
+	// are re-stamped from the locked top (`before`: owner-1, published), not the
+	// caller's pre-parse System/admin/draft stamping — the P2-1 locked-snapshot
+	// guard. A legacy `public` locked visibility is normalized to `system`
+	// (NormalizeLegacyVisibility). The listing state matters as much as the rest: a
+	// child left `draft` under a published top makes every non-owner install fail
+	// with ErrDependencyHidden.
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-new", "S2", model.PluginTypeSkill, true, nil, "[]", "", "owner-1", "", model.PluginVisibilitySystem, model.PluginListingStatePublished, "Root", "human", nil, nil, "", 0, "{}", "{}", nil, "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	// Phase 3: update the top row in place (id/owner/space/created_at untouched).
 	mock.ExpectExec(`UPDATE plugins SET plugin_name=.*WHERE plugin_id=\? AND deleted_at IS NULL`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
@@ -1287,9 +1290,10 @@ func TestRebuildGraphSoftDeletesCurrentChildFromCommittedGraph(t *testing.T) {
 	mock.ExpectQuery(`SELECT r.target_plugin_id FROM plugin_relations r\s+JOIN plugins p ON p.plugin_id=r.target_plugin_id\s+WHERE r.source_plugin_id=\? AND r.relation_type=\? AND r.deleted_at IS NULL\s+AND p.is_embedded=1 AND p.status=1 AND p.deleted_at IS NULL\s+ORDER BY r.sort_order,r.relation_id`).
 		WithArgs("expert-9", "expert_skill").
 		WillReturnRows(sqlmock.NewRows([]string{"target_plugin_id"}).AddRow("skill-current"))
-	// The child inherits the locked top's owner; its legacy `public` visibility is
-	// normalized to `system` (NormalizeLegacyVisibility) on re-stamp.
-	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-new", "S2", model.PluginTypeSkill, true, nil, "[]", "", "owner-1", "", model.PluginVisibilitySystem, model.PluginListingStateDraft, "Root", "human", nil, nil, "", 0, "{}", "{}", nil, "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	// The child inherits the locked top's owner and listing state; its legacy
+	// `public` visibility is normalized to `system` (NormalizeLegacyVisibility) on
+	// re-stamp.
+	mock.ExpectExec(`INSERT INTO plugins`).WithArgs("skill-new", "S2", model.PluginTypeSkill, true, nil, "[]", "", "owner-1", "", model.PluginVisibilitySystem, model.PluginListingStatePublished, "Root", "human", nil, nil, "", 0, "{}", "{}", nil, "sha256:sm", "sha256:sp", nil, nil, 1, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`UPDATE plugins SET plugin_name=.*WHERE plugin_id=\? AND deleted_at IS NULL`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM plugin_placements WHERE plugin_id=\? AND placement_code=\?`).WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(1))
 	mock.ExpectExec(`UPDATE plugin_placements SET category_id=\?,updated_at=\? WHERE plugin_id=\?`).WillReturnResult(sqlmock.NewResult(0, 1))

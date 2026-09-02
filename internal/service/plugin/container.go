@@ -210,11 +210,12 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 		return nil, err
 	}
 	// Preserve the row's identity: a rebuild replaces content, never the plugin_id,
-	// visibility, Space, owner, publisher, creator provenance, or created_at. The
-	// container carries no icon/publisher, so keep the existing ones rather than
-	// clearing them (RebuildGraph re-derives visibility/Space/owner from the locked
-	// row — normalizing a preserved legacy `public` to `system` there — while
-	// publisher/icon/category keep this unlocked read — content, not identity).
+	// visibility, listing state, Space, owner, publisher, creator provenance, or
+	// created_at. The container carries no icon/publisher, so keep the existing ones
+	// rather than clearing them (RebuildGraph re-derives visibility/listing_state/
+	// Space/owner from the locked row — normalizing a preserved legacy `public` to
+	// `system` there — while publisher/icon/category keep this unlocked read —
+	// content, not identity).
 	top.Visibility = old.Visibility
 	top.ListingState = old.ListingState
 	top.SpaceID = old.SpaceID
@@ -244,6 +245,10 @@ func (s *Service) ReuploadContainer(ctx context.Context, caller Caller, pluginID
 	// a child left `draft` under a published top makes every non-owner install fail
 	// with ErrDependencyHidden (resolveInstallDetail sees fewer visible targets than
 	// CountDeclaredRelations).
+	//
+	// All four fields are stamped again inside RebuildGraph from the FOR
+	// UPDATE-locked row; the values read here are the pre-parse ones and lose to a
+	// concurrent edit/delist/approve, which is the intended precedence.
 	for i := range childNodes {
 		childNodes[i].Plugin.Visibility = old.Visibility
 		childNodes[i].Plugin.ListingState = old.ListingState
