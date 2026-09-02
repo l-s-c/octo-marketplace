@@ -549,4 +549,9 @@ func TestGetGraphReturns413WhenTooLarge(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"max_nodes"`) {
 		t.Fatalf("want max_nodes in details: %s", rec.Body.String())
 	}
+	// Both caps are reported: a caller that trips the edge cap while staying
+	// under the node cap otherwise gets a payload that only mentions max_nodes.
+	if !strings.Contains(rec.Body.String(), `"max_edges"`) {
+		t.Fatalf("want max_edges in details: %s", rec.Body.String())
+	}
 }

@@ -31,10 +31,16 @@ var (
 	// content-addressed object must never be served under a mismatched digest.
 	ErrIntegrity = errors.New("plugin artifact integrity check failed")
 	// ErrGraphTooLarge is returned when a plugin's transitive relation closure
-	// exceeds the per-request node cap; the detail_graph endpoint fails closed
-	// so a caller never renders a partially-missing squad or agent.
-	ErrGraphTooLarge = errors.New("plugin graph exceeds node cap")
+	// exceeds the per-request node or edge cap; the detail_graph endpoint fails
+	// closed so a caller never renders a partially-missing squad or agent.
+	ErrGraphTooLarge = errors.New("plugin graph exceeds size cap")
 )
+
+// MaxGraphNodes and MaxGraphEdges re-export the repository's detail_graph caps
+// so HTTP handlers can report them in an error payload without importing the
+// repository package.
+func MaxGraphNodes() int { return pluginrepo.MaxGraphNodes() }
+func MaxGraphEdges() int { return pluginrepo.MaxGraphEdges() }
 
 // Caller is populated from verified authentication context, never request JSON.
 type Caller struct {
@@ -388,7 +394,13 @@ func (s *Service) Detail(ctx context.Context, caller Caller, pluginID string, in
 // closure of its relation graph. The root carries the full projection
 // (plugin_json included); related plugins carry the light list projection
 // (manifest only, no plugin_json). Icons are resolved once per unique key.
-// Member counts for team-typed nodes are filled in-memory from the edge slice.
+//
+// Related nodes deliberately carry no member_count: the relation matrix never
+// admits an expert_team as a relation target, so no related node is ever a
+// team, and the root's response projection has no member_count field. A client
+// that needs a team's member count can count expert_team_expert edges in the
+// returned relation slice, which is also the only count consistent with the
+// caller's visibility.
 func (s *Service) DetailGraph(ctx context.Context, caller Caller, pluginID string) (*DetailGraph, error) {
 	if err := validateCaller(caller); err != nil {
 		return nil, ErrInvalidRequest
@@ -418,23 +430,6 @@ func (s *Service) DetailGraph(ctx context.Context, caller Caller, pluginID strin
 	root.IconURL = resolve(root.Icon)
 	for _, n := range nodes {
 		n.IconURL = resolve(n.Icon)
-	}
-	// Fill member_count in-memory from the closure edges — cheaper and
-	// visibility-correct vs. CountMemberRelations (which counts ALL live edges
-	// regardless of caller visibility).
-	memberCounts := map[string]int{}
-	for _, rel := range rels {
-		if rel.Type == "expert_team_expert" {
-			memberCounts[rel.SourcePluginID]++
-		}
-	}
-	if root.Type == model.PluginTypeExpertTeam {
-		root.MemberCount = memberCounts[root.ID]
-	}
-	for _, n := range nodes {
-		if n.Type == model.PluginTypeExpertTeam {
-			n.MemberCount = memberCounts[n.ID]
-		}
 	}
 	return &DetailGraph{Plugin: root, Relations: rels, Related: nodes}, nil
 }

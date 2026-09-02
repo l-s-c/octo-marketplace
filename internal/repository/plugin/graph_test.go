@@ -3,12 +3,21 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
 )
+
+// visibilityPredicateRE matches the caller-scoped visibility predicate
+// literally. Graph query expectations embed it rather than `.*` so a test fails
+// if an edge or node query ever stops filtering by caller visibility — the
+// mock returns whatever rows it is given, so only the predicate text itself
+// proves the filtering is in the SQL.
+const visibilityPredicateRE = `\(p\.visibility IN \('public','system'\) OR \(p\.space_id = \? AND \(p\.visibility = 'space' OR p\.owner_uid = \?\)\)\)`
 
 func pluginTestColumnsWithMetrics() []string {
 	return append(pluginTestColumns(), "view_count", "install_count", "download_count")
@@ -21,7 +30,7 @@ func pluginSummaryTestColumns() []string {
 }
 
 func graphEdgeTestColumns() []string {
-	return []string{"relation_id", "source_plugin_id", "target_plugin_id", "plugin_type", "relation_type", "sort_order", "relation_json", "status", "created_by", "created_at", "updated_at", "deleted_at", "is_embedded"}
+	return []string{"relation_id", "source_plugin_id", "target_plugin_id", "plugin_type", "relation_type", "sort_order", "relation_json", "status", "created_by", "created_at", "updated_at", "deleted_at"}
 }
 
 func TestGetGraphClosure_ExpertRoot_OneHop(t *testing.T) {
@@ -36,13 +45,14 @@ func TestGetGraphClosure_ExpertRoot_OneHop(t *testing.T) {
 		WithArgs("expert-1", "space", "caller").
 		WillReturnRows(sqlmock.NewRows(pluginTestColumnsWithMetrics()).
 			AddRow("expert-1", "Expert 1", model.PluginTypeExpert, 0, nil, []byte(`[]`), "pub", "owner", "space", model.PluginVisibilitySpace, "Creator", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0))
-	// Query 2: level-1 edges.
-	mock.ExpectQuery(`SELECT .* FROM plugin_relations r JOIN plugins p ON p.plugin_id=r.target_plugin_id WHERE r.source_plugin_id=\? AND r.status=1 AND r.deleted_at IS NULL AND p.status=1 AND p.deleted_at IS NULL AND .*OR p.is_embedded=1.*ORDER BY r.sort_order,r.relation_id`).
+	// Query 2: level-1 edges, filtered by the caller's visibility predicate.
+	mock.ExpectQuery(`SELECT .* FROM plugin_relations r JOIN plugins p ON p.plugin_id=r.target_plugin_id WHERE r.source_plugin_id=\? AND r.status=1 AND r.deleted_at IS NULL AND p.status=1 AND p.deleted_at IS NULL AND `+visibilityPredicateRE+` ORDER BY r.sort_order,r.relation_id`).
 		WithArgs("expert-1", "space", "caller").
 		WillReturnRows(sqlmock.NewRows(graphEdgeTestColumns()).
-			AddRow("rel-1", "expert-1", "skill-1", model.PluginTypeSkill, "expert_skill", 0, []byte(`{"source_index":0}`), 1, "owner", now, now, nil, 0))
-	// Query 3: node payloads (summary + metrics).
-	mock.ExpectQuery(`SELECT `).WithArgs("skill-1", "space", "caller").
+			AddRow("rel-1", "expert-1", "skill-1", model.PluginTypeSkill, "expert_skill", 0, []byte(`{"source_index":0}`), 1, "owner", now, now, nil))
+	// Query 3: node payloads (summary + metrics), same visibility predicate.
+	mock.ExpectQuery(`SELECT .*p.plugin_id IN \(\?\) AND `+visibilityPredicateRE).
+		WithArgs("skill-1", "space", "caller").
 		WillReturnRows(sqlmock.NewRows(pluginSummaryTestColumns()).
 			AddRow("skill-1", "Skill 1", model.PluginTypeSkill, 0, nil, []byte(`[]`), "", "owner", "space", model.PluginVisibilitySpace, "Creator", "human", nil, nil, "", 0, []byte(`{}`), "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0))
 
@@ -106,21 +116,22 @@ func TestGetGraphClosure_ExpertTeam_TwoHops_DedupesShared(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(pluginTestColumnsWithMetrics()).
 			AddRow("team-1", "Team", model.PluginTypeExpertTeam, 0, nil, []byte(`[]`), "", "owner", "space", model.PluginVisibilitySystem, "Creator", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0))
 	// L1: two embedded members
-	mock.ExpectQuery(`FROM plugin_relations r JOIN plugins p ON p.plugin_id=r.target_plugin_id WHERE r.source_plugin_id=\? AND .*OR p.is_embedded=1\).*ORDER BY r.sort_order,r.relation_id`).
+	mock.ExpectQuery(`FROM plugin_relations r JOIN plugins p ON p.plugin_id=r.target_plugin_id WHERE r.source_plugin_id=\? AND .*`+visibilityPredicateRE+` ORDER BY r.sort_order,r.relation_id`).
 		WithArgs("team-1", "space", "caller").
 		WillReturnRows(sqlmock.NewRows(graphEdgeTestColumns()).
-			AddRow("rel-m1", "team-1", "m1", model.PluginTypeExpert, "expert_team_expert", 0, []byte(`{"member_key":"a","role":"member","is_leader":false,"source_index":0}`), 1, "owner", now, now, nil, 1).
-			AddRow("rel-m2", "team-1", "m2", model.PluginTypeExpert, "expert_team_expert", 1, []byte(`{"member_key":"b","role":"member","is_leader":true,"source_index":1}`), 1, "owner", now, now, nil, 1))
+			AddRow("rel-m1", "team-1", "m1", model.PluginTypeExpert, "expert_team_expert", 0, []byte(`{"member_key":"a","role":"member","is_leader":false,"source_index":0}`), 1, "owner", now, now, nil).
+			AddRow("rel-m2", "team-1", "m2", model.PluginTypeExpert, "expert_team_expert", 1, []byte(`{"member_key":"b","role":"member","is_leader":true,"source_index":1}`), 1, "owner", now, now, nil))
 	// L2 edges from m1 and m2 — m2 shares the same skill as m1
-	mock.ExpectQuery(`r.source_plugin_id IN \(\?,\?\).*OR p.is_embedded=1\)`).
+	mock.ExpectQuery(`r.source_plugin_id IN \(\?,\?\).*`+visibilityPredicateRE).
 		WithArgs("m1", "m2", "space", "caller").
 		WillReturnRows(sqlmock.NewRows(graphEdgeTestColumns()).
-			AddRow("rel-s1", "m1", "s1", model.PluginTypeSkill, "expert_skill", 0, []byte(`{"source_index":0}`), 1, "owner", now, now, nil, 1).
-			AddRow("rel-s2a", "m1", "s2", model.PluginTypeSkill, "expert_skill", 1, []byte(`{"source_index":1}`), 1, "owner", now, now, nil, 1).
-			AddRow("rel-s2b", "m2", "s2", model.PluginTypeSkill, "expert_skill", 0, []byte(`{"source_index":0}`), 1, "owner", now, now, nil, 1))
-	// Node payloads: m1, m2, s1, s2 (deduped); embedded branch has no extra space bind
-	mock.ExpectQuery(`SELECT .*p.plugin_id IN \(\?,\?,\?,\?\).*`).
-		WithArgs("m1", "m2", "s1", "s2", "space", "caller", "m1", "m2", "s1", "s2").
+			AddRow("rel-s1", "m1", "s1", model.PluginTypeSkill, "expert_skill", 0, []byte(`{"source_index":0}`), 1, "owner", now, now, nil).
+			AddRow("rel-s2a", "m1", "s2", model.PluginTypeSkill, "expert_skill", 1, []byte(`{"source_index":1}`), 1, "owner", now, now, nil).
+			AddRow("rel-s2b", "m2", "s2", model.PluginTypeSkill, "expert_skill", 0, []byte(`{"source_index":0}`), 1, "owner", now, now, nil))
+	// Node payloads: m1, m2, s1, s2 (deduped); one visibility bind pair, no
+	// separate embedded whitelist.
+	mock.ExpectQuery(`SELECT .*p.plugin_id IN \(\?,\?,\?,\?\) AND `+visibilityPredicateRE).
+		WithArgs("m1", "m2", "s1", "s2", "space", "caller").
 		WillReturnRows(sqlmock.NewRows(pluginSummaryTestColumns()).
 			AddRow("m1", "Member 1", model.PluginTypeExpert, 1, nil, []byte(`[]`), "", "owner", "space", model.PluginVisibilitySystem, "Creator", "human", nil, nil, "", 0, []byte(`{}`), "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0).
 			AddRow("m2", "Member 2", model.PluginTypeExpert, 1, nil, []byte(`[]`), "", "owner", "space", model.PluginVisibilitySystem, "Creator", "human", nil, nil, "", 0, []byte(`{}`), "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0).
@@ -174,17 +185,18 @@ func TestGetGraphClosure_HiddenStandaloneChild_Omitted(t *testing.T) {
 		WithArgs("team-1", "space-a", "caller").
 		WillReturnRows(sqlmock.NewRows(pluginTestColumnsWithMetrics()).
 			AddRow("team-1", "Team", model.PluginTypeExpertTeam, 0, nil, []byte(`[]`), "", "owner", "space-a", model.PluginVisibilitySpace, "Creator", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0))
-	// Return only one visible embedded member — the cross-space standalone member is filtered out by the JOIN predicate.
-	mock.ExpectQuery(`FROM plugin_relations r JOIN plugins p ON p.plugin_id=r.target_plugin_id WHERE r.source_plugin_id=\? AND .*ORDER BY r.sort_order,r.relation_id`).
+	// The cross-space member is filtered out by the visibility predicate, which
+	// the expectation below pins literally — the team declares two members and
+	// only the visible one comes back.
+	mock.ExpectQuery(`FROM plugin_relations r JOIN plugins p ON p.plugin_id=r.target_plugin_id WHERE r.source_plugin_id=\? AND .*`+visibilityPredicateRE+` ORDER BY r.sort_order,r.relation_id`).
 		WithArgs("team-1", "space-a", "caller").
 		WillReturnRows(sqlmock.NewRows(graphEdgeTestColumns()).
-			AddRow("rel-m1", "team-1", "m1", model.PluginTypeExpert, "expert_team_expert", 0, nil, 1, "owner", now, now, nil, 1))
-	mock.ExpectQuery(`r.source_plugin_id IN \(\?\).*`).
+			AddRow("rel-m1", "team-1", "m1", model.PluginTypeExpert, "expert_team_expert", 0, nil, 1, "owner", now, now, nil))
+	mock.ExpectQuery(`r.source_plugin_id IN \(\?\).*`+visibilityPredicateRE).
 		WithArgs("m1", "space-a", "caller").
 		WillReturnRows(sqlmock.NewRows(graphEdgeTestColumns())) // no skills returned
-	// Only m1 in payload query
-	mock.ExpectQuery(`p.plugin_id IN \(\?\)`).
-		WithArgs("m1", "space-a", "caller", "m1").
+	mock.ExpectQuery(`p.plugin_id IN \(\?\) AND `+visibilityPredicateRE).
+		WithArgs("m1", "space-a", "caller").
 		WillReturnRows(sqlmock.NewRows(pluginSummaryTestColumns()).
 			AddRow("m1", "Member", model.PluginTypeExpert, 1, nil, []byte(`[]`), "", "owner", "space-a", model.PluginVisibilitySpace, "Creator", "human", nil, nil, "", 0, []byte(`{}`), "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0))
 
@@ -197,6 +209,47 @@ func TestGetGraphClosure_HiddenStandaloneChild_Omitted(t *testing.T) {
 	}
 	if len(nodes) != 1 || nodes[0].ID != "m1" {
 		t.Fatalf("nodes = %+v", nodes)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet: %v", err)
+	}
+}
+
+// Embedded children get no visibility relaxation: the node payload query binds
+// exactly one visibility pair and no embedded-ID whitelist, so an embedded row
+// the caller cannot see is dropped like any other. This pins the predicate
+// parity with GetWithRelations that /plugins/detail relies on.
+func TestGetGraphClosure_EmbeddedChild_StillVisibilityFiltered(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	scope := Scope{CallerUID: "caller", SpaceID: "space-a"}
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\?`).
+		WithArgs("expert-1", "space-a", "caller").
+		WillReturnRows(sqlmock.NewRows(pluginTestColumnsWithMetrics()).
+			AddRow("expert-1", "Expert", model.PluginTypeExpert, 0, nil, []byte(`[]`), "", "owner", "space-a", model.PluginVisibilitySpace, "C", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0))
+	mock.ExpectQuery(`WHERE r.source_plugin_id=\? AND .*`+visibilityPredicateRE).
+		WithArgs("expert-1", "space-a", "caller").
+		WillReturnRows(sqlmock.NewRows(graphEdgeTestColumns()).
+			AddRow("rel-s1", "expert-1", "s1", model.PluginTypeSkill, "expert_skill", 0, nil, 1, "owner", now, now, nil))
+	// Exactly three binds: the target ID plus one (space, caller) pair. A
+	// relaxed embedded branch would add either an extra space bind or an
+	// embedded-ID list here.
+	mock.ExpectQuery(`p.plugin_id IN \(\?\) AND `+visibilityPredicateRE+`$`).
+		WithArgs("s1", "space-a", "caller").
+		WillReturnRows(sqlmock.NewRows(pluginSummaryTestColumns()))
+
+	_, rels, nodes, err := r.GetGraphClosure(context.Background(), scope, "expert-1")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("expected the invisible embedded child to be dropped, got %+v", nodes)
+	}
+	if len(rels) != 0 {
+		t.Fatalf("expected the edge to the dropped child to be removed, got %+v", rels)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet: %v", err)
@@ -219,7 +272,7 @@ func TestGetGraphClosure_Admin_SeesCrossSpaceStandalone(t *testing.T) {
 	mock.ExpectQuery(`WHERE r.source_plugin_id=\? AND r.status=1 AND r.deleted_at IS NULL AND p.status=1 AND p.deleted_at IS NULL AND 1=1`).
 		WithArgs("team-1").
 		WillReturnRows(sqlmock.NewRows(graphEdgeTestColumns()).
-			AddRow("rel-m1", "team-1", "m1", model.PluginTypeExpert, "expert_team_expert", 0, nil, 1, "owner", now, now, nil, 0))
+			AddRow("rel-m1", "team-1", "m1", model.PluginTypeExpert, "expert_team_expert", 0, nil, 1, "owner", now, now, nil))
 	mock.ExpectQuery(`r.source_plugin_id IN \(\?\).*AND 1=1`).
 		WithArgs("m1").
 		WillReturnRows(sqlmock.NewRows(graphEdgeTestColumns()))
@@ -241,7 +294,7 @@ func TestGetGraphClosure_Admin_SeesCrossSpaceStandalone(t *testing.T) {
 	}
 }
 
-func TestGetGraphClosure_CapEnforcedBeforeNodeQuery(t *testing.T) {
+func TestGetGraphClosure_NodeCapEnforcedBeforeNodeQuery(t *testing.T) {
 	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	defer db.Close()
 	r := New(db)
@@ -252,20 +305,132 @@ func TestGetGraphClosure_CapEnforcedBeforeNodeQuery(t *testing.T) {
 		WithArgs("expert-1", "space", "caller").
 		WillReturnRows(sqlmock.NewRows(pluginTestColumnsWithMetrics()).
 			AddRow("expert-1", "Expert", model.PluginTypeExpert, 0, nil, []byte(`[]`), "", "owner", "space", model.PluginVisibilitySpace, "C", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0))
-	// Generate maxGraphNodes+1 distinct target ids; easiest to assert the error fires without constructing that many rows — use maxGraphNodes+1 via direct call but here just push > cap.
+	// maxGraphNodes+1 distinct targets, one edge each: the node cap trips while
+	// the edge count is still under maxGraphEdges.
 	rows := sqlmock.NewRows(graphEdgeTestColumns())
-	const over = maxGraphNodes + 1
-	for i := 0; i < over; i++ {
-		tid := "s" + itoa(i)
-		rows.AddRow("r-"+tid, "expert-1", tid, model.PluginTypeSkill, "expert_skill", i, nil, 1, "owner", now, now, nil, 0)
+	for i := 0; i < maxGraphNodes+1; i++ {
+		tid := "s" + strconv.Itoa(i)
+		rows.AddRow("r-"+tid, "expert-1", tid, model.PluginTypeSkill, "expert_skill", i, nil, 1, "owner", now, now, nil)
 	}
 	mock.ExpectQuery(`FROM plugin_relations r JOIN plugins p ON p.plugin_id=r.target_plugin_id WHERE r.source_plugin_id=\? AND .*ORDER BY r.sort_order,r.relation_id`).
 		WithArgs("expert-1", "space", "caller").
 		WillReturnRows(rows)
 
+	// No node-payload query is expected: the cap fires first.
 	_, _, _, err := r.GetGraphClosure(context.Background(), scope, "expert-1")
-	if err != ErrGraphTooLarge {
+	if !errors.Is(err, ErrGraphTooLarge) {
 		t.Fatalf("want ErrGraphTooLarge, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet: %v", err)
+	}
+}
+
+// A wide-but-shallow graph — many members sharing a small set of skills — keeps
+// the unique-node count far below maxGraphNodes while the edge count explodes.
+// The node cap alone does not catch this shape; the edge cap must.
+func TestGetGraphClosure_EdgeCapCatchesWideShallowGraph(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+	const (
+		members         = 20
+		skillsPerMember = 51
+	)
+	// members + skillsPerMember unique nodes (skills are shared across every
+	// member), vs members*skillsPerMember + members edges.
+	if uniqueNodes := members + skillsPerMember; uniqueNodes > maxGraphNodes {
+		t.Fatalf("test graph must stay under the node cap, got %d nodes", uniqueNodes)
+	}
+	if totalEdges := members + members*skillsPerMember; totalEdges <= maxGraphEdges {
+		t.Fatalf("test graph must exceed the edge cap, got %d edges", totalEdges)
+	}
+
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\?`).
+		WithArgs("team-1", "space", "caller").
+		WillReturnRows(sqlmock.NewRows(pluginTestColumnsWithMetrics()).
+			AddRow("team-1", "Team", model.PluginTypeExpertTeam, 0, nil, []byte(`[]`), "", "owner", "space", model.PluginVisibilitySpace, "C", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0))
+
+	l1 := sqlmock.NewRows(graphEdgeTestColumns())
+	for i := 0; i < members; i++ {
+		mid := "m" + strconv.Itoa(i)
+		l1.AddRow("rel-"+mid, "team-1", mid, model.PluginTypeExpert, "expert_team_expert", i, nil, 1, "owner", now, now, nil)
+	}
+	mock.ExpectQuery(`WHERE r.source_plugin_id=\? AND .*ORDER BY r.sort_order,r.relation_id`).
+		WithArgs("team-1", "space", "caller").
+		WillReturnRows(l1)
+
+	l2 := sqlmock.NewRows(graphEdgeTestColumns())
+	for i := 0; i < members; i++ {
+		mid := "m" + strconv.Itoa(i)
+		for j := 0; j < skillsPerMember; j++ {
+			sid := "shared-s" + strconv.Itoa(j) // shared by every member
+			l2.AddRow("rel-"+mid+"-"+sid, mid, sid, model.PluginTypeSkill, "expert_skill", j, nil, 1, "owner", now, now, nil)
+		}
+	}
+	mock.ExpectQuery(`r.source_plugin_id IN \(`).
+		WillReturnRows(l2)
+
+	// No node-payload query is expected: the edge cap fires mid-scan.
+	_, _, _, err := r.GetGraphClosure(context.Background(), scope, "team-1")
+	if !errors.Is(err, ErrGraphTooLarge) {
+		t.Fatalf("want ErrGraphTooLarge for a wide-but-shallow graph, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet: %v", err)
+	}
+}
+
+// When the node-payload query returns fewer rows than the edge closure — a
+// target deleted or made invisible between the two queries — both the vanished
+// node and every edge touching it (as target or as ancestor) must be dropped.
+func TestGetGraphClosure_VanishedNode_DropsItsEdges(t *testing.T) {
+	db, mock, _ := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	defer db.Close()
+	r := New(db)
+	scope := Scope{CallerUID: "caller", SpaceID: "space"}
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery(`SELECT .* FROM plugins p WHERE p.plugin_id=\?`).
+		WithArgs("team-1", "space", "caller").
+		WillReturnRows(sqlmock.NewRows(pluginTestColumnsWithMetrics()).
+			AddRow("team-1", "Team", model.PluginTypeExpertTeam, 0, nil, []byte(`[]`), "", "owner", "space", model.PluginVisibilitySpace, "C", "human", nil, nil, "", 0, []byte(`{}`), []byte(`{}`), nil, "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0))
+	mock.ExpectQuery(`WHERE r.source_plugin_id=\? AND .*ORDER BY r.sort_order,r.relation_id`).
+		WithArgs("team-1", "space", "caller").
+		WillReturnRows(sqlmock.NewRows(graphEdgeTestColumns()).
+			AddRow("rel-m1", "team-1", "m1", model.PluginTypeExpert, "expert_team_expert", 0, nil, 1, "owner", now, now, nil).
+			AddRow("rel-m2", "team-1", "m2", model.PluginTypeExpert, "expert_team_expert", 1, nil, 1, "owner", now, now, nil))
+	mock.ExpectQuery(`r.source_plugin_id IN \(\?,\?\)`).
+		WithArgs("m1", "m2", "space", "caller").
+		WillReturnRows(sqlmock.NewRows(graphEdgeTestColumns()).
+			AddRow("rel-s1", "m1", "s1", model.PluginTypeSkill, "expert_skill", 0, nil, 1, "owner", now, now, nil).
+			AddRow("rel-s2", "m2", "s2", model.PluginTypeSkill, "expert_skill", 0, nil, 1, "owner", now, now, nil))
+	// The payload query returns only m1 and s1: m2 and s2 vanished between the
+	// edge scan and here.
+	mock.ExpectQuery(`p.plugin_id IN \(\?,\?,\?,\?\)`).
+		WithArgs("m1", "m2", "s1", "s2", "space", "caller").
+		WillReturnRows(sqlmock.NewRows(pluginSummaryTestColumns()).
+			AddRow("m1", "Member 1", model.PluginTypeExpert, 1, nil, []byte(`[]`), "", "owner", "space", model.PluginVisibilitySpace, "C", "human", nil, nil, "", 0, []byte(`{}`), "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0).
+			AddRow("s1", "Skill 1", model.PluginTypeSkill, 1, nil, []byte(`[]`), "", "owner", "space", model.PluginVisibilitySpace, "C", "human", nil, nil, "", 0, []byte(`{}`), "mh", "ph", nil, nil, 1, now, now, nil, 0, 0, 0))
+
+	_, rels, nodes, err := r.GetGraphClosure(context.Background(), scope, "team-1")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(nodes) != 2 || nodes[0].ID != "m1" || nodes[1].ID != "s1" {
+		t.Fatalf("want nodes [m1 s1], got %+v", nodes)
+	}
+	// team-1 -> m2 drops (vanished target); m2 -> s2 drops (vanished ancestor).
+	if len(rels) != 2 {
+		t.Fatalf("want 2 surviving edges, got %d: %+v", len(rels), rels)
+	}
+	for _, rel := range rels {
+		if rel.TargetPluginID == "m2" || rel.SourcePluginID == "m2" {
+			t.Fatalf("edge touching the vanished node survived: %+v", rel)
+		}
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet: %v", err)
@@ -281,19 +446,7 @@ func TestGetGraphClosure_RootNotFound(t *testing.T) {
 		WithArgs("missing", "space", "caller").
 		WillReturnRows(sqlmock.NewRows(pluginTestColumnsWithMetrics()))
 	_, _, _, err := r.GetGraphClosure(context.Background(), scope, "missing")
-	if err != ErrNotFound {
+	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	buf := make([]byte, 0, 4)
-	for i > 0 {
-		buf = append([]byte{byte('0' + i%10)}, buf...)
-		i /= 10
-	}
-	return string(buf)
 }

@@ -31,8 +31,17 @@ var (
 // read surface cannot describe a graph the install surface would refuse.
 const maxGraphNodes = 500
 
+// maxGraphEdges caps the total number of edges (across both levels) returned by
+// a single detail_graph response, as a defense against graphs that stay well
+// under the node cap by sharing many nodes while still fanning out a huge edge
+// set against pre-existing standalone catalog plugins.
+const maxGraphEdges = 1000
+
 // MaxGraphNodes returns the per-response child-node cap for the graph endpoint.
 func MaxGraphNodes() int { return maxGraphNodes }
+
+// MaxGraphEdges returns the per-response edge cap for the graph endpoint.
+func MaxGraphEdges() int { return maxGraphEdges }
 
 // Scope is authoritative caller context; it must never come from request data.
 type Scope struct {

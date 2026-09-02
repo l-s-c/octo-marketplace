@@ -27,23 +27,36 @@ func TestDetailGraph_MapsNotFoundAndTooLarge(t *testing.T) {
 	}
 }
 
-func TestDetailGraph_FillsMemberCountsFromEdgeSlice(t *testing.T) {
+// The closure is returned flat and unaggregated: DetailGraph must not derive a
+// member_count onto any node. The relation matrix never admits an expert_team
+// as a relation target, so a related node is never a team, and the root's
+// response projection carries no member_count field — a client counts
+// expert_team_expert edges in the returned slice instead.
+func TestDetailGraph_ReturnsClosureWithoutDerivedMemberCounts(t *testing.T) {
 	team := &model.Plugin{ID: "team-1", Type: model.PluginTypeExpertTeam}
 	m1 := &model.Plugin{ID: "m1", Type: model.PluginTypeExpert}
 	m2 := &model.Plugin{ID: "m2", Type: model.PluginTypeExpert}
 	s1 := &model.Plugin{ID: "s1", Type: model.PluginTypeSkill}
 	rels := []model.PluginRelation{
-		{ID: "r1", SourcePluginID: "team-1", TargetPluginID: "m1", Type: "expert_team_expert", SourcePluginType: model.PluginTypeExpertTeam, TargetPluginType: model.PluginTypeExpert},
-		{ID: "r2", SourcePluginID: "team-1", TargetPluginID: "m2", Type: "expert_team_expert", SourcePluginType: model.PluginTypeExpertTeam, TargetPluginType: model.PluginTypeExpert},
-		{ID: "r3", SourcePluginID: "m1", TargetPluginID: "s1", Type: "expert_skill", SourcePluginType: model.PluginTypeExpert, TargetPluginType: model.PluginTypeSkill},
+		{ID: "r1", SourcePluginID: "team-1", TargetPluginID: "m1", Type: "expert_team_expert", TargetPluginType: model.PluginTypeExpert},
+		{ID: "r2", SourcePluginID: "team-1", TargetPluginID: "m2", Type: "expert_team_expert", TargetPluginType: model.PluginTypeExpert},
+		{ID: "r3", SourcePluginID: "m1", TargetPluginID: "s1", Type: "expert_skill", TargetPluginType: model.PluginTypeSkill},
 	}
 	svc := fixedService(&fakeStore{detailGraphRoot: team, detailGraphRels: rels, detailGraphRelated: []*model.Plugin{m1, m2, s1}})
 	out, err := svc.DetailGraph(context.Background(), testCaller, "team-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Plugin.MemberCount != 2 {
-		t.Fatalf("root.MemberCount = %d want 2", out.Plugin.MemberCount)
+	if len(out.Relations) != 3 || len(out.Related) != 3 {
+		t.Fatalf("closure = %d rels / %d related, want 3/3", len(out.Relations), len(out.Related))
+	}
+	if out.Plugin.MemberCount != 0 {
+		t.Fatalf("root.MemberCount = %d, want 0 (no field on the wire to carry it)", out.Plugin.MemberCount)
+	}
+	for _, n := range out.Related {
+		if n.MemberCount != 0 {
+			t.Fatalf("related %s carries MemberCount %d, want 0", n.ID, n.MemberCount)
+		}
 	}
 }
 

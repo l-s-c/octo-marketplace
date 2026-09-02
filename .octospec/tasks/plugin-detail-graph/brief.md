@@ -44,45 +44,56 @@ change, no admin surface change in this task.
   - `expert` (container of skills/connectors): one level of edges.
   - `expert_team` (container of experts): up to two levels (members + their
     skills/connectors).
-- The endpoint performs a fixed **3–4 SQL round-trips** regardless of fan-out:
-  root fetch → level-1 edges → (optional) level-2 edges → one batch payload
-  fetch for all related nodes using `pluginSummaryColumns` (which deliberately
-  omits `plugin_json`, reusing an existing column list).
-- **Node cap 500** (matching `maxInstallRelationTargets`). Exceeding returns
-  HTTP 413 `PAYLOAD_TOO_LARGE` with `details.max_nodes` populated; the endpoint
-  fails closed rather than silently truncating, so the UI never renders a
-  partial squad.
+- The endpoint performs **at most 4 SQL round-trips** regardless of fan-out
+  (1 for a leaf root, 2 when no child is visible): root fetch → level-1 edges →
+  (optional) level-2 edges → one batch payload fetch for all related nodes using
+  `pluginSummaryColumns` (which deliberately omits `plugin_json`, reusing an
+  existing column list).
+- **Two caps, both enforced mid-scan**: node cap 500 (matching
+  `maxInstallRelationTargets`) and edge cap 1000. The node cap alone does not
+  bound cost — a graph whose members share targets (the common case for system
+  skills) keeps the unique-node count low while edges grow as
+  members × targets-per-member, and `maxRelations` permits 200 edges per plugin.
+  Both caps are therefore checked while draining each result set, so an over-cap
+  graph is never fully materialized. Exceeding either returns HTTP 413
+  `PAYLOAD_TOO_LARGE` with `details.max_nodes` and `details.max_edges`; the
+  endpoint fails closed rather than silently truncating, so the UI never renders
+  a partial squad.
 - **Hidden related plugins are silently omitted** — edge and node both —
   matching the existing `/plugins/detail` behavior. No truncation flag, no
   error. This is deliberately different from the install path's fail-closed
   `ErrDependencyHidden`; install needs to refuse a partial provision, but a
   read-only detail page should degrade gracefully when cross-space targets
   exist.
-- **Embedded (`is_embedded=1`) children resolve under their container's
-  visibility**: if you can read a plugin you can read its bundled parts.
-  Standalone (`is_embedded=0`) children remain strictly caller-scoped via the
-  existing `visibilitySQL`. Defense-in-depth is provided by the batch read's
-  embedded-ID whitelist, so the read can never widen to arbitrary embedded
-  IDs outside the edge closure just derived from an authorized root.
+- **Every descendant is filtered by the same `visibilitySQL` that
+  `/plugins/detail` applies**, on both edge queries and the node payload query —
+  embedded (`is_embedded=1`) children included. Embedded children get no
+  relaxation: every writer that mints them (container import, container
+  reupload, `RebuildGraph`, backfill) stamps each child with its container top's
+  `(visibility, space_id, owner_uid)`, so `visibilitySQL` on a child is already
+  equivalent to `visibilitySQL` on the container authorized as the root. A
+  relaxation would return no additional rows while permanently dropping the
+  per-row guard, leaving any future divergence between container and children to
+  disclose them cross-Space with no code change here.
 - Icons are resolved per-request with memoization by raw icon key (no extra
-  allocations for shared icons). Member counts for team-typed nodes are filled
-  in-memory from the edge slice rather than issuing an extra
-  `CountMemberRelations` query (which would over-count hidden members).
+  allocations for shared icons). No `member_count` is derived onto any node: the
+  relation matrix never admits an `expert_team` as a relation target, so a
+  related node is never a team, and the root's response projection carries no
+  `member_count` field. A client counts `expert_team_expert` edges in the
+  returned relation slice, which is also the only count consistent with the
+  caller's visibility.
 - View/install/download counters are read-only projections on the existing
   read path; detail reads never write metrics, so fanning out to related
   plugins cannot bump their view counts.
-- The edge-query SQL for embedded children does NOT additionally require a
-  `space_id` match: admin-created system-visibility containers own their
-  embedded children in the global (NULL) space, and the write-path gate
-  `lockRelationTargets` already rejects cross-container embedded edges, so
-  imposing a space_id predicate would incorrectly hide legitimate embedded
-  members from a caller who can see their system-visible parent. The node
-  payload query's defense-in-depth predicate relies on the embedded-ID
-  whitelist derived from the authorized edge set, not on a space check.
+- An extra `space_id` predicate on children is deliberately NOT imposed:
+  `visibilitySQL` is not a pure space predicate — its
+  `visibility IN ('public','system')` branch admits system-visibility children
+  regardless of `space_id` — so a `space_id` match would incorrectly hide the
+  NULL-space embedded members of a system-visible container from a caller who
+  can legitimately see that container.
 - The new repo primitive is not generalized to an arbitrary-ID batch read;
-  `GetGraphClosure(ctx, scope, rootID string)` takes a single root ID so the
-  embedded-child visibility relaxation cannot be driven by caller-supplied ID
-  lists. The admin route for the same shape is intentionally deferred (repo
+  `GetGraphClosure(ctx, scope, rootID string)` takes a single root ID, so the
+  traversal is always anchored on one authorized root. The admin route for the same shape is intentionally deferred (repo
   works under `scope.Admin = true` as-is; handler veneer can be added when the
   admin console needs it). The install path is deliberately not refactored in
   this task — it is fail-closed and needs full `plugin_json` per node; sharing
@@ -111,13 +122,16 @@ change, no admin surface change in this task.
   not carry `plugin_json`.
 - Leaf (skill/connector) roots return empty edges/related with no edge query
   issued; expert roots issue one edge query; expert_team roots issue two.
-- Cross-space standalone children are silently omitted (edge + node both);
-  embedded children of an authorized root are returned regardless of their
-  stored `space_id`.
-- Node cap at 500 enforced before the payload query fires; over-cap returns
-  413 with `details.max_nodes`.
-- Missing `plugin_id` → 400; unknown id → 404; unauthorized → 401 (exercised
-  by handler tests).
+- Children the caller cannot see are silently omitted (edge + node both),
+  embedded and standalone alike; a node that vanishes between the edge scan and
+  the payload query drops both itself and every edge touching it.
+- Node cap (500) and edge cap (1000) both fire mid-scan, before the payload
+  query issues; over-cap returns 413 with `details.max_nodes` /
+  `details.max_edges`. A wide-but-shallow graph that stays under the node cap
+  while exceeding the edge cap is pinned by test.
+- Missing `plugin_id` → 400; unknown id → 404. 401 is enforced by the router's
+  authenticator middleware and is not exercised by the handler tests, whose
+  shared `testEngine` always stamps a fixed dev identity.
 - `go vet ./...`, `gofmt`, `make build`, `go test ./internal/...`,
   `make openapi-check` (with regenerated `docs/openapi/swagger.yaml`
   committed) all pass.
