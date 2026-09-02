@@ -630,7 +630,7 @@ func (s *Service) RejectReview(ctx context.Context, caller Caller, reviewID, rea
 	if !s.isReviewer(caller) {
 		return ErrReviewForbidden
 	}
-	frozenKeys, liveKeys, err := s.repo.RejectReview(ctx, scope(caller), pluginrepo.RejectReviewParams{
+	frozenKeys, retained, err := s.repo.RejectReview(ctx, scope(caller), pluginrepo.RejectReviewParams{
 		ReviewID:       reviewID,
 		ReviewerUID:    caller.UID,
 		ReviewerName:   caller.Name,
@@ -645,7 +645,7 @@ func (s *Service) RejectReview(ctx context.Context, caller Caller, reviewID, rea
 	// does not reference. The commit has already succeeded; this is best-effort
 	// GC on a detached context so a transient storage failure never rolls back
 	// the rejection.
-	s.cleanupOrphanedReviewObjects(context.WithoutCancel(ctx), frozenKeys, liveKeys)
+	s.cleanupOrphanedReviewObjects(context.WithoutCancel(ctx), frozenKeys, retained)
 	return nil
 }
 
@@ -660,14 +660,14 @@ func (s *Service) CancelReview(ctx context.Context, caller Caller, reviewID stri
 	if reviewID == "" {
 		return ErrReviewInvalid
 	}
-	frozenKeys, liveKeys, err := s.repo.CancelReview(ctx, scope(caller), reviewID, caller.UID)
+	frozenKeys, retained, err := s.repo.CancelReview(ctx, scope(caller), reviewID, caller.UID)
 	if err != nil {
 		return mapStoreError(err)
 	}
 	// Same cleanup as reject: best-effort on detached context. A frozen key
 	// that appears in the live sidecar is shared and kept; any other key was
 	// uploaded for this submission alone and is now unreachable.
-	s.cleanupOrphanedReviewObjects(context.WithoutCancel(ctx), frozenKeys, liveKeys)
+	s.cleanupOrphanedReviewObjects(context.WithoutCancel(ctx), frozenKeys, retained)
 	// Parse task lifecycle: a task consumed at submit time STAYS consumed after
 	// cancel (and after reject), even though the request did not result in an
 	// approved change. This is the deliberate conservative choice:
@@ -697,30 +697,32 @@ func (s *Service) CancelReview(ctx context.Context, caller Caller, reviewID stri
 
 // cleanupOrphanedReviewObjects deletes object keys in the frozen sidecar that
 // the live (post-decision) plugin row does NOT reference. Called after reject
-// or cancel to clean up files spilled at submit time. Keys that both sides
-// reference are content-addressed and still live; keys only in the frozen
-// snapshot were uploaded for this submission and are now unreachable.
+// or cancel to clean up files spilled at submit time.
 //
-// Both sidecars are read by the repository inside the decision transaction and
-// handed back afterwards. Reject and cancel leave the plugin row untouched, so
-// liveKeys is the plugin's current sidecar and the comparison never races a
-// concurrent write.
+// `retained` is every key the plugin still references — its live sidecar AND the
+// sidecar frozen onto each plugin_versions snapshot — collected by the repository
+// inside the decision transaction. Both halves matter: approve writes the frozen
+// sidecar into plugin_versions, so an older approved version owns keys the live
+// row no longer mentions. Diffing against the live row alone deleted those, and
+// object-storage deletes do not come back.
+//
+// Matching is on the KEY, not the path it was mounted at. A content-addressed key
+// is the same object wherever it appears, and a retained key must survive even if
+// some other version references it under a different path.
 //
 // This runs on a detached context and errors are silently ignored: a storage
 // failure must not roll back an already-committed decision.
-func (s *Service) cleanupOrphanedReviewObjects(ctx context.Context, frozenKeys json.RawMessage, liveKeys json.RawMessage) {
+func (s *Service) cleanupOrphanedReviewObjects(ctx context.Context, frozenKeys json.RawMessage, retained map[string]struct{}) {
 	frozen := attachmentKeyMap(frozenKeys)
-	live := attachmentKeyMap(liveKeys)
 	if len(frozen) == 0 {
 		return
 	}
 	var orphaned []string
-	for path, key := range frozen {
+	for _, key := range frozen {
 		if key == "" {
 			continue
 		}
-		if liveKey, ok := live[path]; ok && liveKey == key {
-			// Same key referenced by live row — content-addressed, still in use.
+		if _, kept := retained[key]; kept {
 			continue
 		}
 		orphaned = append(orphaned, key)

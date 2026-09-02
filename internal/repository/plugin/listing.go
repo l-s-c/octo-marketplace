@@ -72,13 +72,29 @@ func (r *Repo) PublishPlugin(ctx context.Context, scope Scope, p PublishParams) 
 	}
 	now := r.now()
 
+	// The service already refused anything but `private`, but it decided that from
+	// an UNLOCKED read taken several round trips earlier. Between that read and
+	// this transaction the owner can raise the row to `space` through an ordinary
+	// upsert — legal on a draft — and this UPDATE would then stamp `published`
+	// onto it, putting unreviewed content on the org marketplace with no review
+	// request ever created. Re-deriving from the locked row closes the window;
+	// ApproveReview re-derives `isFirst` the same way and for the same reason.
+	if current.Visibility != model.PluginVisibilityPrivate {
+		return nil, ErrConflict
+	}
+
 	// State CAS rather than a blind write, so a double-click loses with
 	// ErrConflict instead of appending a second audit row for the same event.
+	// `visibility` is in the predicate too: the check above reads the locked row,
+	// and carrying it into the WHERE keeps the guarantee if this ever runs without
+	// that read in front of it.
 	res, err := tx.ExecContext(ctx,
 		`UPDATE plugins SET listing_state=?,updated_at=?
-		  WHERE plugin_id=? AND owner_uid=? AND space_id=? AND listing_state<>? AND deleted_at IS NULL`,
+		  WHERE plugin_id=? AND owner_uid=? AND space_id=? AND visibility=?
+		    AND listing_state<>? AND deleted_at IS NULL`,
 		string(model.PluginListingStatePublished), now,
-		p.PluginID, scope.CallerUID, scope.SpaceID, string(model.PluginListingStatePublished))
+		p.PluginID, scope.CallerUID, scope.SpaceID, string(model.PluginVisibilityPrivate),
+		string(model.PluginListingStatePublished))
 	if err != nil {
 		return nil, wrapped("publish plugin", err)
 	}

@@ -201,12 +201,12 @@ func (f *fakeStore) ApproveReview(_ context.Context, s pluginrepo.Scope, p plugi
 	return f.review.approved, nil
 }
 
-func (f *fakeStore) RejectReview(_ context.Context, _ pluginrepo.Scope, p pluginrepo.RejectReviewParams) (json.RawMessage, json.RawMessage, error) {
+func (f *fakeStore) RejectReview(_ context.Context, _ pluginrepo.Scope, p pluginrepo.RejectReviewParams) (json.RawMessage, map[string]struct{}, error) {
 	f.review.rejectParams = p
 	return nil, nil, f.review.rejectErr
 }
 
-func (f *fakeStore) CancelReview(_ context.Context, s pluginrepo.Scope, reviewID, callerUID string) (json.RawMessage, json.RawMessage, error) {
+func (f *fakeStore) CancelReview(_ context.Context, s pluginrepo.Scope, reviewID, callerUID string) (json.RawMessage, map[string]struct{}, error) {
 	f.review.cancelScope = s
 	f.review.cancelReviewID = reviewID
 	f.review.cancelUID = callerUID

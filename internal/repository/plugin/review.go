@@ -661,7 +661,7 @@ func classifyMissingPending(ctx context.Context, tx *sql.Tx, reviewID, spaceID s
 // draft stays private, an already-listed version stays live. Returns the frozen
 // attachment sidecar and the live plugin's sidecar so the caller can clean up
 // any objects the submission uploaded that the live row does not reference.
-func (r *Repo) RejectReview(ctx context.Context, scope Scope, p RejectReviewParams) (json.RawMessage, json.RawMessage, error) {
+func (r *Repo) RejectReview(ctx context.Context, scope Scope, p RejectReviewParams) (json.RawMessage, map[string]struct{}, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, nil, err
@@ -708,10 +708,64 @@ func (r *Repo) RejectReview(ctx context.Context, scope Scope, p RejectReviewPara
 	if err := insertAudit(ctx, tx, r.id(), now, *current, "review_reject", m, current.PluginHash, current.PluginHash); err != nil {
 		return nil, nil, err
 	}
+	retained, err := retainedAttachmentKeys(ctx, tx, current.ID, current.AttachmentKeys)
+	if err != nil {
+		return nil, nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, nil, err
 	}
-	return frozenKeys, current.AttachmentKeys, nil
+	return frozenKeys, retained, nil
+}
+
+// retainedAttachmentKeys collects every storage key the plugin still references
+// AFTER a submission is abandoned: its live sidecar, plus the sidecar frozen onto
+// every plugin_versions snapshot.
+//
+// The version rows are the half that was missing, and approve is what creates
+// them — it writes the FROZEN sidecar into plugin_versions so version history
+// resolves. Diffing an abandoned submission against the live row alone therefore
+// classified a key that an older approved version still points at as garbage, and
+// the GC hard-deletes: object-storage deletes do not come back. Reverting a file
+// to a previous revision and then cancelling is enough to trigger it, because the
+// key is content-addressed and reappears identical.
+//
+// Read inside the decision transaction so it cannot race a concurrent approve.
+func retainedAttachmentKeys(ctx context.Context, tx *sql.Tx, pluginID string, live json.RawMessage) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+	add := func(raw json.RawMessage) {
+		if len(raw) == 0 {
+			return
+		}
+		var m map[string]string
+		if json.Unmarshal(raw, &m) != nil {
+			return
+		}
+		for _, key := range m {
+			if key != "" {
+				out[key] = struct{}{}
+			}
+		}
+	}
+	add(live)
+	rows, err := tx.QueryContext(ctx,
+		`SELECT attachment_keys_json FROM plugin_versions
+		  WHERE plugin_id=? AND attachment_keys_json IS NOT NULL`, pluginID)
+	if err != nil {
+		return nil, wrapped("load version attachment keys", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		add(json.RawMessage(raw))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // CancelReview withdraws the applicant's own pending request.
@@ -721,7 +775,7 @@ func (r *Repo) RejectReview(ctx context.Context, scope Scope, p RejectReviewPara
 // request was just approved that it vanished. Returns the frozen attachment
 // sidecar and the live plugin's sidecar so the caller can clean up objects the
 // submission uploaded that the live row does not reference.
-func (r *Repo) CancelReview(ctx context.Context, scope Scope, reviewID, callerUID string) (json.RawMessage, json.RawMessage, error) {
+func (r *Repo) CancelReview(ctx context.Context, scope Scope, reviewID, callerUID string) (json.RawMessage, map[string]struct{}, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, nil, err
@@ -743,10 +797,11 @@ func (r *Repo) CancelReview(ctx context.Context, scope Scope, reviewID, callerUI
 	if model.ReviewStatus(status) != model.ReviewStatusPending {
 		return nil, nil, ErrConflict
 	}
-	// Load the live plugin so we can return its sidecar for key-diff cleanup.
-	// The plugin is NOT locked for update here (unlike reject/approve) because
-	// cancel does not modify the plugin row — we only need its current
-	// attachment_keys_json to know which frozen keys are still live.
+	// Load the live plugin for the key-diff cleanup. getReviewedPluginForUpdate
+	// takes the row FOR UPDATE — an earlier comment here claimed the opposite,
+	// which was simply wrong about the helper it was standing next to. The lock is
+	// wanted anyway: the retained-key read below must not race a concurrent
+	// approve that is minting a new version row.
 	current, err := getReviewedPluginForUpdate(ctx, tx, scope.SpaceID, pluginID)
 	if err != nil {
 		return nil, nil, err
@@ -762,10 +817,14 @@ func (r *Repo) CancelReview(ctx context.Context, scope Scope, reviewID, callerUI
 	if err := mustAffect(res); err != nil {
 		return nil, nil, ErrConflict
 	}
+	retained, err := retainedAttachmentKeys(ctx, tx, current.ID, current.AttachmentKeys)
+	if err != nil {
+		return nil, nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, nil, err
 	}
-	return frozenKeys, current.AttachmentKeys, nil
+	return frozenKeys, retained, nil
 }
 
 // --- Card-action receipts ---------------------------------------------------

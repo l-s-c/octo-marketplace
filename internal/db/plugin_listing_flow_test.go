@@ -428,3 +428,47 @@ func TestWideningVisibilityOnAPublishedPluginUnlistsIt(t *testing.T) {
 		t.Errorf("a content-only edit un-listed the plugin (%q)", stillLive.ListingState)
 	}
 }
+
+// TestPublishRefusesAPluginThatBecameOrgVisibleMidFlight closes a TOCTOU on the
+// exact privilege boundary this feature exists to defend.
+//
+// Service.Publish decides "this is private, list it directly, no review" from an
+// UNLOCKED read taken several round trips before the transaction. The owner can
+// raise the row to `space` in that window through an ordinary upsert — legal on a
+// draft — and the publish would then stamp `published` onto an org-visible row
+// with no review request ever created. The owner controls both requests, so it is
+// a retry loop, not a lucky race.
+//
+// Simulated by mutating the row between the read and the call, which is exactly
+// what the concurrent upsert does.
+func TestPublishRefusesAPluginThatBecameOrgVisibleMidFlight(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	seed(t, database, seedPlugin{id: "p1", visibility: "private", listingState: "draft", currentVersion: "1.0.0"})
+
+	// The window: the caller's view still says `private`, the row says `space`.
+	if _, err := database.Exec(`UPDATE plugins SET visibility='space' WHERE plugin_id='p1'`); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := repo.PublishPlugin(ctx, tenantScope(), pluginrepo.PublishParams{
+		PluginID: "p1", OperatorID: "user-1", OperatorName: "Alice",
+	})
+	if !errors.Is(err, pluginrepo.ErrConflict) {
+		t.Fatalf("PublishPlugin = %v, want ErrConflict", err)
+	}
+
+	var listing string
+	if err := database.QueryRow(`SELECT listing_state FROM plugins WHERE plugin_id='p1'`).Scan(&listing); err != nil {
+		t.Fatal(err)
+	}
+	if listing != string(model.PluginListingStateDraft) {
+		t.Fatalf("listing_state = %q; unreviewed content reached the organization marketplace", listing)
+	}
+	// And nobody else can see it, which is the consequence that actually matters.
+	colleague := pluginrepo.Scope{CallerUID: "user-2", SpaceID: "space-a"}
+	if _, err := repo.Get(ctx, colleague, "p1"); !errors.Is(err, pluginrepo.ErrNotFound) {
+		t.Errorf("a colleague can read it (%v); the review gate was bypassed", err)
+	}
+}
