@@ -363,3 +363,68 @@ func TestReviewQueueHidesRequestsForDeletedPlugins(t *testing.T) {
 		t.Errorf("items=%d, want 1 (only the surviving plugin's request)", len(items))
 	}
 }
+
+// TestWideningVisibilityOnAPublishedPluginUnlistsIt closes a bypass found by
+// driving the real API: a PUBLISHED PRIVATE plugin is editable by design —
+// nobody else can read it — but writing `space` onto it while it stayed
+// published listed it to the whole organization with no review at all. That is
+// the one thing this workflow exists to prevent, and it was reachable from the
+// ordinary edit form.
+//
+// Widening now drops the row back to draft, which costs the author nothing and
+// puts it back on the 发布 path where the new visibility routes it through
+// review.
+func TestWideningVisibilityOnAPublishedPluginUnlistsIt(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	owner := tenantScope()
+	colleague := pluginrepo.Scope{CallerUID: "user-2", SpaceID: "space-a"}
+
+	seed(t, database, seedPlugin{id: "p1", visibility: "private", listingState: "published", currentVersion: "1.0.0"})
+
+	current, err := repo.Get(ctx, owner, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	widened := *current
+	widened.Visibility = model.PluginVisibilitySpace
+	if _, err := repo.Update(ctx, owner, pluginrepo.Mutation{
+		Plugin: widened, OperatorID: "user-1", ResetListingToDraft: true,
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	after, err := repo.Get(ctx, owner, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Visibility != model.PluginVisibilitySpace {
+		t.Errorf("visibility = %q, want space (the declared intent must be stored)", after.Visibility)
+	}
+	if after.ListingState != model.PluginListingStateDraft {
+		t.Fatalf("listing_state = %q, want draft; the plugin is org-visible without review", after.ListingState)
+	}
+	if _, err := repo.Get(ctx, colleague, "p1"); !errors.Is(err, pluginrepo.ErrNotFound) {
+		t.Errorf("a colleague can read it (%v); widening bypassed review", err)
+	}
+
+	// A content-only edit must NOT un-list anything.
+	seed(t, database, seedPlugin{id: "p2", visibility: "private", listingState: "published", currentVersion: "1.0.0"})
+	live, err := repo.Get(ctx, owner, "p2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := *live
+	edited.Publisher = "renamed"
+	if _, err := repo.Update(ctx, owner, pluginrepo.Mutation{Plugin: edited, OperatorID: "user-1"}); err != nil {
+		t.Fatal(err)
+	}
+	stillLive, err := repo.Get(ctx, owner, "p2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillLive.ListingState != model.PluginListingStatePublished {
+		t.Errorf("a content-only edit un-listed the plugin (%q)", stillLive.ListingState)
+	}
+}

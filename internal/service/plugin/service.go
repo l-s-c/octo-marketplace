@@ -606,10 +606,31 @@ func (s *Service) update(ctx context.Context, caller Caller, pluginID string, re
 	for i := range rels {
 		rels[i].SourcePluginID = storageID
 	}
+	// The saved row keeps the listing state it already had — buildWrite mints the
+	// create-time default (draft), which would otherwise be reported back as the
+	// plugin's state even though the UPDATE never writes the column.
+	p.ListingState = old.ListingState
+
 	audit := s.audit(caller, storageID, "update", old, p, now)
 	m := mutation(*p, rels, audit)
 	m.SnapshotVersion = true
 	m.Changelog = req.Changelog
+	// Widening the declared audience of a LISTED plugin un-lists it.
+	//
+	// The refusal above only covers a published plugin that is already `space`.
+	// A published PRIVATE one is editable by design — nobody else can read it —
+	// but writing `space` onto it while it stays published would list it to the
+	// whole organization with no review, which is the single thing this workflow
+	// exists to prevent. Dropping to draft costs the author nothing (the plugin
+	// was visible only to them) and puts it back on the normal 发布 path, where
+	// the new visibility routes it through review.
+	//
+	// Only WIDENING triggers this. Narrowing, or any content-only edit, leaves the
+	// listing alone.
+	if old.ListingState == model.PluginListingStatePublished && req.Visibility != old.Visibility {
+		m.ResetListingToDraft = true
+		p.ListingState = model.PluginListingStateDraft
+	}
 	sync, err := s.repo.Update(ctx, scope(caller), m)
 	if err != nil {
 		return nil, mapStoreError(err)

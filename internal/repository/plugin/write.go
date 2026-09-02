@@ -27,6 +27,10 @@ type Mutation struct {
 	// Changelog is the optional note stored on that snapshot.
 	SnapshotVersion bool
 	Changelog       *string
+	// ResetListingToDraft un-lists the plugin as part of this save. The ONLY
+	// caller is the visibility-widening path in Service.update; see the comment at
+	// the UPDATE statement for why that case cannot leave the row published.
+	ResetListingToDraft bool
 }
 
 // RelationSync reports the outcome of synchronizing a Plugin's one-level
@@ -501,8 +505,22 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	if scope.Admin {
 		updWhere, updTail = `WHERE plugin_id=? AND deleted_at IS NULL`, []any{p.ID}
 	}
+	// An ordinary save cannot change listing_state — EXCEPT when the caller is
+	// widening the declared audience of an already-listed plugin. Writing the new
+	// visibility while leaving listing_state='published' would list the plugin to
+	// the whole organization with no review, which is the one thing this workflow
+	// exists to prevent. Dropping back to 'draft' costs the author nothing (a
+	// published PRIVATE plugin was visible only to them) and puts the row back on
+	// the normal 发布 path, where the new visibility routes it through review.
+	//
+	// Set by Service.update, which is the only place that can compare the declared
+	// visibility against the persisted one.
+	listingReset := ``
+	if m.ResetListingToDraft {
+		listingReset = `listing_state='draft',`
+	}
 	updArgs := append([]any{p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.Visibility, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), jsonColumn(p.AttachmentKeys), p.ManifestHash, p.PluginHash, p.Status, now}, updTail...)
-	_, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,icon=?,tool_count=?,manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
+	_, err = tx.ExecContext(ctx, `UPDATE plugins SET plugin_name=?,plugin_type=?,category_id=?,tags_json=?,publisher=?,visibility=?,`+listingReset+`icon=?,tool_count=?,manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,status=?,updated_at=?
 `+updWhere, updArgs...)
 	if err != nil {
 		return nil, wrapped("update", err)
