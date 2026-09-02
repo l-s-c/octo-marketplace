@@ -1,0 +1,211 @@
+package plugin
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+)
+
+// mustChangeState turns a zero-row state CAS into ErrConflict.
+//
+// Deliberately NOT mustAffect, which reports ErrNotFound. These UPDATEs run after
+// a successful FOR UPDATE read, so the row provably exists and zero rows can only
+// mean the listing state was not the one the CAS required — a concurrent writer
+// won, or the caller's view was stale. Reporting that as "not found" would 404 a
+// plugin the caller is looking at, and would tell an admin whose delist lost a
+// race that the plugin never existed.
+func mustChangeState(res sql.Result) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrConflict
+	}
+	return nil
+}
+
+// PublishParams carries one owner-driven publish of an unlisted plugin.
+type PublishParams struct {
+	PluginID     string
+	OperatorID   string
+	OperatorName string
+	RequestID    string
+}
+
+// DelistParams carries one Space-admin takedown of a listed plugin.
+type DelistParams struct {
+	PluginID     string
+	OperatorID   string
+	OperatorName string
+	RequestID    string
+	// Reason is optional and is recorded on the audit row and on any pending
+	// review request this takedown cancels.
+	Reason string
+}
+
+// PublishPlugin lists a plugin the caller owns, without review.
+//
+// This is the no-review half of the publish decision: only a plugin whose
+// declared visibility is private reaches here, because org-visible intent routes
+// through SubmitReview instead. The service enforces that; the repository's job is
+// the transaction.
+//
+// It deliberately does NOT mint a version. Every save already snapshots one
+// (plugin_versions is per-save history), and plugin_versions.version is a
+// per-plugin auto-increment counter rather than the author's label, so minting
+// here would perturb that counter for no new content.
+func (r *Repo) PublishPlugin(ctx context.Context, scope Scope, p PublishParams) (*model.Plugin, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	// Owner-scoped: publishing is an owner action, unlike the reviewer
+	// transactions which lock by Space.
+	current, err := getOwnedForUpdate(ctx, tx, scope, p.PluginID)
+	if err != nil {
+		return nil, err
+	}
+	now := r.now()
+
+	// State CAS rather than a blind write, so a double-click loses with
+	// ErrConflict instead of appending a second audit row for the same event.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE plugins SET listing_state=?,updated_at=?
+		  WHERE plugin_id=? AND owner_uid=? AND space_id=? AND listing_state<>? AND deleted_at IS NULL`,
+		string(model.PluginListingStatePublished), now,
+		p.PluginID, scope.CallerUID, scope.SpaceID, string(model.PluginListingStatePublished))
+	if err != nil {
+		return nil, wrapped("publish plugin", err)
+	}
+	if err := mustChangeState(res); err != nil {
+		return nil, err
+	}
+
+	// Listing promises "this is in the market now", and the market list needs BOTH
+	// the visibility predicate and a visible default placement. Flipping
+	// listing_state alone lists nothing for a row whose placement is missing
+	// (pre-auto-placement legacy) or hidden, and the author cannot repair it
+	// afterwards. Same self-heal ApproveReview performs, and forward-only: it never
+	// sets visible=0, so it cannot be used to hide anything.
+	if err := ensureVisibleDefaultPlacement(ctx, tx, r.id, now, p.PluginID, current.CategoryID); err != nil {
+		return nil, err
+	}
+
+	m := Mutation{OperatorID: p.OperatorID, OperatorName: p.OperatorName, RequestID: p.RequestID}
+	if err := insertAudit(ctx, tx, r.id(), now, *current, "publish", m, current.PluginHash, current.PluginHash); err != nil {
+		return nil, err
+	}
+
+	refreshed, err := getOwnedForUpdate(ctx, tx, scope, p.PluginID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return refreshed, nil
+}
+
+// DelistPlugin takes a listed plugin out of the marketplace. Space admins only;
+// the service checks the role, and the row is locked by SPACE rather than by
+// owner because the actor is by definition not the author.
+//
+// The row stays editable and re-publishable afterwards — delisting is a takedown,
+// not a deletion — and its current_version label stays spent so a republish
+// cannot reuse a label the org already saw.
+func (r *Repo) DelistPlugin(ctx context.Context, scope Scope, p DelistParams) (*model.Plugin, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	current, err := getReviewedPluginForUpdate(ctx, tx, scope.SpaceID, p.PluginID)
+	if err != nil {
+		return nil, err
+	}
+	now := r.now()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE plugins SET listing_state=?,updated_at=?
+		  WHERE plugin_id=? AND space_id=? AND listing_state=? AND deleted_at IS NULL`,
+		string(model.PluginListingStateDelisted), now,
+		p.PluginID, scope.SpaceID, string(model.PluginListingStatePublished))
+	if err != nil {
+		return nil, wrapped("delist plugin", err)
+	}
+	if err := mustChangeState(res); err != nil {
+		return nil, err
+	}
+
+	// A pending request on a plugin that just left the market has nothing left to
+	// decide, and leaving it open would let an approval silently relist the plugin
+	// behind the admin's back. Canceling also releases the single-pending slot (the
+	// generated pending_plugin_id column drops out of the unique index), so the
+	// author can resubmit after editing.
+	reason := p.Reason
+	if reason == "" {
+		reason = "plugin delisted by a Space admin"
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE plugin_review_requests SET status='canceled',reviewer_uid=?,reviewer_name=?,reason=?,reviewed_at=?,updated_at=?
+		  WHERE plugin_id=? AND status='pending' AND deleted_at IS NULL`,
+		p.OperatorID, p.OperatorName, reason, now, now, p.PluginID); err != nil {
+		return nil, wrapped("cancel pending review on delist", err)
+	}
+
+	// Placements are deliberately untouched. Hiding the placement would also hide
+	// the plugin from its own author's 我的发布 (that list shares the placement
+	// join), and listing_state already removes it from every other reader.
+	//
+	// Storage objects are deliberately NOT garbage-collected either, unlike reject
+	// and cancel. Those clean up because the APPLICANT's submission is going away;
+	// an admin takedown leaves a row its author is expected to edit and republish,
+	// and the auto-canceled request's frozen objects are content-addressed.
+	m := Mutation{OperatorID: p.OperatorID, OperatorName: p.OperatorName, RequestID: p.RequestID}
+	if p.Reason != "" {
+		m.Remark = strPtr("reason=" + p.Reason)
+	}
+	if err := insertAudit(ctx, tx, r.id(), now, *current, "delist", m, current.PluginHash, current.PluginHash); err != nil {
+		return nil, err
+	}
+
+	refreshed, err := getReviewedPluginForUpdate(ctx, tx, scope.SpaceID, p.PluginID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return refreshed, nil
+}
+
+// LatestReviewForPlugin returns the review request whose status the displayed
+// listing status should reflect: the open one when there is one, otherwise the
+// most recently submitted. The single-pending invariant guarantees at most one
+// pending row, so ordering pending first is deterministic.
+//
+// Scoped by Space and used for the caller's own rows; the plugin read that
+// precedes it already applied the catalog predicate.
+func (r *Repo) LatestReviewForPlugin(ctx context.Context, scope Scope, pluginID string) (string, model.ReviewStatus, error) {
+	var id, status string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT rr.review_id, rr.status FROM plugin_review_requests rr
+		   JOIN plugins p ON p.plugin_id=rr.plugin_id
+		  WHERE rr.plugin_id=? AND rr.deleted_at IS NULL AND p.space_id=? AND p.deleted_at IS NULL
+		  ORDER BY (rr.status='pending') DESC, rr.submitted_at DESC, rr.review_id DESC
+		  LIMIT 1`,
+		pluginID, scope.SpaceID).Scan(&id, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", wrapped("load latest review", err)
+	}
+	return id, model.ReviewStatus(status), nil
+}

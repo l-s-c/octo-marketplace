@@ -40,7 +40,8 @@ func reviewRouterEngine(t *testing.T, cardSecret string) *gin.Engine {
 		})
 }
 
-// All six tenant review endpoints must be registered by the production wiring.
+// All six tenant review endpoints, plus the two listing-lifecycle endpoints, must
+// be registered by the production wiring.
 // Reading them off the engine's route table means a forgotten Register() call
 // fails here rather than 404ing in the browser.
 func TestReviewRoutesAreMountedByProductionWiring(t *testing.T) {
@@ -56,6 +57,8 @@ func TestReviewRoutesAreMountedByProductionWiring(t *testing.T) {
 		"POST /api/v1/plugins/review_requests/:review_id/approve",
 		"POST /api/v1/plugins/review_requests/:review_id/reject",
 		"POST /api/v1/plugins/review_requests/:review_id/cancel",
+		"POST /api/v1/plugins/publish",
+		"POST /api/v1/plugins/delist",
 		"POST " + pluginhandler.CardActionPath,
 	} {
 		if !registered[want] {
@@ -81,6 +84,8 @@ func TestReviewRoutesRequireATenantToken(t *testing.T) {
 		{http.MethodPost, "/api/v1/plugins/review_requests/review-1/approve"},
 		{http.MethodPost, "/api/v1/plugins/review_requests/review-1/reject"},
 		{http.MethodPost, "/api/v1/plugins/review_requests/review-1/cancel"},
+		{http.MethodPost, "/api/v1/plugins/publish"},
+		{http.MethodPost, "/api/v1/plugins/delist"},
 	} {
 		rec := httptest.NewRecorder()
 		engine.ServeHTTP(rec, httptest.NewRequest(target.method, target.path, nil))

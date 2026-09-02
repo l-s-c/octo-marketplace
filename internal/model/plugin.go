@@ -51,6 +51,55 @@ const (
 	PluginListingStateDelisted PluginListingState = "delisted"
 )
 
+// PluginDisplayStatus is the single status a client shows for a Plugin. It is
+// DERIVED, never stored: it folds the listing axis (listing_state, on the plugin)
+// together with the review axis (plugin_review_requests, a separate entity).
+//
+// Storing it would be the collapse brief item 26 forbids — a listed v1 with an
+// in-review v2 is two simultaneous facts, and one column cannot hold both. These
+// values are also a marketplace-only vocabulary and must never be handed to
+// cardState, which translates model.ReviewStatus to octo-server's card protocol.
+type PluginDisplayStatus string
+
+const (
+	PluginDisplayStatusDraft         PluginDisplayStatus = "draft"          // 草稿
+	PluginDisplayStatusPendingReview PluginDisplayStatus = "pending_review" // 审核中
+	PluginDisplayStatusPublished     PluginDisplayStatus = "published"      // 已发布
+	PluginDisplayStatusRejected      PluginDisplayStatus = "rejected"       // 驳回
+	PluginDisplayStatusDelisted      PluginDisplayStatus = "delisted"       // 已下架
+)
+
+// DisplayStatus resolves the status to show for this Plugin.
+//
+// Precedence, in order:
+//
+//  1. An open review request wins outright, including for an already-published
+//     plugin whose NEW version is under review. Showing 已发布 there would hide the
+//     fact that the author is waiting on somebody.
+//  2. delisted, then published — what the listing axis actually says.
+//  3. A rejected latest review, so an author sees why their draft is not live.
+//  4. Otherwise a plain draft. A CANCELED latest review lands here on purpose:
+//     withdrawing a request returns the plugin to 草稿, it does not leave a
+//     lingering "withdrawn" state.
+//
+// A delisted plugin cannot also carry a pending request in practice — DelistPlugin
+// cancels any open one in the same transaction — so rule 1 winning over rule 2 is
+// not reachable for that pair.
+func (p *Plugin) DisplayStatus(hasPendingReview bool, latestReview ReviewStatus) PluginDisplayStatus {
+	switch {
+	case hasPendingReview:
+		return PluginDisplayStatusPendingReview
+	case p.ListingState == PluginListingStateDelisted:
+		return PluginDisplayStatusDelisted
+	case p.ListingState == PluginListingStatePublished:
+		return PluginDisplayStatusPublished
+	case latestReview == ReviewStatusRejected:
+		return PluginDisplayStatusRejected
+	default:
+		return PluginDisplayStatusDraft
+	}
+}
+
 // NormalizeLegacyVisibility maps a row's PRESERVED legacy `public` visibility to
 // the unified `system` global value, passing every current enum value through
 // unchanged. Write paths that carry an existing row's visibility forward — an

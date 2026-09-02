@@ -48,6 +48,12 @@ type Service interface {
 	ApproveReview(context.Context, pluginsvc.Caller, string) (*model.Plugin, error)
 	RejectReview(context.Context, pluginsvc.Caller, string, string) error
 	CancelReview(context.Context, pluginsvc.Caller, string) error
+
+	// Listing lifecycle (see listing.go). Publish is the single 发布 door: it
+	// routes to an immediate listing or a review request based on the Plugin's
+	// declared visibility, so no client has to know the rule.
+	Publish(context.Context, pluginsvc.Caller, pluginsvc.PublishParams) (*pluginsvc.PublishResult, error)
+	Delist(context.Context, pluginsvc.Caller, pluginsvc.DelistParams) (*pluginsvc.Detail, error)
 }
 
 // CategoryService is separate because category listing is a read-only operation
@@ -77,6 +83,8 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	plugins.GET("/detail", h.Get)
 	plugins.POST("/upsert", h.Upsert)
 	plugins.POST("/delete", h.Delete)
+	plugins.POST("/publish", h.Publish)
+	plugins.POST("/delist", h.Delist)
 	plugins.GET("/versions", h.ListVersions)
 	plugins.POST("/install", h.Install)
 	plugins.POST("/import", h.Import)
@@ -266,7 +274,7 @@ type categoryResponse struct {
 // @Produce json
 // @Security Bearer
 // @Param scene_code query string true "Marketplace scene code"
-// @Param plugin_type query string true "Plugin type" Enums(expert,expert_team,skill,connector)
+// @Param plugin_type query string false "Plugin type. Required unless mode=mine, where omitting it lists every type the caller owns." Enums(expert,expert_team,skill,connector)
 // @Param category_id query string false "Category ID (matches the plugin placement category in this scene)"
 // @Param tag query []string false "Tag filters; repeatable or comma-separated, a plugin must carry every tag" collectionFormat(multi)
 // @Param mode query string false "List mode; mine restricts to plugins owned by the caller" Enums(mine)
@@ -297,14 +305,20 @@ func (h *Handler) List(c *gin.Context) {
 		validation(c, "scene_code")
 		return
 	}
-	pluginType := model.PluginType(c.Query("plugin_type"))
-	if pluginType == "" {
-		validation(c, "plugin_type")
-		return
-	}
+	// mode is parsed before plugin_type because it decides whether plugin_type is
+	// required at all.
 	mode := c.Query("mode")
 	if mode != "" && mode != "mine" {
 		validation(c, "mode")
+		return
+	}
+	// plugin_type is required for the marketplace grid, where a page mixing four
+	// kinds of card has no coherent layout. It is OPTIONAL for mode=mine, which
+	// backs 我的发布 and needs an 全部 tab listing every kind the caller owns in one
+	// table. The service and repository already tolerate an empty type.
+	pluginType := model.PluginType(c.Query("plugin_type"))
+	if pluginType == "" && mode != "mine" {
+		validation(c, "plugin_type")
 		return
 	}
 	items, total, err := h.svc.List(c.Request.Context(), caller, pluginsvc.ListParams{PlacementCode: sceneCode, Type: pluginType, CategoryID: c.Query("category_id"), Tags: splitQuery(c.QueryArray("tag")), Keyword: c.Query("q"), Mine: mode == "mine", Sort: c.Query("sort"), Limit: pageSize, Offset: (page - 1) * pageSize})
@@ -691,6 +705,12 @@ func writeServiceError(c *gin.Context, err error, operation string) {
 	// before this particular change is coherent.
 	case errors.Is(err, pluginsvc.ErrReviewPending):
 		apiresponse.Fail(c, http.StatusConflict, errcode.Conflict, "a review request is pending on this plugin", map[string]any{"conflict_reason": "review_pending"}, "Cancel the pending review request first.")
+	// Publish/delist state conflicts. Reported as conflicts rather than silently
+	// succeeding so a second button press tells the client its view is stale.
+	case errors.Is(err, pluginsvc.ErrAlreadyPublished):
+		apiresponse.Fail(c, http.StatusConflict, errcode.Conflict, "plugin is already published", map[string]any{"conflict_reason": "already_published"}, "Refresh the plugin and try again.")
+	case errors.Is(err, pluginsvc.ErrNotPublished):
+		apiresponse.Fail(c, http.StatusConflict, errcode.Conflict, "plugin is not published", map[string]any{"conflict_reason": "not_published"}, "Only a published plugin can be delisted.")
 	// Authorization refusal, distinct from "not found": the caller is in the right
 	// Space and may know the resource exists, they simply lack the reviewer role.
 	// Without this branch a permission error falls through to 500.

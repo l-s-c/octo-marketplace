@@ -155,6 +155,11 @@ components:
         data:
           $ref: '#/components/schemas/internal_api_handler_plugin.deleteResponse'
       type: object
+    github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_delistResponse:
+      properties:
+        data:
+          $ref: '#/components/schemas/internal_api_handler_plugin.delistResponse'
+      type: object
     github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_detailResponse:
       properties:
         data:
@@ -164,6 +169,11 @@ components:
       properties:
         data:
           $ref: '#/components/schemas/internal_api_handler_plugin.installResponse'
+      type: object
+    github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_publishResponse:
+      properties:
+        data:
+          $ref: '#/components/schemas/internal_api_handler_plugin.publishResponse'
       type: object
     github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_reviewRequestResponse:
       properties:
@@ -725,6 +735,36 @@ components:
         visibility:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.Visibility'
       type: object
+    github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginDisplayStatus:
+      enum:
+      - draft
+      - pending_review
+      - published
+      - rejected
+      - delisted
+      type: string
+      x-enum-comments:
+        PluginDisplayStatusDelisted: 已下架
+        PluginDisplayStatusDraft: 草稿
+        PluginDisplayStatusPendingReview: 审核中
+        PluginDisplayStatusPublished: 已发布
+        PluginDisplayStatusRejected: 驳回
+      x-enum-varnames:
+      - PluginDisplayStatusDraft
+      - PluginDisplayStatusPendingReview
+      - PluginDisplayStatusPublished
+      - PluginDisplayStatusRejected
+      - PluginDisplayStatusDelisted
+    github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginListingState:
+      enum:
+      - draft
+      - published
+      - delisted
+      type: string
+      x-enum-varnames:
+      - PluginListingStateDraft
+      - PluginListingStatePublished
+      - PluginListingStateDelisted
     github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginType:
       enum:
       - expert
@@ -1512,6 +1552,22 @@ components:
         plugin_id:
           type: string
       type: object
+    internal_api_handler_plugin.delistRequest:
+      properties:
+        plugin_id:
+          type: string
+        reason:
+          type: string
+      type: object
+    internal_api_handler_plugin.delistResponse:
+      properties:
+        listing_state:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginListingState'
+        plugin_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginDisplayStatus'
+      type: object
     internal_api_handler_plugin.detailResponse:
       properties:
         plugin:
@@ -1728,6 +1784,36 @@ components:
           type: string
         visibility:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginVisibility'
+      type: object
+    internal_api_handler_plugin.publishRequest:
+      properties:
+        changelog:
+          type: string
+        plugin_id:
+          type: string
+        version:
+          description: 'Version and Changelog are used only when the publish needs
+            organization
+
+            review; both are ignored for a 仅自己可见 Plugin, which lists immediately.
+
+            Version defaults to the draft''s current version.'
+          type: string
+      type: object
+    internal_api_handler_plugin.publishResponse:
+      properties:
+        listing_state:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginListingState'
+        plugin_id:
+          type: string
+        review_id:
+          description: 'ReviewID is present only when the publish opened a review
+            request, which is
+
+            how the client knows which branch fired without a second call.'
+          type: string
+        status:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginDisplayStatus'
       type: object
     internal_api_handler_plugin.relationRequest:
       properties:
@@ -5134,10 +5220,10 @@ paths:
         required: true
         schema:
           type: string
-      - description: Plugin type
+      - description: Plugin type. Required unless mode=mine, where omitting it lists
+          every type the caller owns.
         in: query
         name: plugin_type
-        required: true
         schema:
           enum:
           - expert
@@ -5305,6 +5391,72 @@ paths:
       security:
       - Bearer: []
       summary: Delete plugin
+      tags:
+      - plugin
+  /plugins/delist:
+    post:
+      description: Take a published Plugin out of the marketplace. Requires the Space
+        owner or admin role — the same authority as approving a review request. Any
+        pending review request on the Plugin is canceled. The Plugin stays editable
+        and can be published again by its owner.
+      operationId: plugin.delist
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/internal_api_handler_plugin.delistRequest'
+                description: Plugin ID and an optional reason
+                summary: body
+        description: Plugin ID and an optional reason
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_delistResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: FORBIDDEN
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: CONFLICT
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Delist plugin
       tags:
       - plugin
   /plugins/detail:
@@ -5583,6 +5735,68 @@ paths:
       security:
       - Bearer: []
       summary: Install plugin to a Loop workspace/runtime
+      tags:
+      - plugin
+  /plugins/publish:
+    post:
+      description: 'Publish a caller-owned Plugin. The Plugin''s visibility decides
+        what that means: a private Plugin is listed immediately, while an organization-visible
+        Plugin opens a review request and stays a draft until a Space admin approves
+        it. There is no separate submit-for-review endpoint.'
+      operationId: plugin.publish
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/internal_api_handler_plugin.publishRequest'
+                description: Plugin ID, with an optional version label and changelog
+                  for the review branch
+                summary: body
+        description: Plugin ID, with an optional version label and changelog for the
+          review branch
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Data-internal_api_handler_plugin_publishResponse'
+          description: OK
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: VALIDATION_ERROR
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: AUTH_REQUIRED
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: NOT_FOUND
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: CONFLICT
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Publish plugin
       tags:
       - plugin
   /plugins/review_requests:

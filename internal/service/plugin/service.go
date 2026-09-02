@@ -73,6 +73,11 @@ type Store interface {
 	LoadReviewSnapshot(context.Context, pluginrepo.Scope, string, bool) (*model.PluginReviewRequest, error)
 	ListReviewRequests(context.Context, pluginrepo.Scope, pluginrepo.ReviewListFilter) ([]*model.PluginReviewRequest, int64, error)
 	HasPendingReview(context.Context, pluginrepo.Scope, string) (bool, error)
+
+	// Listing lifecycle. These are the only two writers of listing_state besides
+	// insertPlugin and ApproveReview.
+	PublishPlugin(context.Context, pluginrepo.Scope, pluginrepo.PublishParams) (*model.Plugin, error)
+	DelistPlugin(context.Context, pluginrepo.Scope, pluginrepo.DelistParams) (*model.Plugin, error)
 	ApproveReview(context.Context, pluginrepo.Scope, pluginrepo.ApproveReviewParams) (*model.Plugin, error)
 	RejectReview(context.Context, pluginrepo.Scope, pluginrepo.RejectReviewParams) (json.RawMessage, json.RawMessage, error)
 	CancelReview(context.Context, pluginrepo.Scope, string, string) (json.RawMessage, json.RawMessage, error)

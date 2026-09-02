@@ -73,6 +73,63 @@ func (f *fakeStore) HasPendingReview(_ context.Context, s pluginrepo.Scope, plug
 	return f.review.hasPending, nil
 }
 
+// listingFake records the two listing_state writers. Like the review half these
+// are recorders: the state CAS, the placement self-heal and the pending-review
+// cancellation are repository guarantees covered against a real database in
+// internal/db.
+type listingFake struct {
+	publishScope  pluginrepo.Scope
+	publishParams pluginrepo.PublishParams
+	publishCalls  int
+	delistScope   pluginrepo.Scope
+	delistParams  pluginrepo.DelistParams
+	delistCalls   int
+
+	published  *model.Plugin
+	delisted   *model.Plugin
+	publishErr error
+	delistErr  error
+}
+
+func (f *fakeStore) PublishPlugin(_ context.Context, s pluginrepo.Scope, p pluginrepo.PublishParams) (*model.Plugin, error) {
+	f.listing.publishScope = s
+	f.listing.publishParams = p
+	f.listing.publishCalls++
+	if f.listing.publishErr != nil {
+		return nil, f.listing.publishErr
+	}
+	if f.listing.published != nil {
+		return f.listing.published, nil
+	}
+	// Mirror just enough of the repository: the row comes back listed.
+	out := f.plugins[p.PluginID]
+	if out == nil {
+		return nil, pluginrepo.ErrNotFound
+	}
+	clone := *out
+	clone.ListingState = model.PluginListingStatePublished
+	return &clone, nil
+}
+
+func (f *fakeStore) DelistPlugin(_ context.Context, s pluginrepo.Scope, p pluginrepo.DelistParams) (*model.Plugin, error) {
+	f.listing.delistScope = s
+	f.listing.delistParams = p
+	f.listing.delistCalls++
+	if f.listing.delistErr != nil {
+		return nil, f.listing.delistErr
+	}
+	if f.listing.delisted != nil {
+		return f.listing.delisted, nil
+	}
+	out := f.plugins[p.PluginID]
+	if out == nil {
+		return nil, pluginrepo.ErrNotFound
+	}
+	clone := *out
+	clone.ListingState = model.PluginListingStateDelisted
+	return &clone, nil
+}
+
 func (f *fakeStore) InsertReviewRequest(_ context.Context, s pluginrepo.Scope, req *model.PluginReviewRequest, snap pluginrepo.FrozenSnapshot) error {
 	f.review.insertScope = s
 	f.review.insertReq = req

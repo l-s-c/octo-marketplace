@@ -1,0 +1,243 @@
+package db
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"sync"
+	"testing"
+
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+	pluginrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/plugin"
+)
+
+// TestPublishImmediatelyListsAPrivatePlugin covers the no-review branch and the
+// placement self-heal that has to come with it: flipping listing_state alone lists
+// nothing for a row whose default placement is missing or hidden, and the author
+// cannot repair that afterwards.
+func TestPublishImmediatelyListsAPrivatePlugin(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		placement string // "" = leave the seeded visible one alone
+	}{
+		{"with a healthy placement", ""},
+		{"with a hidden placement", "hide"},
+		{"with no placement at all", "drop"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := reviewDB(t)
+			repo := pluginrepo.New(database)
+			ctx := context.Background()
+			seed(t, database, seedPlugin{id: "plugin-1", visibility: "private", listingState: "draft", currentVersion: "1.0.0"})
+			switch tc.placement {
+			case "hide":
+				if _, err := database.Exec(`UPDATE plugin_placements SET visible=0 WHERE plugin_id='plugin-1'`); err != nil {
+					t.Fatal(err)
+				}
+			case "drop":
+				if _, err := database.Exec(`DELETE FROM plugin_placements WHERE plugin_id='plugin-1'`); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			owner := tenantScope()
+			published, err := repo.PublishPlugin(ctx, owner, pluginrepo.PublishParams{
+				PluginID: "plugin-1", OperatorID: "user-1", OperatorName: "Alice", RequestID: "req-1",
+			})
+			if err != nil {
+				t.Fatalf("PublishPlugin: %v", err)
+			}
+			if published.ListingState != model.PluginListingStatePublished {
+				t.Errorf("listing_state = %q, want published", published.ListingState)
+			}
+			// visibility is untouched: a private publish lists the plugin to its owner
+			// only, which is exactly what 仅自己可见 + 已发布 means.
+			if published.Visibility != model.PluginVisibilityPrivate {
+				t.Errorf("visibility = %q; publish must not widen the audience", published.Visibility)
+			}
+			var visible int
+			if err := database.QueryRow(
+				`SELECT COUNT(*) FROM plugin_placements WHERE plugin_id='plugin-1' AND placement_code='default' AND visible=1`,
+			).Scan(&visible); err != nil {
+				t.Fatal(err)
+			}
+			if visible != 1 {
+				t.Errorf("visible default placements = %d, want 1; the plugin is listed but unreachable", visible)
+			}
+			// No version is minted: every save already snapshots one, and
+			// plugin_versions.version is a per-plugin counter, not the author's label.
+			var versions int
+			if err := database.QueryRow(`SELECT COUNT(*) FROM plugin_versions WHERE plugin_id='plugin-1'`).Scan(&versions); err != nil {
+				t.Fatal(err)
+			}
+			if versions != 0 {
+				t.Errorf("publish minted %d version rows; it must not perturb the counter", versions)
+			}
+			assertAudit(t, database, "plugin-1", "publish", 1)
+		})
+	}
+}
+
+// TestDelistCancelsThePendingReviewAndFreesTheSlot is the interlock that keeps an
+// approval from relisting a plugin behind the admin's back, and it also has to
+// release the single-pending slot so the author can resubmit after editing.
+func TestDelistCancelsThePendingReviewAndFreesTheSlot(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "published", currentVersion: "1.0.0"})
+
+	owner := tenantScope()
+	reviewer := reviewerScope()
+
+	// An upgrade request sitting in the queue when the admin takes the plugin down.
+	req := newRequest("plugin-1", "2.0.0")
+	if err := repo.InsertReviewRequest(ctx, owner, req, snapshotOf(`{"plugin_name":"V2"}`, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	delisted, err := repo.DelistPlugin(ctx, reviewer, pluginrepo.DelistParams{
+		PluginID: "plugin-1", OperatorID: "admin-1", OperatorName: "Adam", RequestID: "req-1", Reason: "policy violation",
+	})
+	if err != nil {
+		t.Fatalf("DelistPlugin: %v", err)
+	}
+	if delisted.ListingState != model.PluginListingStateDelisted {
+		t.Errorf("listing_state = %q, want delisted", delisted.ListingState)
+	}
+	// visibility is untouched: the declared intent survives a takedown so the
+	// author can edit and republish without restating it.
+	if delisted.Visibility != model.PluginVisibilitySpace {
+		t.Errorf("visibility = %q; delist must not rewrite the declared intent", delisted.Visibility)
+	}
+
+	var status, reason string
+	if err := database.QueryRow(`SELECT status, COALESCE(reason,'') FROM plugin_review_requests WHERE review_id=?`, req.ID).Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(model.ReviewStatusCanceled) {
+		t.Errorf("pending request status = %q, want canceled; an approval could still relist it", status)
+	}
+	if reason != "policy violation" {
+		t.Errorf("cancellation reason = %q, want the admin's reason", reason)
+	}
+
+	// The slot is free: the author can resubmit after editing.
+	again := newRequest("plugin-1", "2.0.1")
+	if err := repo.InsertReviewRequest(ctx, owner, again, snapshotOf(`{"plugin_name":"V2.0.1"}`, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatalf("resubmit after delist: %v; the single-pending slot was not released", err)
+	}
+
+	// Placements are deliberately untouched — hiding one would also hide the plugin
+	// from its own author's 我的发布, which shares the placement join.
+	var visible int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM plugin_placements WHERE plugin_id='plugin-1' AND visible=1`,
+	).Scan(&visible); err != nil {
+		t.Fatal(err)
+	}
+	if visible != 1 {
+		t.Errorf("visible placements after delist = %d, want 1 (untouched)", visible)
+	}
+	assertAudit(t, database, "plugin-1", "delist", 1)
+}
+
+// A delisted plugin's published label stays spent, or a republish could reuse a
+// version the org already saw.
+func TestPublishedLabelsIncludeADelistedPluginsCurrentVersion(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "delisted", currentVersion: "1.0.0"})
+
+	err := repo.InsertReviewRequest(ctx, tenantScope(), newRequest("plugin-1", "1.0.0"),
+		snapshotOf(`{"plugin_name":"Again"}`, `{"attachments":[]}`, nil))
+	if !errors.Is(err, pluginrepo.ErrConflict) {
+		t.Fatalf("reusing a delisted plugin's live label err = %v, want ErrConflict", err)
+	}
+	// A fresh label is fine.
+	if err := repo.InsertReviewRequest(ctx, tenantScope(), newRequest("plugin-1", "1.0.1"),
+		snapshotOf(`{"plugin_name":"Again"}`, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatalf("a fresh label after delisting was refused: %v", err)
+	}
+}
+
+// Both transactions CAS on state, so a double-click produces one winner and one
+// ErrConflict rather than two audit rows for the same event.
+func TestConcurrentPublishAndDelistProduceOneWinner(t *testing.T) {
+	t.Run("publish", func(t *testing.T) {
+		database := reviewDB(t)
+		repo := pluginrepo.New(database)
+		seed(t, database, seedPlugin{id: "plugin-1", visibility: "private", listingState: "draft", currentVersion: "1.0.0"})
+		errs := raceTwo(func() error {
+			_, err := repo.PublishPlugin(context.Background(), tenantScope(), pluginrepo.PublishParams{
+				PluginID: "plugin-1", OperatorID: "user-1", OperatorName: "Alice",
+			})
+			return err
+		})
+		assertOneWinner(t, errs)
+		assertAudit(t, database, "plugin-1", "publish", 1)
+	})
+
+	t.Run("delist", func(t *testing.T) {
+		database := reviewDB(t)
+		repo := pluginrepo.New(database)
+		seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "published", currentVersion: "1.0.0"})
+		errs := raceTwo(func() error {
+			_, err := repo.DelistPlugin(context.Background(), reviewerScope(), pluginrepo.DelistParams{
+				PluginID: "plugin-1", OperatorID: "admin-1", OperatorName: "Adam",
+			})
+			return err
+		})
+		assertOneWinner(t, errs)
+		assertAudit(t, database, "plugin-1", "delist", 1)
+	})
+}
+
+func raceTwo(fn func() error) []error {
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	start := make(chan struct{})
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			errs[i] = fn()
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	return errs
+}
+
+func assertOneWinner(t *testing.T, errs []error) {
+	t.Helper()
+	var won, conflicted int
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			won++
+		case errors.Is(err, pluginrepo.ErrConflict):
+			conflicted++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if won != 1 || conflicted != 1 {
+		t.Fatalf("won=%d conflicted=%d, want exactly one of each", won, conflicted)
+	}
+}
+
+func assertAudit(t *testing.T, database *sql.DB, pluginID, action string, want int) {
+	t.Helper()
+	var got int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM plugin_audit_logs WHERE plugin_id=? AND action=?`, pluginID, action,
+	).Scan(&got); err != nil {
+		t.Fatalf("count %s audit rows: %v", action, err)
+	}
+	if got != want {
+		t.Errorf("%s audit rows = %d, want %d", action, got, want)
+	}
+}
