@@ -649,6 +649,16 @@ func (s *Service) update(ctx context.Context, caller Caller, pluginID string, re
 	if !caller.IsSystemAdmin && req.Visibility != old.Visibility {
 		m.RefusePendingReview = true
 	}
+	// The listed_requires_review gate and the un-list-on-widen decision above were
+	// both computed from the UNLOCKED `old` read. An approval or a publish can
+	// commit between that read and Repo.Update's row lock, so let the repo be
+	// authoritative: EnforceListingGate makes it re-derive both facts from the row
+	// it locks (refuse a locked published+space edit; reset-to-draft on a widen of
+	// a locked-published row). The exempt system admin keeps the platform-operator
+	// escape hatch and is not gated.
+	if !caller.IsSystemAdmin {
+		m.EnforceListingGate = true
+	}
 	// Widening the declared audience of a LISTED plugin un-lists it.
 	//
 	// The refusal above only covers a published plugin that is already `space`.
@@ -877,6 +887,8 @@ func mapStoreError(err error) error {
 		return ErrConflict
 	case errors.Is(err, pluginrepo.ErrReviewPending):
 		return ErrReviewPending
+	case errors.Is(err, pluginrepo.ErrListedRequiresReview):
+		return ErrListedRequiresReview
 	case errors.Is(err, pluginrepo.ErrInvalidRelation), errors.Is(err, pluginrepo.ErrInvalidCategory), errors.Is(err, pluginrepo.ErrInvalidPlacement):
 		return ErrInvalidRequest
 	default:

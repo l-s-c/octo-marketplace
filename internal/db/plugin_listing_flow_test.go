@@ -3,7 +3,9 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -279,6 +281,47 @@ func TestDelistFromAnotherSpaceIsNotFound(t *testing.T) {
 		t.Errorf("listing_state = %q; an admin of another Space took the plugin down", listing)
 	}
 	assertAudit(t, database, "plugin-1", "delist", 0)
+}
+
+// TestDelistDemotesEmbeddedChildren closes P1-2: delisting a container must take
+// its embedded children down with it. Before the fix DelistPlugin un-listed only
+// the top row, leaving every bundled skill / member expert at space+published —
+// a state visibilitySQL admits to any Space member — so after the takedown a
+// colleague could still GET, download and install the child's full content
+// behind the hidden parent. demoteEmbeddedChildren now flips the children to
+// delisted in the same transaction while leaving their `space` visibility so a
+// later re-approve re-promotes them.
+func TestDelistDemotesEmbeddedChildren(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+
+	// A published expert with a bundled (embedded) skill.
+	seed(t, database, seedPlugin{id: "expert-1", typ: "expert", visibility: "space", listingState: "published", currentVersion: "1.0.0"})
+	seed(t, database, seedPlugin{id: "skill-1", typ: "skill", visibility: "space", listingState: "published", embedded: true, currentVersion: "1.0.0"})
+	seedRelation(t, database, "rel-1", "expert-1", "skill-1", "expert_skill")
+
+	if _, err := repo.DelistPlugin(context.Background(), reviewerScope(), pluginrepo.DelistParams{
+		PluginID: "expert-1", OperatorID: "admin-1", OperatorName: "Adam", Reason: "takedown",
+	}); err != nil {
+		t.Fatalf("DelistPlugin: %v", err)
+	}
+
+	var parentListing, childListing, childVisibility string
+	if err := database.QueryRow(`SELECT listing_state FROM plugins WHERE plugin_id='expert-1'`).Scan(&parentListing); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT listing_state, visibility FROM plugins WHERE plugin_id='skill-1'`).Scan(&childListing, &childVisibility); err != nil {
+		t.Fatal(err)
+	}
+	if parentListing != string(model.PluginListingStateDelisted) {
+		t.Errorf("parent listing_state = %q, want delisted", parentListing)
+	}
+	if childListing != string(model.PluginListingStateDelisted) {
+		t.Fatalf("child listing_state = %q; the bundled skill stayed org-readable behind the delisted parent", childListing)
+	}
+	if childVisibility != string(model.PluginVisibilitySpace) {
+		t.Errorf("child visibility = %q, want space (kept so a re-approve re-promotes it)", childVisibility)
+	}
 }
 
 func raceTwo(fn func() error) []error {
@@ -674,5 +717,118 @@ func TestApproveListsAStrandedPublishedPrivateRow(t *testing.T) {
 	// The consequence that matters: a colleague can now read it.
 	if _, err := repo.Get(ctx, colleague, "p1"); err != nil {
 		t.Errorf("colleague cannot read the approved plugin (%v); approval was a silent no-op", err)
+	}
+}
+
+// TestUpdateRefusesAContentSaveThatOverlapsAnApproval closes P1-1: the other
+// half of the listed-gate TOCTOU. Editing content while a first-listing review
+// is pending is legal BY DESIGN — the reviewer acts on the frozen snapshot — so
+// this is the normal usage pattern, not an exotic race. Service.update decides
+// `listed_requires_review` from an UNLOCKED read taken several round trips before
+// the transaction: the row reads space+draft, so the gate does not fire. If an
+// admin approves the pending request in that window (stamping space+published
+// with the frozen snapshot), the owner's save then locks the now-published row
+// and — before this fix — wrote its content columns straight onto it, silently
+// replacing the just-approved snapshot with content no reviewer ever saw.
+//
+// Repo.Update now re-derives the gate from the row it LOCKS (EnforceListingGate,
+// set by the service for every non-admin caller): a locked space+published row is
+// refused with ErrListedRequiresReview and the content never lands. The approval
+// simulated by flipping the row the way ApproveReview leaves it, between the
+// service's read and the repository call.
+func TestUpdateRefusesAContentSaveThatOverlapsAnApproval(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	owner := tenantScope()
+	colleague := pluginrepo.Scope{CallerUID: "user-2", SpaceID: "space-a"}
+
+	// A space-intent draft with a first-listing request in flight — the state of
+	// anything awaiting review.
+	seed(t, database, seedPlugin{
+		id: "p1", visibility: "space", listingState: "draft", currentVersion: "1.0.0",
+		manifest: `{"plugin_name":"APPROVED"}`,
+	})
+
+	// The owner's Update reads the row while it is still space+draft.
+	current, err := repo.Get(ctx, owner, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The window: an admin approval commits, stamping space+published with the
+	// frozen snapshot, before the owner's save takes the lock.
+	if _, err := database.Exec(
+		`UPDATE plugins SET listing_state='published' WHERE plugin_id='p1'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// The owner's content-only save (visibility unchanged) now lands. The service
+	// sets EnforceListingGate for the non-admin caller, so Repo.Update re-derives
+	// the gate from the LOCKED (space+published) row and refuses.
+	edited := *current
+	edited.Manifest = json.RawMessage(`{"plugin_name":"UNREVIEWED"}`)
+	edited.ManifestHash = strings.Repeat("c", 71)
+	_, err = repo.Update(ctx, owner, pluginrepo.Mutation{
+		Plugin: edited, OperatorID: "user-1", EnforceListingGate: true,
+	})
+	if !errors.Is(err, pluginrepo.ErrListedRequiresReview) {
+		t.Fatalf("Update = %v, want ErrListedRequiresReview; unreviewed content reached a live org row", err)
+	}
+
+	// The approved snapshot survives untouched; the whole Space still reads it.
+	after, err := repo.Get(ctx, colleague, "p1")
+	if err != nil {
+		t.Fatalf("colleague cannot read the listed plugin (%v)", err)
+	}
+	if got := string(after.Manifest); !strings.Contains(got, "APPROVED") {
+		t.Fatalf("manifest = %s; the content save overwrote the approved snapshot", got)
+	}
+}
+
+// TestEnforceListingGateAllowsEditingAnUnlistedRow guards the gate's precision: a
+// non-admin caller with EnforceListingGate set can still freely edit a draft (or
+// delisted) row, and a widen of a locked-published row is re-derived to un-list
+// it from the LOCKED value rather than the service's stale hint.
+func TestEnforceListingGateAllowsEditingAnUnlistedRow(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	owner := tenantScope()
+
+	// A plain draft edit is allowed.
+	seed(t, database, seedPlugin{id: "p1", visibility: "space", listingState: "draft", currentVersion: "1.0.0"})
+	draft, err := repo.Get(ctx, owner, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := *draft
+	edited.Publisher = "renamed"
+	if _, err := repo.Update(ctx, owner, pluginrepo.Mutation{
+		Plugin: edited, OperatorID: "user-1", EnforceListingGate: true,
+	}); err != nil {
+		t.Fatalf("Update of a draft with the gate on = %v, want success", err)
+	}
+
+	// A widen of a published PRIVATE row un-lists it — re-derived from the locked
+	// row even when the service did not set the ResetListingToDraft hint.
+	seed(t, database, seedPlugin{id: "p2", visibility: "private", listingState: "published", currentVersion: "1.0.0"})
+	priv, err := repo.Get(ctx, owner, "p2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	widened := *priv
+	widened.Visibility = model.PluginVisibilitySpace
+	if _, err := repo.Update(ctx, owner, pluginrepo.Mutation{
+		Plugin: widened, OperatorID: "user-1", EnforceListingGate: true,
+	}); err != nil {
+		t.Fatalf("widen with the gate on = %v, want success", err)
+	}
+	after, err := repo.Get(ctx, owner, "p2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ListingState != model.PluginListingStateDraft {
+		t.Fatalf("listing_state = %q, want draft; the widen did not un-list from the locked row", after.ListingState)
 	}
 }

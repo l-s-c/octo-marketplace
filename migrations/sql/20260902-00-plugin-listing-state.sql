@@ -14,44 +14,36 @@
 -- exactly the collapse item 26 forbids, and a migration test asserts the enum
 -- has these three values and no others.
 --
--- The DEFAULT is deliberately the fail-closed value. RebuildGraph re-inserts a
--- container's embedded children, and those children inherit the parent's row
--- shape; a 'published' default would silently list a draft container's children.
--- Every Go write path threads ListingState explicitly, so the default is only
--- reachable from hand-written SQL and test fixtures, where invisible is the safe
--- outcome.
-ALTER TABLE `plugins`
-  ADD COLUMN `listing_state` ENUM('draft','published','delisted') NOT NULL DEFAULT 'draft'
-    COMMENT 'Listing lifecycle, independent of review state. Never add review values.'
-    AFTER `visibility`;
-
--- Grandfathering: every live row keeps exactly the reach it has today. Existing
--- `space` rows were listed under the pre-listing_state rules and are treated as
--- approved with no retroactive requests (brief.md:119-121); existing
--- `private`/`system` rows are unaffected by listing_state under the read
--- predicate either way. 'draft' is therefore a purely NEW state that no existing
--- row can be in.
+-- SPLIT INTO THREE SINGLE-DDL FILES (add-column / backfill / reindex). MySQL
+-- implicitly commits every DDL, so the sql-migrate transaction protects nothing:
+-- a single file that ran DDL → long UPDATE → DDL would, on a transient failure of
+-- the UPDATE (innodb_lock_wait_timeout during a rolling deploy, an operator or
+-- pt-kill killing a long query), leave the ADD COLUMN committed but the migration
+-- record unwritten — the next boot replays the file and dies on ERROR 1060
+-- (duplicate column), so the service cannot start until a human edits
+-- gorp_migrations by hand. Each statement now lives in its own file so a failure
+-- leaves a whole, re-appliable step behind. Same hazard 20260722-00:3-6 reasons
+-- about; this restores that discipline.
 --
--- Soft-deleted rows are deliberately left 'draft' so an accidental undelete does
--- not republish a plugin the org had already lost sight of.
-UPDATE `plugins` SET `listing_state` = 'published' WHERE `deleted_at` IS NULL;
-
--- The catalog read predicate now filters (visibility, space_id, listing_state)
--- together, so listing_state joins the existing scope index rather than getting
--- one of its own.
+-- ADD COLUMN with DEFAULT 'published' + ALGORITHM=INSTANT is a metadata-only
+-- change that touches ZERO rows on 8.0.29+: an instant-add column reads its
+-- default for every pre-existing row without rewriting any of them. That default
+-- grandfathers every live row to 'published' — the reach it had under the
+-- pre-listing_state rules (existing `space` rows were listed and are treated as
+-- approved, brief.md:119-121) — at no row cost. 20260902-01 then flips the column
+-- default to the fail-closed 'draft' for future inserts; SET DEFAULT does not
+-- rewrite the instant-add default, so the two defaults coexist and the grandfather
+-- value survives. The soft-deleted correction also lives in 20260902-01.
+--
+-- ALGORITHM=INSTANT makes the "only instant from 8.0.29" hazard LOUD: `AFTER
+-- visibility` silently degrades to a full clustered-index rebuild under the
+-- migration lock on 8.0.12–8.0.28. An explicit clause turns that into an error an
+-- operator sees rather than a surprise table rebuild on the largest table.
 ALTER TABLE `plugins`
-  DROP INDEX `idx_plugins_scope_category_created`,
-  ADD INDEX `idx_plugins_scope_category_created` (`visibility`, `space_id`, `listing_state`, `category_id`, `created_at`);
-
--- Backs the latest-review-per-plugin lookup that derives the displayed status on
--- the "my publishes" list. The pending EXISTS is already served by
--- idx_review_plugin_status_version; this one serves the ORDER BY submitted_at.
-ALTER TABLE `plugin_review_requests`
-  ADD INDEX `idx_review_plugin_submitted` (`plugin_id`, `submitted_at`);
+  ADD COLUMN `listing_state` ENUM('draft','published','delisted') NOT NULL DEFAULT 'published'
+    COMMENT 'Listing lifecycle, independent of review state. Never add review values.'
+    AFTER `visibility`,
+  ALGORITHM=INSTANT;
 
 -- +migrate Down
-ALTER TABLE `plugin_review_requests` DROP INDEX `idx_review_plugin_submitted`;
-ALTER TABLE `plugins`
-  DROP INDEX `idx_plugins_scope_category_created`,
-  ADD INDEX `idx_plugins_scope_category_created` (`visibility`, `space_id`, `category_id`, `created_at`);
 ALTER TABLE `plugins` DROP COLUMN `listing_state`;

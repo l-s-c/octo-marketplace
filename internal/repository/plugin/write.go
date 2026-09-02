@@ -31,7 +31,9 @@ type Mutation struct {
 	// ResetListingToDraft un-lists the plugin as part of this save. The ONLY
 	// caller is Service.update, for a published row whose declared visibility
 	// CHANGED (not merely widened); see the comment at the UPDATE statement for
-	// why that case cannot leave the row published.
+	// why that case cannot leave the row published. When EnforceListingGate is
+	// set this flag is IGNORED and the reset is re-derived from the locked row
+	// instead — the service value is a hint the locked truth overrides.
 	ResetListingToDraft bool
 	// RefusePendingReview aborts the update with ErrReviewPending if an open
 	// review request exists on the plugin, checked under the plugin row's lock.
@@ -42,6 +44,16 @@ type Mutation struct {
 	// intent (or, on a private target, strand the row). Re-checking under lock here
 	// closes the window in the same idiom PublishPlugin uses.
 	RefusePendingReview bool
+	// EnforceListingGate makes Repo.Update re-derive the two listing decisions
+	// from the plugin row it LOCKS rather than trusting the service's unlocked
+	// read: (a) a locked (published AND space) row is refused with
+	// ErrListedRequiresReview, and (b) ResetListingToDraft is recomputed as
+	// "locked row is published AND the declared visibility differs from the
+	// locked visibility". Set by Service.update for every non-admin caller. This
+	// closes the window where an approval (or a publish) commits between the
+	// service's read and this write and turns an edit that looked legal on the
+	// stale value into unreviewed content on a live org row (or a gate bypass).
+	EnforceListingGate bool
 }
 
 // RelationSync reports the outcome of synchronizing a Plugin's one-level
@@ -520,6 +532,31 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 			return nil, ErrReviewPending
 		}
 	}
+	// Re-derive the two listing decisions from the row this transaction LOCKS,
+	// not from the service's earlier unlocked read. An approval or a publish can
+	// commit between that read and this lock; deciding from `before` (the locked
+	// row) instead of the stale value closes the window in which an edit that
+	// looked legal turns into unreviewed content on a live org row, or a widening
+	// that overlaps a publish lists a row that never had a review request.
+	//
+	//   (a) A locked (published AND space) row cannot be edited through this path
+	//       at all — it must go through the review workflow. This is the same
+	//       gate the service applies from its unlocked read (ErrListedRequiresReview);
+	//       restating it here makes the locked row authoritative.
+	//   (b) Un-list-on-widen: a published row whose declared visibility differs
+	//       from the locked visibility drops to draft. Recomputed here so a
+	//       publish that committed after the service's read (turning a draft row
+	//       published under the lock) still un-lists on the same save.
+	//
+	// The service passes EnforceListingGate for every non-admin caller; the exempt
+	// system admin keeps the platform-operator escape hatch and is not gated here.
+	resetListing := m.ResetListingToDraft
+	if m.EnforceListingGate {
+		if before.ListingState == model.PluginListingStatePublished && before.Visibility == model.PluginVisibilitySpace {
+			return nil, ErrListedRequiresReview
+		}
+		resetListing = before.ListingState == model.PluginListingStatePublished && m.Plugin.Visibility != before.Visibility
+	}
 	now := r.now()
 	p := m.Plugin
 	if p.Type != before.Type {
@@ -560,9 +597,11 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 	// visibility against the persisted one. Its condition is any CHANGE, not a
 	// widening: for a tenant the only change reaching here is the widening one
 	// (published+space is refused earlier), and for the exempt system admin a
-	// narrowing drops the row to draft too, which is the safe direction.
+	// narrowing drops the row to draft too, which is the safe direction. For a
+	// non-admin caller the decision above (resetListing) overrides the service's
+	// hint with the value derived from the LOCKED row.
 	listingReset := ``
-	if m.ResetListingToDraft {
+	if resetListing {
 		listingReset = `listing_state='draft',`
 	}
 	updArgs := append([]any{p.Name, p.Type, p.CategoryID, string(p.Tags), p.Publisher, p.Visibility, p.Icon, p.ToolCount, string(p.Manifest), string(p.Package), jsonColumn(p.AttachmentKeys), p.ManifestHash, p.PluginHash, p.Status, now}, updTail...)

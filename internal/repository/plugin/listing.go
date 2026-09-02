@@ -219,6 +219,14 @@ func (r *Repo) DelistPlugin(ctx context.Context, scope Scope, p DelistParams) (*
 		return nil, err
 	}
 
+	// Take the whole container graph down with the top row. A delisted parent
+	// whose embedded children stay published leaves their full content org-readable
+	// and installable behind the takedown — see demoteEmbeddedChildren. The
+	// children keep their `space` visibility so a later re-approve re-promotes them.
+	if err := demoteEmbeddedChildren(ctx, tx, p.PluginID, current.Type, scope.SpaceID, now); err != nil {
+		return nil, err
+	}
+
 	// A pending request on a plugin that just left the market has nothing left to
 	// decide, and leaving it open would let an approval silently relist the plugin
 	// behind the admin's back. Canceling also releases the single-pending slot (the

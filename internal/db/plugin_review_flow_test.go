@@ -365,6 +365,53 @@ func TestApproveFlipsVisibilityAndAppliesTheFrozenSnapshot(t *testing.T) {
 	}
 }
 
+// TestApproveReDerivesDenormalizedNameAndTagsFromFrozenManifest pins P1-3: the
+// denormalized plugin_name/tags_json columns must be re-derived from the frozen
+// manifest at approval, not left at whatever the author edited the live row to
+// after submitting. While a plugin is still an unlisted draft the ordinary write
+// path lets the author rename/retag it; that edit is unreviewed, so approval must
+// overwrite the row's name/tags with the reviewed manifest's values. Otherwise
+// the row is self-inconsistent: reviewed manifest content under an unreviewed
+// display name.
+func TestApproveReDerivesDenormalizedNameAndTagsFromFrozenManifest(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private", currentVersionID: "ver-1", currentVersion: "0.9.0"})
+
+	req := newRequest("plugin-1", "1.0.0")
+	frozenManifest := `{"plugin_name":"Reviewed Name","labels":["reviewed"]}`
+	if err := repo.InsertReviewRequest(ctx, tenantScope(), req, snapshotOf(frozenManifest, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	// After submitting, the author renames and retags the live draft. Neither the
+	// name nor the tags were reviewed, so neither may survive approval.
+	if _, err := database.Exec(`UPDATE plugins SET plugin_name='Sneaky Rename', tags_json=CAST('["sneaky"]' AS JSON) WHERE plugin_id='plugin-1'`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := repo.ApproveReview(ctx, reviewerScope(), pluginrepo.ApproveReviewParams{
+		ReviewID: req.ID, ReviewerUID: "admin-1", ReviewerName: "Adam", RequestID: "req-1",
+	}); err != nil {
+		t.Fatalf("ApproveReview: %v", err)
+	}
+
+	var name, tags string
+	if err := database.QueryRow(`SELECT plugin_name, tags_json FROM plugins WHERE plugin_id='plugin-1'`).Scan(&name, &tags); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if name != "Reviewed Name" {
+		t.Errorf("plugin_name = %q, want the frozen manifest's %q (post-submit rename leaked)", name, "Reviewed Name")
+	}
+	var gotTags []string
+	if err := json.Unmarshal([]byte(tags), &gotTags); err != nil {
+		t.Fatalf("decode tags_json %q: %v", tags, err)
+	}
+	if len(gotTags) != 1 || gotTags[0] != "reviewed" {
+		t.Errorf("tags_json = %q, want the frozen manifest's labels [\"reviewed\"] (post-submit retag leaked)", tags)
+	}
+}
+
 // The container case: an expert_team whose membership changed between submit and
 // approve must ship the FROZEN members. Freezing only the documents ships the
 // reviewed manifest next to the live membership and records zero relations on the

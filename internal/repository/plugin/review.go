@@ -399,6 +399,23 @@ func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewPa
 		now = r.now()
 	}
 
+	// Re-derive the reviewed display name and tags from the FROZEN manifest, not
+	// from the live plugin row. The submit path canonicalizes the manifest against
+	// the row's name/tags at freeze time, so `name` and `labels` in the snapshot
+	// ARE the reviewed values. The live row's denormalized plugin_name/tags_json,
+	// however, are still editable while the plugin is an unlisted draft (the
+	// listed-requires-review gate only fires once the row is published+space), so
+	// an author can rename or retag between submit and approve. Writing only
+	// manifest_json here would leave the row self-inconsistent: reviewed content
+	// under an unreviewed name/tag. Stamp the frozen name/tags alongside the
+	// content so the row the approval commits matches exactly what was reviewed.
+	//
+	// icon, category_id and publisher are deliberately NOT re-derived: they are
+	// market metadata the review never froze (freezeSubmission takes them from the
+	// live row on purpose — "reviews CONTENT, not market metadata"), so there is no
+	// reviewed value to restore and the live row's is authoritative.
+	frozenName, frozenTags := manifestNameAndTags(manifest)
+
 	var frozen []model.PluginRelation
 	if len(relationBytes) > 0 {
 		if err := json.Unmarshal(relationBytes, &frozen); err != nil {
@@ -436,19 +453,19 @@ func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewPa
 	isFirst := !(current.Visibility == model.PluginVisibilitySpace && current.ListingState == model.PluginListingStatePublished)
 	if isFirst {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE plugins SET manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,visibility=?,listing_state=?,updated_at=?
+			`UPDATE plugins SET plugin_name=?,tags_json=?,manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,visibility=?,listing_state=?,updated_at=?
 			  WHERE plugin_id=? AND space_id=? AND deleted_at IS NULL
 			    AND NOT (visibility=? AND listing_state=?)`,
-			string(manifest), string(pkg), jsonColumn(attKeys), manifestHash, pluginHash,
+			frozenName, frozenTags, string(manifest), string(pkg), jsonColumn(attKeys), manifestHash, pluginHash,
 			string(model.PluginVisibilitySpace), string(model.PluginListingStatePublished), now, pluginID, scope.SpaceID,
 			string(model.PluginVisibilitySpace), string(model.PluginListingStatePublished)); err != nil {
 			return nil, wrapped("apply approved snapshot", err)
 		}
 	} else {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE plugins SET manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,updated_at=?
+			`UPDATE plugins SET plugin_name=?,tags_json=?,manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,updated_at=?
 			  WHERE plugin_id=? AND space_id=? AND deleted_at IS NULL`,
-			string(manifest), string(pkg), jsonColumn(attKeys), manifestHash, pluginHash, now, pluginID, scope.SpaceID); err != nil {
+			frozenName, frozenTags, string(manifest), string(pkg), jsonColumn(attKeys), manifestHash, pluginHash, now, pluginID, scope.SpaceID); err != nil {
 			return nil, wrapped("apply approved snapshot", err)
 		}
 	}
@@ -486,6 +503,8 @@ func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewPa
 	// request), so version history resolves correctly for every approved snapshot
 	// rather than inheriting the live row's stale keys.
 	snapshotPlugin := *current
+	snapshotPlugin.Name = frozenName
+	snapshotPlugin.Tags = frozenTags
 	snapshotPlugin.Manifest = manifest
 	snapshotPlugin.Package = pkg
 	snapshotPlugin.AttachmentKeys = attKeys
@@ -583,6 +602,34 @@ func isJSONNullOrEmpty(raw json.RawMessage) bool {
 	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
 }
 
+// manifestNameAndTags extracts the reviewed display name and tags from a frozen
+// manifest so ApproveReview can stamp the denormalized plugin_name/tags_json
+// columns from the snapshot rather than the live row. The submit path
+// canonicalizes the manifest against the row's name/tags==labels invariant, so
+// `name` and `labels` here are exactly the reviewed values.
+//
+// tags_json mirrors the manifest `labels` array; a manifest with no labels
+// yields the empty JSON array `[]`, matching the column's non-null shape the
+// write path also produces (normalizeTags). A malformed manifest — which cannot
+// occur for a snapshot the submit path already canonicalized — falls back to an
+// empty name and `[]`, never a nil column that would violate the array check.
+func manifestNameAndTags(manifest json.RawMessage) (string, json.RawMessage) {
+	var doc struct {
+		PluginName string   `json:"plugin_name"`
+		Labels     []string `json:"labels"`
+	}
+	_ = json.Unmarshal(manifest, &doc)
+	labels := doc.Labels
+	if labels == nil {
+		labels = []string{}
+	}
+	tags, err := json.Marshal(labels)
+	if err != nil {
+		tags = []byte("[]")
+	}
+	return doc.PluginName, json.RawMessage(tags)
+}
+
 // promoteEmbeddedChildren lists an approved container's embedded rows alongside
 // the top. It is deliberately narrow: only is_embedded rows in the same Space
 // that are not already listed, so a standalone catalog skill merely referenced by
@@ -605,6 +652,38 @@ func promoteEmbeddedChildren(ctx context.Context, tx *sql.Tx, topID string, topT
 			string(model.PluginVisibilitySpace), string(model.PluginListingStatePublished), now,
 			id, spaceID, string(model.PluginListingStatePublished)); err != nil {
 			return wrapped("promote embedded child", err)
+		}
+	}
+	return nil
+}
+
+// demoteEmbeddedChildren is the inverse of promoteEmbeddedChildren: when a
+// container is delisted, its embedded rows must leave the market with it.
+// Without this a delisted expert/team's bundled skills and member experts stay
+// listing_state='published' — visibilitySQL admits a published `space` row to
+// any Space member — so after the takedown a colleague could still GET, download
+// and (Install having no is_embedded refusal until this PR) install the child's
+// full content, even though the parent that declared it is hidden. The audience
+// does not widen (the children were org-readable while the parent was listed),
+// but the moderation action was incomplete: delist is the only takedown control,
+// so it must take the whole graph down.
+//
+// The child's declared visibility (`space`) is left intact so a later re-approve
+// re-promotes it exactly the way promoteEmbeddedChildren does. Narrow by the same
+// predicate as promote — is_embedded, same Space, currently published — so a
+// standalone catalog target merely referenced by the container is never touched.
+func demoteEmbeddedChildren(ctx context.Context, tx *sql.Tx, topID string, topType model.PluginType, spaceID string, now interface{}) error {
+	childIDs, err := collectEmbeddedChildren(ctx, tx, topID, topType)
+	if err != nil {
+		return err
+	}
+	for _, id := range childIDs {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE plugins SET listing_state=?,updated_at=?
+			  WHERE plugin_id=? AND space_id=? AND is_embedded=1 AND listing_state=? AND deleted_at IS NULL`,
+			string(model.PluginListingStateDelisted), now,
+			id, spaceID, string(model.PluginListingStatePublished)); err != nil {
+			return wrapped("demote embedded child", err)
 		}
 	}
 	return nil

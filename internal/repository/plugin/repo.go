@@ -19,6 +19,14 @@ var (
 	// the plugin row lock, so it closes the window the service's own unlocked
 	// pre-check leaves open. The service maps it back to its own ErrReviewPending.
 	ErrReviewPending = errors.New("a review request is pending on this plugin")
+	// ErrListedRequiresReview indicates an ordinary edit refused because the
+	// plugin row is listed to the organization (published AND space). Reported
+	// from inside Repo.Update's transaction, which holds the plugin row lock, so
+	// it re-derives the gate from the LOCKED row rather than the service's earlier
+	// unlocked read — closing the window in which an approval or publish commits
+	// between the two and turns a stale-legal edit into unreviewed content on a
+	// live org row. The service maps it back to its own ErrListedRequiresReview.
+	ErrListedRequiresReview = errors.New("a listed plugin must go through review")
 	// ErrInvalidRelation indicates a relation whose source/target types are incompatible.
 	ErrInvalidRelation = errors.New("invalid plugin relation")
 	// ErrInvalidCategory indicates a missing, inactive, or type-incompatible category.
