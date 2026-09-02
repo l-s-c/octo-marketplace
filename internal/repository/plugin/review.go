@@ -81,18 +81,23 @@ func (r *Repo) InsertReviewRequest(ctx context.Context, scope Scope, req *model.
 	if err != nil {
 		return err
 	}
-	// "First listing" means the plugin is not yet visible to the org — which is
-	// exactly visibility == private, and nothing else.
+	// "First listing" means the plugin is not yet listed — which is exactly
+	// listing_state != published, and nothing else.
 	//
-	// This deliberately does NOT look at current_version_id. A private draft
-	// normally HAS one: main's import path snapshots a version as part of the
-	// upload. Gating on "has no version" classifies every real upload as an
-	// upgrade, and the isFirst branch of ApproveReview — the only code that flips
-	// visibility to space — then never runs: the request reaches `approved`, a
-	// version is minted, and the plugin stays invisible forever with no error
-	// anywhere. A fixture built through the plugin-write API hides this, because
-	// that path also leaves current_version_id NULL.
-	if current.Visibility == model.PluginVisibilityPrivate {
+	// This used to test `visibility == private`, which was the same thing back when
+	// private doubled as the draft state. It no longer is: an author now declares
+	// `space` visibility on the draft itself, so a first listing arrives here
+	// already carrying visibility=space. Keeping the old test would classify every
+	// first listing as an upgrade, the isFirst branch of ApproveReview would never
+	// run, and the plugin would reach `approved` with a minted version and stay
+	// invisible forever with no error anywhere.
+	//
+	// It still deliberately does NOT look at current_version_id. A draft normally
+	// HAS one: the import path snapshots a version as part of the upload. Gating on
+	// "has no version" reintroduces the same silent failure, and a fixture built
+	// through the plugin-write API hides it because that path also leaves
+	// current_version_id NULL.
+	if current.ListingState != model.PluginListingStatePublished {
 		req.Kind = model.ReviewKindFirst
 	} else {
 		req.Kind = model.ReviewKindUpgrade
@@ -172,11 +177,12 @@ func (r *Repo) InsertReviewRequest(ctx context.Context, scope Scope, req *model.
 // covers rows that were Space-visible before this feature existed (no
 // grandfathering backfill).
 //
-// A private draft's current_version is a draft label, not a published one, so it
-// is deliberately excluded: a first listing at the import default "1.0.0" is the
-// normal case and must not be refused. Labels from rejected/canceled requests are
-// likewise free to reuse — that is the whole point of keeping the snapshot off
-// plugin_versions.
+// A DRAFT's current_version is a draft label, not a published one, so it is
+// deliberately excluded: a first listing at the import default "1.0.0" is the
+// normal case and must not be refused. A DELISTED plugin's current_version is
+// included — the org already saw that label, so a republish must not reuse it.
+// Labels from rejected/canceled requests are likewise free to reuse — that is the
+// whole point of keeping the snapshot off plugin_versions.
 func publishedVersionLabels(ctx context.Context, tx *sql.Tx, pluginID string, current *model.Plugin) (map[string]struct{}, error) {
 	out := map[string]struct{}{}
 	rows, err := tx.QueryContext(ctx,
@@ -196,7 +202,7 @@ func publishedVersionLabels(ctx context.Context, tx *sql.Tx, pluginID string, cu
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if current != nil && current.Visibility != model.PluginVisibilityPrivate &&
+	if current != nil && current.ListingState != model.PluginListingStateDraft &&
 		current.CurrentVersion != nil && *current.CurrentVersion != "" {
 		out[*current.CurrentVersion] = struct{}{}
 	}
@@ -386,13 +392,19 @@ func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewPa
 		return nil, err
 	}
 
-	isFirst := model.ReviewKind(kind) == model.ReviewKindFirst && current.Visibility == model.PluginVisibilityPrivate
+	// A first listing is what turns a draft into a listed plugin, so it stamps
+	// listing_state alongside the frozen content. visibility is stamped too, but
+	// only as a defensive normalization: under the current model the author already
+	// declared `space` on the draft, so this is a no-op for every request submitted
+	// after listing_state shipped. It stays because a request that was already
+	// pending across the upgrade may still carry the old private-draft shape.
+	isFirst := model.ReviewKind(kind) == model.ReviewKindFirst && current.ListingState != model.PluginListingStatePublished
 	if isFirst {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE plugins SET manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,visibility=?,updated_at=?
+			`UPDATE plugins SET manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,visibility=?,listing_state=?,updated_at=?
 			  WHERE plugin_id=? AND space_id=? AND deleted_at IS NULL`,
 			string(manifest), string(pkg), jsonColumn(attKeys), manifestHash, pluginHash,
-			string(model.PluginVisibilitySpace), now, pluginID, scope.SpaceID); err != nil {
+			string(model.PluginVisibilitySpace), string(model.PluginListingStatePublished), now, pluginID, scope.SpaceID); err != nil {
 			return nil, wrapped("apply approved snapshot", err)
 		}
 	} else {
@@ -534,10 +546,16 @@ func isJSONNullOrEmpty(raw json.RawMessage) bool {
 	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
 }
 
-// promoteEmbeddedChildren lifts an approved container's private embedded rows to
-// Space visibility alongside the top. It is deliberately narrow: only
-// is_embedded rows in the same Space that are still `private`, so a standalone
-// catalog skill merely referenced by the container is never touched.
+// promoteEmbeddedChildren lists an approved container's embedded rows alongside
+// the top. It is deliberately narrow: only is_embedded rows in the same Space
+// that are not already listed, so a standalone catalog skill merely referenced by
+// the container is never touched.
+//
+// listing_state must travel with visibility here. A child left unpublished under
+// a published top is invisible to everyone but the owner, so resolveInstallDetail
+// resolves fewer visible relation targets than CountDeclaredRelations and every
+// non-owner install of the container fails with ErrDependencyHidden — silent until
+// somebody other than the author tries to install it.
 func promoteEmbeddedChildren(ctx context.Context, tx *sql.Tx, topID string, topType model.PluginType, spaceID string, now interface{}) error {
 	childIDs, err := collectEmbeddedChildren(ctx, tx, topID, topType)
 	if err != nil {
@@ -545,9 +563,10 @@ func promoteEmbeddedChildren(ctx context.Context, tx *sql.Tx, topID string, topT
 	}
 	for _, id := range childIDs {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE plugins SET visibility=?,updated_at=?
-			  WHERE plugin_id=? AND space_id=? AND is_embedded=1 AND visibility=? AND deleted_at IS NULL`,
-			string(model.PluginVisibilitySpace), now, id, spaceID, string(model.PluginVisibilityPrivate)); err != nil {
+			`UPDATE plugins SET visibility=?,listing_state=?,updated_at=?
+			  WHERE plugin_id=? AND space_id=? AND is_embedded=1 AND listing_state<>? AND deleted_at IS NULL`,
+			string(model.PluginVisibilitySpace), string(model.PluginListingStatePublished), now,
+			id, spaceID, string(model.PluginListingStatePublished)); err != nil {
 			return wrapped("promote embedded child", err)
 		}
 	}

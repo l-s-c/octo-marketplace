@@ -724,16 +724,36 @@ func reviewValidDocs(name string) (manifest, pkg string) {
 }
 
 // For an already-listed plugin the live row IS what the org reads, so freezing it
-// would make the review a formality over content that already shipped.
+// would make the review a formality over content that already shipped. Keyed on
+// listing_state, not visibility: a space-intent DRAFT also has visibility=space
+// and must still be allowed to submit contentlessly.
 func TestSubmitReviewRequiresContentForAnUpgrade(t *testing.T) {
 	store, svc := reviewFixture(t)
 	store.plugins["plugin-1"].Visibility = model.PluginVisibilitySpace
+	store.plugins["plugin-1"].ListingState = model.PluginListingStatePublished
 	_, err := svc.SubmitReview(context.Background(), reviewApplicant, ReviewSubmitParams{PluginID: "plugin-1", Version: "2.0.0"})
 	if !errors.Is(err, ErrReviewContentRequired) {
 		t.Fatalf("error = %v, want ErrReviewContentRequired", err)
 	}
 	if store.review.insertReq != nil {
 		t.Error("a contentless upgrade reached the repository")
+	}
+}
+
+// TestSubmitReviewAllowsAContentlessSpaceIntentDraft is the twin of the test
+// above and the reason it had to be re-keyed: an author who declares 仅本组织可见
+// on a draft submits a row that already carries visibility=space. Under the old
+// visibility test that submit was refused as "a listed plugin with no content",
+// which is every first org listing.
+func TestSubmitReviewAllowsAContentlessSpaceIntentDraft(t *testing.T) {
+	store, svc := reviewFixture(t)
+	store.plugins["plugin-1"].Visibility = model.PluginVisibilitySpace
+	store.plugins["plugin-1"].ListingState = model.PluginListingStateDraft
+	if _, err := svc.SubmitReview(context.Background(), reviewApplicant, ReviewSubmitParams{PluginID: "plugin-1", Version: "1.0.0"}); err != nil {
+		t.Fatalf("a space-intent draft could not submit its own row: %v", err)
+	}
+	if store.review.insertSnap.PluginHash != "sha256:p" {
+		t.Fatalf("snapshot = %+v; a contentless first listing snapshots the draft row", store.review.insertSnap)
 	}
 }
 

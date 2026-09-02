@@ -143,6 +143,17 @@ func buildListQuery(scope Scope, f ListFilter) (string, string, []any) {
 	if f.Mine {
 		where += ` AND p.owner_uid=? AND p.space_id=?`
 		args = append(args, scope.CallerUID, scope.SpaceID)
+	} else if !f.AllSpaces {
+		// The marketplace GRID shows listed plugins only — including to the author.
+		// That exclusion is what distinguishes a private draft from a published
+		// private plugin; without it "save as draft" and "publish" would look
+		// identical to the person who just pressed one of them.
+		//
+		// This is a LIST rule, not a scope rule: visibilitySQL deliberately still
+		// lets an owner READ their own draft (detail, versions, edit), and Mine —
+		// which backs 我的发布 — deliberately shows every state. The admin listing
+		// (AllSpaces) manages rows in all states and is exempt.
+		where += ` AND p.listing_state='published'`
 	}
 	return from, where, args
 }

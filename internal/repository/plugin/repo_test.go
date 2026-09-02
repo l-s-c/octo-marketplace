@@ -18,7 +18,7 @@ func TestGetExplicitlyScopesCallerAndSpace(t *testing.T) {
 	}
 	defer db.Close()
 	repo := New(db)
-	query := `SELECT .* FROM plugins p\s+WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL AND \(p.visibility IN \('public','system'\) OR \(p.space_id = \? AND \(p.visibility = 'space' OR p.owner_uid = \?\)\)\)`
+	query := `SELECT .* FROM plugins p\s+WHERE p.plugin_id=\? AND p.status=1 AND p.deleted_at IS NULL AND \(p.visibility IN \('public','system'\) OR \(p.space_id = \? AND \(\(p.visibility = 'space' AND p.listing_state = 'published'\) OR p.owner_uid = \?\)\)\)`
 	mock.ExpectQuery(query).WithArgs("plugin-a", "space-a", "caller-a").WillReturnRows(sqlmock.NewRows(pluginTestColumns()))
 	_, err = repo.Get(context.Background(), Scope{CallerUID: "caller-a", SpaceID: "space-a"}, "plugin-a")
 	if !errors.Is(err, ErrNotFound) {

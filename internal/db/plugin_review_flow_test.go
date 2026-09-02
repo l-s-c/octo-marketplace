@@ -32,9 +32,14 @@ func reviewDB(t *testing.T) *sql.DB {
 }
 
 type seedPlugin struct {
-	id             string
-	typ            string
-	visibility     string
+	id         string
+	typ        string
+	visibility string
+	// listingState defaults to the pre-listing_state equivalent of `visibility`:
+	// `private` meant "draft", anything else meant "listed". Existing tests
+	// therefore keep their original meaning without restating it. Tests about the
+	// new axis — a space-INTENT draft, a delisted row — set it explicitly.
+	listingState   string
 	currentVersion string
 	// currentVersionID mimics the state a real import leaves behind: a private
 	// draft that ALREADY carries a version snapshot.
@@ -63,6 +68,13 @@ func seed(t *testing.T, database *sql.DB, p seedPlugin) {
 	if p.pkg == "" {
 		p.pkg = `{"attachments":[]}`
 	}
+	if p.listingState == "" {
+		if p.visibility == "private" {
+			p.listingState = "draft"
+		} else {
+			p.listingState = "published"
+		}
+	}
 	var versionID any
 	if p.currentVersionID != "" {
 		versionID = p.currentVersionID
@@ -72,16 +84,16 @@ func seed(t *testing.T, database *sql.DB, p seedPlugin) {
 		current = p.currentVersion
 	}
 	if _, err := database.Exec(`INSERT INTO plugins
-		(plugin_id, plugin_name, plugin_type, is_embedded, tags_json, owner_uid, space_id, visibility,
+		(plugin_id, plugin_name, plugin_type, is_embedded, tags_json, owner_uid, space_id, visibility, listing_state,
 		 manifest_json, plugin_json, manifest_hash, plugin_hash, current_version_id, current_version,
 		 created_at, updated_at)
-		VALUES (?, 'Fixture', ?, ?, JSON_ARRAY(), ?, ?, ?, CAST(? AS JSON), CAST(? AS JSON),
+		VALUES (?, 'Fixture', ?, ?, JSON_ARRAY(), ?, ?, ?, ?, CAST(? AS JSON), CAST(? AS JSON),
 		        REPEAT('a',71), REPEAT('b',71), ?, ?, NOW(3), NOW(3))`,
-		p.id, p.typ, p.embedded, p.owner, p.space, p.visibility, p.manifest, p.pkg, versionID, current); err != nil {
+		p.id, p.typ, p.embedded, p.owner, p.space, p.visibility, p.listingState, p.manifest, p.pkg, versionID, current); err != nil {
 		t.Fatalf("seed %s: %v", p.id, err)
 	}
-	// Every create attaches a visible default placement; the review gate is
-	// visibility only, so the fixture must carry one too.
+	// Every create attaches a visible default placement; the review gate never
+	// hides one, so the fixture must carry one too.
 	if _, err := database.Exec(`INSERT INTO plugin_placements
 		(placement_id, placement_code, plugin_id, visible, sort_order, created_at, updated_at)
 		VALUES (CONCAT('pl-', ?), 'default', ?, 1, 0, NOW(3), NOW(3))`, p.id, p.id); err != nil {
@@ -779,15 +791,20 @@ func indexOf(haystack, needle string) int {
 }
 
 // The end the whole feature exists for: before approval a colleague cannot see
-// the plugin in the market list, and after approval they can — while the author
-// can see it the entire time. Every other test in this file asserts the
-// visibility COLUMN; this one asserts the observable market behaviour the column
-// is supposed to produce, through the same List query the API serves.
+// the plugin in the market list, and after approval they can. Every other test in
+// this file asserts the visibility COLUMN; this one asserts the observable market
+// behaviour the column is supposed to produce, through the same List query the API
+// serves.
+//
+// The author's own view is asserted on BOTH surfaces, because they now differ: an
+// unpublished draft is absent from the market grid even for its owner (that
+// absence is what distinguishes "saved a draft" from "published"), but present in
+// the mode=mine listing that backs 我的发布. Approval adds it to the grid.
 func TestApprovalIsWhatMakesAPluginVisibleToTheOrg(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 	ctx := context.Background()
-	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private", currentVersionID: "ver-1", currentVersion: "0.9.0"})
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft", currentVersionID: "ver-1", currentVersion: "0.9.0"})
 
 	author := tenantScope()
 	colleague := pluginrepo.Scope{CallerUID: "user-2", SpaceID: "space-a"}
@@ -806,12 +823,33 @@ func TestApprovalIsWhatMakesAPluginVisibleToTheOrg(t *testing.T) {
 		}
 		return false
 	}
+	// mineListing is the 我的发布 query: the same predicate plus an owner narrowing,
+	// and deliberately WITHOUT the listed-only grid rule.
+	inMineListing := func(t *testing.T, sc pluginrepo.Scope) bool {
+		t.Helper()
+		items, _, err := repo.List(ctx, sc, pluginrepo.ListFilter{PlacementCode: "default", Mine: true})
+		if err != nil {
+			t.Fatalf("List(mine): %v", err)
+		}
+		for _, item := range items {
+			if item.ID == "plugin-1" {
+				return true
+			}
+		}
+		return false
+	}
 
-	if !visibleTo(t, author) {
-		t.Fatal("the author cannot see their own private draft; the draft is unusable")
+	if visibleTo(t, author) {
+		t.Fatal("an unpublished draft is in the market grid; saving a draft and publishing look the same")
+	}
+	if !inMineListing(t, author) {
+		t.Fatal("the author cannot see their own draft in 我的发布; the draft is unreachable")
 	}
 	if visibleTo(t, colleague) {
-		t.Fatal("a private draft is already visible to the org; the review gate is open")
+		t.Fatal("a space-intent draft is already visible to the org; the review gate is open")
+	}
+	if inMineListing(t, colleague) {
+		t.Fatal("another member's mine listing returned a draft they do not own")
 	}
 
 	req := newRequest("plugin-1", "1.0.0")

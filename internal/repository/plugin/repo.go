@@ -49,7 +49,25 @@ func New(db *sql.DB) *Repo {
 	return &Repo{db: db, now: func() time.Time { return time.Now().UTC() }, id: id.New}
 }
 
-const visibilitySQL = `(p.visibility IN ('public','system') OR (p.space_id = ? AND (p.visibility = 'space' OR p.owner_uid = ?)))`
+// visibilitySQL is the single catalog-read predicate. Eight read sites and one
+// write site (lockRelationTargets) embed it, so it is the one place a scope leak
+// can be fixed — or introduced.
+//
+// listing_state is checked ONLY inside the `space` disjunct. Three properties are
+// load-bearing:
+//
+//  1. The owner disjunct is deliberately NOT gated on listing_state. The author
+//     must be able to read their own draft in order to edit and publish it, and
+//     "我的插件" runs this same query. Excluding a draft from the market GRID is a
+//     separate, list-only concern (buildListQuery), not a scope rule.
+//  2. 'published' is a LITERAL, not a placeholder, so every call site keeps its
+//     existing argument list unchanged.
+//  3. The public/system disjunct is untouched. A `system` row is admin-owned,
+//     reaches every Space and has no per-Space listing lifecycle; gating it would
+//     make every admin-created connector and global skill vanish the moment a
+//     write path forgot to stamp 'published'. A future 全平台可见 tenant flow would
+//     need this extended — it is not extended today, on purpose.
+const visibilitySQL = `(p.visibility IN ('public','system') OR (p.space_id = ? AND ((p.visibility = 'space' AND p.listing_state = 'published') OR p.owner_uid = ?)))`
 
 const pluginColumns = `p.plugin_id,p.plugin_name,p.plugin_type,p.is_embedded,p.category_id,p.tags_json,p.publisher,
  p.owner_uid,p.space_id,p.visibility,p.listing_state,p.creator_name,p.created_by_type,p.created_by_bot_uid,p.created_by_bot_name,p.icon,p.tool_count,

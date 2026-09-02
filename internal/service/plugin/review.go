@@ -285,7 +285,11 @@ func (s *Service) freezeSubmission(ctx context.Context, caller Caller, detail *D
 		// from the live row would reintroduce exactly the no-op above.
 		return pluginrepo.FrozenSnapshot{}, &ReviewFieldError{Field: "manifest_json", Reason: "manifest_and_package_required_together"}
 	}
-	if !hasManifest && plugin.Visibility != model.PluginVisibilityPrivate {
+	// A contentless submit snapshots the plugin row as it stands. That is honest
+	// for a plugin that is not yet listed — the draft row IS what the reviewer
+	// should see — but for an already-listed plugin it would freeze the LIVE
+	// content and produce an approval that changes nothing.
+	if !hasManifest && plugin.ListingState == model.PluginListingStatePublished {
 		return pluginrepo.FrozenSnapshot{}, ErrReviewContentRequired
 	}
 
