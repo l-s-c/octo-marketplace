@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	migrate "github.com/rubenv/sql-migrate"
 
@@ -937,4 +938,148 @@ func TestUpgradeSubmitLeavesTheListedRowUntouchedAndApproveSwapsIt(t *testing.T)
 	if !live["skill-new"] || live["skill-old"] {
 		t.Fatalf("membership after approve = %v, want exactly the reviewed graph", live)
 	}
+}
+
+// Approval promises "this plugin is in the market now", and the market list needs
+// TWO things to be true: the visibility predicate AND an INNER JOIN on a
+// `visible=1` default placement. Flipping visibility alone therefore lists nothing
+// for a row whose placement is hidden (publish-era `visible=0`) or missing
+// (pre-auto-placement legacy) — and the author cannot repair it by saving, because
+// a listed plugin's ordinary write path is 409 listed_requires_review. So approve
+// self-heals the placement forward, in the same transaction, and never hides one.
+func TestApproveSelfHealsTheDefaultPlacement(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+
+	for _, id := range []string{"plugin-hidden", "plugin-missing", "plugin-visible"} {
+		seed(t, database, seedPlugin{id: id, visibility: "private", currentVersionID: "ver-1", currentVersion: "0.9.0"})
+	}
+	// A publish-era row: the placement exists but was hidden when publish was removed.
+	if _, err := database.Exec(`UPDATE plugin_placements SET visible=0 WHERE plugin_id='plugin-hidden'`); err != nil {
+		t.Fatalf("hide placement: %v", err)
+	}
+	// A pre-auto-placement row: no placement at all. It carries a category, which
+	// the inserted placement must pick up.
+	if _, err := database.Exec(`DELETE FROM plugin_placements WHERE plugin_id='plugin-missing'`); err != nil {
+		t.Fatalf("drop placement: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE plugins SET category_id='cat-legacy' WHERE plugin_id='plugin-missing'`); err != nil {
+		t.Fatalf("set category: %v", err)
+	}
+	// The healthy row's placement must not be rewritten at all, so remember it.
+	var healthyBefore time.Time
+	if err := database.QueryRow(`SELECT updated_at FROM plugin_placements WHERE plugin_id='plugin-visible' AND placement_code='default'`).Scan(&healthyBefore); err != nil {
+		t.Fatalf("read healthy placement: %v", err)
+	}
+
+	approve := func(t *testing.T, pluginID string) {
+		t.Helper()
+		req := newRequest(pluginID, "1.0.0")
+		if err := repo.InsertReviewRequest(ctx, tenantScope(), req, snapshotOf(`{"plugin_name":"Frozen"}`, `{"attachments":[]}`, nil)); err != nil {
+			t.Fatalf("InsertReviewRequest: %v", err)
+		}
+		out, err := repo.ApproveReview(ctx, reviewerScope(), pluginrepo.ApproveReviewParams{
+			ReviewID: req.ID, ReviewerUID: "admin-1", ReviewerName: "Adam",
+		})
+		if err != nil {
+			t.Fatalf("ApproveReview: %v", err)
+		}
+		if out.Visibility != model.PluginVisibilitySpace {
+			t.Fatalf("visibility = %q, want space", out.Visibility)
+		}
+	}
+
+	// listedToTheOrg drives the REAL market list as a colleague: the only proof
+	// that matters is whether the placement JOIN lets the plugin through.
+	listedToTheOrg := func(t *testing.T, pluginID string) bool {
+		t.Helper()
+		items, _, err := repo.List(ctx, pluginrepo.Scope{CallerUID: "user-2", SpaceID: "space-a"},
+			pluginrepo.ListFilter{PlacementCode: "default"})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		for _, item := range items {
+			if item.ID == pluginID {
+				return true
+			}
+		}
+		return false
+	}
+
+	type placementRow struct {
+		rows     int
+		visible  bool
+		category sql.NullString
+		updated  time.Time
+	}
+	readPlacement := func(t *testing.T, pluginID string) placementRow {
+		t.Helper()
+		var out placementRow
+		if err := database.QueryRow(`SELECT COUNT(*) FROM plugin_placements WHERE plugin_id=? AND placement_code='default'`, pluginID).Scan(&out.rows); err != nil {
+			t.Fatalf("count placements: %v", err)
+		}
+		if out.rows == 0 {
+			return out
+		}
+		if err := database.QueryRow(`SELECT visible,category_id,updated_at FROM plugin_placements WHERE plugin_id=? AND placement_code='default'`, pluginID).
+			Scan(&out.visible, &out.category, &out.updated); err != nil {
+			t.Fatalf("read placement: %v", err)
+		}
+		return out
+	}
+
+	t.Run("a hidden default placement is flipped visible", func(t *testing.T) {
+		if listedToTheOrg(t, "plugin-hidden") {
+			t.Fatal("a private draft with a hidden placement is already listed")
+		}
+		approve(t, "plugin-hidden")
+		got := readPlacement(t, "plugin-hidden")
+		if got.rows != 1 {
+			t.Fatalf("placement rows = %d, want exactly 1", got.rows)
+		}
+		if !got.visible {
+			t.Error("approval left the default placement hidden; the plugin is approved but unlistable")
+		}
+		if !listedToTheOrg(t, "plugin-hidden") {
+			t.Error("the approved plugin is still filtered out of the market list")
+		}
+	})
+
+	t.Run("a missing default placement is inserted", func(t *testing.T) {
+		if got := readPlacement(t, "plugin-missing"); got.rows != 0 {
+			t.Fatalf("fixture has %d placements, want none", got.rows)
+		}
+		approve(t, "plugin-missing")
+		got := readPlacement(t, "plugin-missing")
+		if got.rows != 1 {
+			t.Fatalf("placement rows = %d, want exactly 1 inserted row", got.rows)
+		}
+		if !got.visible {
+			t.Error("the inserted placement is hidden")
+		}
+		if got.category.String != "cat-legacy" {
+			t.Errorf("inserted placement category = %q, want the plugin's own category", got.category.String)
+		}
+		if !listedToTheOrg(t, "plugin-missing") {
+			t.Error("the approved plugin is still filtered out of the market list")
+		}
+	})
+
+	t.Run("an already-visible placement is untouched", func(t *testing.T) {
+		approve(t, "plugin-visible")
+		got := readPlacement(t, "plugin-visible")
+		if got.rows != 1 {
+			t.Fatalf("placement rows = %d, want exactly 1 (no duplicate insert)", got.rows)
+		}
+		if !got.visible {
+			t.Fatal("the healthy placement was hidden by approval")
+		}
+		if !got.updated.Equal(healthyBefore) {
+			t.Errorf("updated_at moved from %v to %v; the healthy path must be a no-op", healthyBefore, got.updated)
+		}
+		if !listedToTheOrg(t, "plugin-visible") {
+			t.Error("the approved plugin is not in the market list")
+		}
+	})
 }

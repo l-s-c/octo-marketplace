@@ -369,8 +369,21 @@ func TestSystemAdminIsAlwaysAReviewer(t *testing.T) {
 
 func TestApproveReviewStampsWebDecisionSource(t *testing.T) {
 	store, svc := reviewFixture(t)
-	if _, err := svc.ApproveReview(context.Background(), reviewAdmin, "review-1"); err != nil {
+	space := "space-a"
+	// What the approve transaction commits: the plugin is now org-visible.
+	store.review.approved = &model.Plugin{
+		ID: "plugin-1", Name: "Demo", Type: model.PluginTypeSkill,
+		OwnerUID: "user-1", SpaceID: &space, Visibility: model.PluginVisibilitySpace,
+	}
+	out, err := svc.ApproveReview(context.Background(), reviewAdmin, "review-1")
+	if err != nil {
 		t.Fatal(err)
+	}
+	// The service must hand back the committed row as-is. Anything that re-derived
+	// or clamped visibility on the way out would report a listing the market does
+	// not have — the repository is the only authority on what approval wrote.
+	if out == nil || out.Visibility != model.PluginVisibilitySpace {
+		t.Fatalf("approved plugin = %+v, want visibility=space", out)
 	}
 	p := store.review.approveParams
 	if p.ReviewerUID != "admin-1" || p.ReviewerName != "Adam" {

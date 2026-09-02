@@ -396,3 +396,45 @@ func TestListedAndContentRequiredErrorsMapToStatusCodes(t *testing.T) {
 		}
 	})
 }
+
+// A review submit carries the FULL declared content since the upgrade amendment,
+// so its body cap must match /plugins/upsert's. The old 64 KiB cap dated from
+// when the submit was "a handful of short strings", and it silently froze upgrades:
+// `parse_task_id` only exists for skills, and a direct edit of a listed plugin is
+// 409, so a connector/expert/expert_team whose content crossed 64 KiB had no door
+// to a new version at all. A payload that upsert accepts must not 413 here.
+func TestSubmitReviewAcceptsAnUpsertSizedBody(t *testing.T) {
+	if maxReviewBodyBytes != maxBodyBytes {
+		t.Fatalf("review cap = %d, upsert cap = %d; the two paths carry the same content and must agree",
+			maxReviewBodyBytes, maxBodyBytes)
+	}
+	f := &fakeService{}
+	f.review.request = reviewRequestFixture()
+	// Comfortably past the retired 64 KiB cap, comfortably under the shared one.
+	body := `{"plugin_id":"plugin-1","version":"2.0.0","manifest_json":{"plugin_name":"Demo"},` +
+		`"plugin_json":{"attachments":[{"path":"SKILL.md","content_type":"raw","raw_content":"` +
+		strings.Repeat("x", 256<<10) + `"}]}}`
+	rec := doReview(t, f, http.MethodPost, "/api/v1/plugins/review_requests", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s; a %d-byte submit was refused", rec.Code, rec.Body.String(), len(body))
+	}
+	if !strings.Contains(string(f.review.submitParams.Package), "SKILL.md") {
+		t.Error("the oversize package never reached the service")
+	}
+}
+
+// The cap is still a cap: past it the handler must answer 413 with the shared
+// limit, not truncate or 400.
+func TestSubmitReviewRejectsBodiesPastTheSharedCap(t *testing.T) {
+	f := &fakeService{}
+	f.review.request = reviewRequestFixture()
+	body := `{"plugin_id":"plugin-1","version":"2.0.0","manifest_json":{},"plugin_json":{"pad":"` +
+		strings.Repeat("x", maxReviewBodyBytes+1) + `"}}`
+	rec := doReview(t, f, http.MethodPost, "/api/v1/plugins/review_requests", body)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d body = %s, want 413", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "PAYLOAD_TOO_LARGE") {
+		t.Errorf("body = %s, want the PAYLOAD_TOO_LARGE code", rec.Body.String())
+	}
+}

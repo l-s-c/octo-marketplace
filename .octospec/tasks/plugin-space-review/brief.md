@@ -109,9 +109,16 @@ must not collide with an already-published version of that plugin.
   `decision_source=<src>`.
 - **Cancel**: the applicant may cancel a `pending` request. Cancel is web-only
   (no IM cancellation button on the card).
-- **Space-admin self-submit auto-approves** but still creates the request row
-  (reviewer = self, `decision_source=web` unless the self-approve happens via
-  IM) so the audit trail and lists stay uniform.
+- **A Space admin CAN approve their own submission, but must do so explicitly**
+  (no auto-approve on submit). An admin's submit lands `pending` like anyone
+  else's; the admin then approves it from the queue or the IM card, which is one
+  extra click and produces the same audit trail (reviewer = self,
+  `decision_source=web` or `im`). Rationale: auto-approving on submit would make
+  a single admin action silently flip live org-visible content with no
+  confirmation step — an accidental-publish footgun on the exact path where
+  content review matters most — while buying nothing that the extra click does
+  not already provide. Divergence from the original "Space-admin self-submit
+  auto-approves"; deliberate, see divergence item 26.
 - **Grandfathering**: existing Space-visible plugins are treated as approved;
   no retroactive requests, no backfill.
 - **Containers**: `expert`/`expert_team` review at the top container; embedded
@@ -417,7 +424,9 @@ workflow (`make openapi-check`, `make openapi-diff`) apply.
   not leak into the reviewed snapshot; approve(first) flips
   visibility+placement and mints the version row; approve(upgrade) swaps
   listed content atomically while the old version was live until then;
-  reject requires reason (web) or fills default (IM) and changes nothing
+  approve self-heals the default placement (hidden → visible, missing →
+  inserted, already visible → untouched); reject requires reason (web) or
+  fills default (IM) and changes nothing
   else; cancel by applicant only; single-pending constraint; version-label
   collision with a published version rejected, reuse of a rejected label
   accepted.
@@ -441,8 +450,10 @@ workflow (`make openapi-check`, `make openapi-diff`) apply.
   set `requester_uid=applicant_uid`.
 - Notification fail-open: submit succeeds and commits even when octo-server
   is unreachable, returns 5xx, or returns partial `filtered`; the failure
-  path logs and increments a metric; successful submit with a reachable
-  octo-server records delivered/filtered counts via logs/metrics.
+  path logs, and a successful submit with a reachable octo-server logs its
+  delivered/filtered counts. **Metrics deferred** to a follow-up once the
+  notify surface has a counter registry — the module has no in-process
+  counter framework today; rationale in divergence item 27.
 - IM-reject audit: IM reject rows have `reason = defaultIMDenyReason` and
   audit `remark` contains `decision_source=im`; web reject keeps the
   caller-supplied reason and `decision_source=web`.
@@ -470,10 +481,10 @@ octo-server contract that has since changed. Where they disagree with what
 shipped, **what shipped wins**. Each item below is a deliberate decision, not an
 oversight — do not "restore" any of them without revisiting the reasoning.
 
-### 1. The gate is VISIBILITY ONLY. Placements are untouched.
+### 1. The gate is VISIBILITY ONLY. A placement is never HIDDEN — but approve self-heals it forward.
 
 The brief has approve "attach the visible `default` placement" and has the import
-land a *hidden* placement. Neither happens.
+land a *hidden* placement. The hidden import placement does not happen.
 
 The market list already applies two independent filters: an INNER JOIN on a
 `visible=1` placement, AND
@@ -484,15 +495,28 @@ adds nothing and breaks something — the author's own "我的插件" list uses 
 INNER JOIN, so a hidden placement would hide the draft from the person who
 created it.
 
-So: `defaultMarketPlacement` and `syncDefaultPlacement` are byte-for-byte
-unchanged, every create still attaches a visible default placement, and
-`ApproveReview` touches no placement row. The one thing approve changes is
-`plugins.visibility`.
+So: `defaultMarketPlacement` and `syncDefaultPlacement` are unchanged in
+behaviour, every create still attaches a visible default placement, and nothing in
+the review workflow ever sets `visible=0`.
 
-Consequence worth knowing: a plugin that somehow has NO default placement row
-(pre-auto-placement legacy) will not become visible on approval. Main's update
-path self-heals that on the next save; approve deliberately does not, to keep
-"approve writes exactly one column on the plugin row" true.
+**Amended 2026-09-02 (review of PR #74).** Approve DOES write the placement, in
+one direction only: `ensureVisibleDefaultPlacement` makes the default placement
+exist and be visible, inside the same transaction as the status/visibility swap.
+The earlier "approve writes exactly one column" purity had a real cost — a legacy
+row with no default placement (pre-auto-placement) or a publish-era `visible=0`
+row would be flipped to `space` and still not appear in the market, and the author
+could no longer repair it by saving, because item 19's clamp makes a listed
+plugin's write path a 409. Approval is the moment the product promises "this is in
+the market now", so it must make that true.
+
+The helper is idempotent and never hides: already-visible placements are left
+untouched (no `updated_at` churn), a `visible=0` row is flipped to 1, and a
+missing row is inserted with `ON DUPLICATE KEY UPDATE visible=1` (the unique key
+is `(placement_code, plugin_id, category_key)`, so a concurrent writer must not
+turn an approval into a duplicate-key error). Category is not touched;
+`syncDefaultPlacement` still owns category reconciliation on the write path.
+Covered by `TestApproveSelfHealsTheDefaultPlacement` (all three cases) against
+real MySQL.
 
 ### 2. `kind` derives from visibility, never from whether a version exists.
 
@@ -579,13 +603,26 @@ transitions through `/api/v1/admin/*` anyway, and `system` rows are not
 tenant-owned. `AdminCreate`/`AdminUpdate`, container import/reupload and the
 admin skill import are untouched.
 
-### 7. A re-import still replaces LIVE content without re-review.
+### 7. A re-import of a LISTED plugin goes through review. (Superseded by item 19.)
 
-`resolveImportFields` preserves an already-listed plugin's visibility on
-reupload, because demoting it mid-edit would silently delist it. That means the
-content of a listed plugin can be replaced without a new review. The brief's
-"personal edits are a mutable draft" model implies otherwise, but honouring it
-needs a real draft/live content split. Out of scope; follow-up.
+**Original text (kept for the record):** "`resolveImportFields` preserves an
+already-listed plugin's visibility on reupload … That means the content of a
+listed plugin can be replaced without a new review. Out of scope; follow-up."
+
+**Resolved by item 19, and the follow-up is closed.** The tenant re-import runs
+through `Service.update`, which now refuses a listed plugin outright with
+`ErrListedRequiresReview` → 409. So a re-import can no longer replace live
+content: the author submits a review request (a skill may attach the re-uploaded
+zip via `parse_task_id`) and approval is the only thing that swaps what the Space
+reads. Visibility preservation in `resolveImportFields` still stands — it only
+means the reupload does not silently DEMOTE a listed row — but it is no longer a
+hole, because the reupload never reaches the write.
+
+A re-import of a PRIVATE draft still replaces the draft directly; nobody else can
+read it, so there is nothing to review.
+
+Tests: `TestReimportOfAListedPluginIsRefused`,
+`TestReimportPreservesTheExistingVisibility`.
 
 ### 8. Single-pending is a STORED generated column, not a partial index.
 
@@ -780,6 +817,10 @@ embedded children come only from the container import path.
 
 ### 19. A listed plugin cannot be modified through the ordinary write path.
 
+**This item SUPERSEDES item 7.** Item 7 recorded the unreviewed-live-content hole
+as an accepted follow-up; this clamp closes it, for upsert and for the tenant
+re-import alike.
+
 `Service.update` (which backs `/plugins/upsert` AND the tenant re-import) refuses
 outright when `old.visibility == 'space'`, with `ErrListedRequiresReview` →
 **409 CONFLICT**, `details.conflict_reason = "listed_requires_review"`, hint
@@ -945,3 +986,75 @@ upload, and the release is not a CAS against the request, so a quick
 upload-and-resubmit could race it and release the *new* task. Retrying means
 uploading again — which is also what the import path does for a deleted plugin.
 
+
+## Review response (PR #74, 2026-09-02)
+
+### 26. Space-admin self-submit does NOT auto-approve. Declined deliberately.
+
+The state-machine section originally read "Space-admin self-submit auto-approves".
+The shipped code inserts a `pending` request for every applicant, admin or not,
+and that stays.
+
+Auto-approving on submit means one admin action silently swaps live, org-visible
+content with no second step and no confirmation — an accidental-publish footgun on
+the one path where reviewing content is the entire point. The thing it saves is a
+single click: an admin approving their own submission is already permitted and
+works today, from the review queue or the IM card, and it produces exactly the
+same row (`reviewer_uid` = self, `decision_source=web|im`) the auto-approve was
+supposed to produce for audit uniformity. So the uniformity argument is satisfied
+by the explicit path, and the risk argument only cuts one way.
+
+Consequence: an admin who submits sees their own request in the pending queue.
+That is intended — it is the confirmation step.
+
+### 27. Notification metrics are deferred; the paths log.
+
+The acceptance criteria ask the notify failure path to "log AND increment a
+metric" and the success path to record delivered/filtered counts "via
+logs/metrics". Only the logs shipped.
+
+There is no in-process counter registry to hang a metric on. `internal/repository/metrics`
+is a MySQL table of per-resource business counters (view/install/download) that
+the market list reads back — not an operational metrics surface — and the module
+pulls in no Prometheus/OTel/expvar dependency. Adding one for three counters would
+mean introducing a metrics subsystem, an exposition endpoint, and its scrape/auth
+story in a review PR, which is out of proportion to the change under review.
+
+What ships instead: `dispatchReviewCard` logs `review: approval card dispatched`
+with `delivered`/`filtered` counts on success, `review: approval card reached no
+admin` (WARN) when the roster resolved empty, a per-target WARN for each filtered
+recipient, and `notify_best_effort_failed` (WARN, with the error) for a dispatch
+that failed outright — so every outcome the metric would have counted is
+queryable from logs today. On the callback side `card_action_decided` (INFO)
+carries `disposition`/`state` for every handled decision, and the 401 paths now
+emit `card_action_unauthorized` (WARN) with a fixed `reason`
+(`stale_timestamp` / `bad_signature` / `event_id_mismatch`) — they used to be
+silent, which is the one refusal octo-server does NOT route to the DLQ, so a
+rotated secret or a clock skew looked exactly like no IM traffic at all. The
+reason label is the only thing logged there: pre-verification bytes are not
+trustworthy enough to put in a log line.
+
+**Amended acceptance criterion:** logs emitted for dispatch outcomes (delivered /
+filtered / no-admin / failure) and for card-action decisions and auth failures;
+metrics deferred to a follow-up once the notify surface has a counter registry.
+`dispatchReviewCard` carries a TODO naming the missing counters
+(`review_card_dispatch_delivered_total`, `_filtered_total`, `_errors_total`, and
+the card-action decision/auth-failure counters) so the follow-up does not have to
+rediscover them.
+
+### 28. The review-submit body cap equals the /plugins/upsert cap.
+
+`maxReviewBodyBytes` is now literally `= maxBodyBytes` (3 MiB), not its own
+number. The 64 KiB it used to be was correct when a submit was "a handful of short
+strings", and wrong the moment item 18 made the submit carry the full declared
+manifest and package: `parse_task_id` exists only for skills, and a direct edit of
+a listed plugin is 409 (item 19), so a connector / expert / expert_team whose
+content crossed 64 KiB had NO path to a new version — a 413 with no workaround.
+
+Both constants carry a comment pointing at the other. Tests
+`TestSubmitReviewAcceptsAnUpsertSizedBody` (asserts the equality AND drives a
+256 KiB body through the handler) and `TestSubmitReviewRejectsBodiesPastTheSharedCap`
+(the cap is still a cap, 413 with `PAYLOAD_TOO_LARGE`) hold the invariant.
+
+`maxCardActionBody` stays 64 KiB: an IM callback body is a decision plus a couple
+of ids, sized by octo-server's own limits, and it is hashed before parsing.

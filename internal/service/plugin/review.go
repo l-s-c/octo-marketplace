@@ -438,6 +438,17 @@ func sameAttachmentSidecar(a, b json.RawMessage) bool {
 // earlier design fetched the Space-admin roster synchronously before responding,
 // which put an octo-server call (3s timeout) in front of every submit and lost
 // the card entirely when the client disconnected right after commit.
+//
+// TODO(metrics pending): the brief asks for counters on top of these logs —
+// review_card_dispatch_delivered_total / _filtered_total / _errors_total here,
+// plus card-action decision (applied|forbidden|conflict|not_found) and
+// signature/timestamp/auth-failure counters in the card_action handler. There is
+// no existing counter framework in the notify surface: internal/repository/metrics
+// is a MySQL table of per-resource business counters, and the module pulls in no
+// Prometheus/OTel/expvar dependency, so wiring one (plus its exposition endpoint
+// and scrape story) is a change of its own. Every outcome a counter would record
+// is logged below in the meantime. See divergence item 27 in
+// .octospec/tasks/plugin-space-review/brief.md.
 func (s *Service) dispatchReviewCard(caller Caller, stored *model.PluginReviewRequest, plugin *model.Plugin) {
 	if s.notify == nil || !s.notify.Enabled() || s.bestEffort == nil || stored == nil {
 		return

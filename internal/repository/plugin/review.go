@@ -319,11 +319,13 @@ func (r *Repo) ListReviewRequests(ctx context.Context, scope Scope, f ReviewList
 // is a per-plugin counter maintained by snapshotVersion. The label lands on
 // plugins.current_version, which is what snapshotVersion already writes.
 //
-// Placements are untouched. The gate is visibility alone: a private plugin
-// already owns its visible default placement (every create attaches one), and the
-// market list hides it through the visibility predicate. Hiding the placement
-// instead would also hide the plugin from its own author's "mine" list, because
-// that list INNER JOINs the placement on visible=1.
+// The placement is never HIDDEN — the gate that keeps a draft out of the market
+// is visibility alone, because the author's own "我的插件" list INNER JOINs the
+// placement on visible=1 and a hidden placement would hide the draft from the
+// person who created it. But approval does self-heal the placement FORWARD: it
+// makes the default placement exist and be visible, so a legacy row that lacks
+// one (or carries a publish-era visible=0) is actually listed by the approval
+// that promised to list it. See ensureVisibleDefaultPlacement.
 func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewParams) (*model.Plugin, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -400,6 +402,17 @@ func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewPa
 			string(manifest), string(pkg), jsonColumn(attKeys), manifestHash, pluginHash, now, pluginID, scope.SpaceID); err != nil {
 			return nil, wrapped("apply approved snapshot", err)
 		}
+	}
+	// Approval is the only moment that promises "this plugin is in the market now",
+	// and the market list needs BOTH the visibility predicate and a `visible=1`
+	// default placement. Flipping visibility alone lists nothing for a row whose
+	// placement is missing (pre-auto-placement legacy) or hidden (publish-era
+	// visible=0), and the author cannot repair it afterwards because a listed
+	// plugin's ordinary write path is 409 listed_requires_review. So self-heal the
+	// placement here, in the same transaction as the status/visibility swap. It is
+	// a no-op for the common already-visible case, and it never hides anything.
+	if err := ensureVisibleDefaultPlacement(ctx, tx, r.id, now, pluginID, current.CategoryID); err != nil {
+		return nil, err
 	}
 	if _, err := syncRelations(ctx, tx, r.id, now, pluginID, current.OwnerUID, frozen); err != nil {
 		return nil, err

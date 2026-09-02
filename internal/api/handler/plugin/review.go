@@ -15,9 +15,14 @@ import (
 	pluginsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/plugin"
 )
 
-// maxReviewBodyBytes bounds a review request body. These payloads are a handful
-// of short strings; the plugin content itself is never resubmitted here.
-const maxReviewBodyBytes = 64 << 10
+// maxReviewBodyBytes bounds a review request body. It MUST stay equal to
+// `maxBodyBytes` (the /plugins/upsert cap in handler.go): since the upgrade
+// amendment a submit carries the full declared manifest/package — the same
+// documents upsert accepts — and `parse_task_id` is only available to skills,
+// so a connector/expert/expert_team with more content than this cap has no
+// other door to an upgrade (direct edits of a listed plugin are 409). Keep the
+// two constants in sync; the cheaper cap here would silently freeze upgrades.
+const maxReviewBodyBytes = maxBodyBytes
 
 // decodeReviewBody is a size-bounded, unknown-field-TOLERANT decoder. The strict
 // `decode` used by /plugins/upsert would reject a client that sends a harmless

@@ -88,6 +88,20 @@ type decisionRequest struct {
 	SpaceID     string         `json:"space_id"`
 }
 
+// cardActionUnauthorized answers 401 and records WHY. These refusals were
+// previously silent, which made a rotated shared secret, a clock skew, and "no IM
+// traffic at all" indistinguishable in the logs — and the callback has no other
+// operator-visible surface, because a 401 is the one 4xx octo-server does not
+// route to the DLQ. `reason` is a fixed label: nothing from the request body, the
+// signature, or the attacker-controlled headers is logged, since none of it is
+// trustworthy at this point.
+func cardActionUnauthorized(c *gin.Context, reason string) {
+	logging.Warn("card_action_unauthorized",
+		zap.String("operation", "plugin_review.card_action"),
+		zap.String("reason", reason))
+	c.Status(http.StatusUnauthorized)
+}
+
 // Decide handles an IM approve/deny click.
 //
 // Status semantics follow the octo-server consumer contract: every HANDLED
@@ -120,11 +134,11 @@ func (h *CardActionHandler) Decide(c *gin.Context) {
 		return
 	}
 	if !notify.VerifyTimestampAt(timestamp, h.now(), h.maxSkew) {
-		c.Status(http.StatusUnauthorized)
+		cardActionUnauthorized(c, "stale_timestamp")
 		return
 	}
 	if !notify.Verify(h.secret, signature, http.MethodPost, h.path, timestamp, eventID, raw) {
-		c.Status(http.StatusUnauthorized)
+		cardActionUnauthorized(c, "bad_signature")
 		return
 	}
 
@@ -138,7 +152,7 @@ func (h *CardActionHandler) Decide(c *gin.Context) {
 	// The body's event_id must match the signed header, otherwise a valid
 	// signature for one event could be made to carry another event's payload.
 	if strings.TrimSpace(body.EventID) != eventID {
-		c.Status(http.StatusUnauthorized)
+		cardActionUnauthorized(c, "event_id_mismatch")
 		return
 	}
 	// event_id is the idempotency key and is stored as a decimal string; reject

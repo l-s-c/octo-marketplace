@@ -22,6 +22,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// maxBodyBytes caps a plugin write body. `maxReviewBodyBytes` (review.go) is
+// derived from it: a review submit carries the same declared content, so the two
+// paths must accept the same size.
 const maxBodyBytes = 3 << 20
 
 // Service is the handler-facing boundary over the unified Plugin service.

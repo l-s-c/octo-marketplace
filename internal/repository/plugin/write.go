@@ -1028,6 +1028,11 @@ func decodeSidecarMap(raw json.RawMessage) map[string]string {
 	return m
 }
 
+// defaultPlacementCode is the one placement code the unified plugin surface
+// manages. Every market list INNER JOINs it on `visible=1`; publish-era
+// multi-scene placements are gone.
+const defaultPlacementCode = "default"
+
 // syncDefaultPlacement keeps a plugin listable across a save. Market list pages
 // INNER JOIN the "default" placement, and after publish-removal no non-create
 // path inserts one — so a plugin created before auto-placement (e.g. an old
@@ -1039,18 +1044,61 @@ func decodeSidecarMap(raw json.RawMessage) map[string]string {
 // multi-scene placements are gone.
 func syncDefaultPlacement(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, pluginID string, categoryID *string) error {
 	var exists bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM plugin_placements WHERE plugin_id=? AND placement_code=?)`, pluginID, "default").Scan(&exists); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM plugin_placements WHERE plugin_id=? AND placement_code=?)`, pluginID, defaultPlacementCode).Scan(&exists); err != nil {
 		return wrapped("check placement", err)
 	}
 	if !exists {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO plugin_placements (placement_id,placement_code,plugin_id,category_id,visible,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
-			newID(), "default", pluginID, categoryID, true, 0, now, now); err != nil {
+			newID(), defaultPlacementCode, pluginID, categoryID, true, 0, now, now); err != nil {
 			return wrapped("insert default placement", err)
 		}
 		return nil
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE plugin_placements SET category_id=?,updated_at=? WHERE plugin_id=?`, categoryID, now, pluginID); err != nil {
 		return wrapped("update placements", err)
+	}
+	return nil
+}
+
+// ensureVisibleDefaultPlacement makes the plugin's default placement exist and be
+// visible. Approval is the moment a plugin becomes org-readable, and the market
+// list applies TWO independent filters: the visibility predicate AND an INNER
+// JOIN on a `visible=1` default placement. Flipping only `plugins.visibility`
+// therefore lists nothing for a row whose placement is missing (pre-auto-placement
+// legacy) or hidden (publish-era `visible=0`) — and the author cannot repair it,
+// because a listed plugin's ordinary write path is 409 `listed_requires_review`.
+// So approve self-heals the placement inside the same transaction as the status
+// and visibility swap.
+//
+// It is deliberately idempotent: an already-visible placement is left untouched
+// (no `updated_at` churn), a hidden one is flipped, and a missing one is
+// inserted. The insert carries `ON DUPLICATE KEY UPDATE visible=1` because the
+// unique key is (placement_code, plugin_id, category_key) — a concurrent writer
+// that inserted first must not turn approval into a duplicate-key error.
+//
+// Only `visible` is forced. Category stays whatever the placement already
+// carries; syncDefaultPlacement owns category reconciliation on the write path.
+func ensureVisibleDefaultPlacement(ctx context.Context, tx *sql.Tx, newID func() string, now interface{}, pluginID string, categoryID *string) error {
+	var exists bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM plugin_placements WHERE plugin_id=? AND placement_code=?)`,
+		pluginID, defaultPlacementCode).Scan(&exists); err != nil {
+		return wrapped("check default placement", err)
+	}
+	if exists {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE plugin_placements SET visible=1,updated_at=? WHERE plugin_id=? AND placement_code=? AND visible=0`,
+			now, pluginID, defaultPlacementCode); err != nil {
+			return wrapped("reveal default placement", err)
+		}
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO plugin_placements (placement_id,placement_code,plugin_id,category_id,visible,sort_order,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?)
+		 ON DUPLICATE KEY UPDATE visible=1,updated_at=VALUES(updated_at)`,
+		newID(), defaultPlacementCode, pluginID, categoryID, true, 0, now, now); err != nil {
+		return wrapped("insert default placement", err)
 	}
 	return nil
 }
