@@ -51,8 +51,11 @@ func TestPluginListingStateMigrationUpDownMySQL(t *testing.T) {
 	if cols := indexColumns(t, database, "plugins", "idx_plugins_scope_category_created"); strings.Join(cols, ",") != "visibility,space_id,category_id,created_at" {
 		t.Fatalf("scope index after Down = %v, want the pre-migration shape", cols)
 	}
-	if cols := indexColumns(t, database, "plugin_review_requests", "idx_review_plugin_submitted"); len(cols) != 0 {
-		t.Fatalf("idx_review_plugin_submitted still exists after Down: %v", cols)
+	// -03 adds the review-submitted index under a fresh name so it is
+	// idempotent against envs that ran an earlier head (see 20260902-03's
+	// header for the ERROR 1061 hazard). After Down the index must be gone.
+	if cols := indexColumns(t, database, "plugin_review_requests", "idx_review_plugin_submitted_at"); len(cols) != 0 {
+		t.Fatalf("idx_review_plugin_submitted_at still exists after Down: %v", cols)
 	}
 
 	// Two rows the pre-listing_state schema could produce: one live, one soft
@@ -131,8 +134,8 @@ func TestPluginListingStateMigrationUpDownMySQL(t *testing.T) {
 	if cols := indexColumns(t, database, "plugins", "idx_plugins_scope_category_created"); strings.Join(cols, ",") != "visibility,space_id,listing_state,category_id,created_at" {
 		t.Errorf("scope index = %v, want listing_state as the third column", cols)
 	}
-	if cols := indexColumns(t, database, "plugin_review_requests", "idx_review_plugin_submitted"); strings.Join(cols, ",") != "plugin_id,submitted_at" {
-		t.Errorf("idx_review_plugin_submitted = %v, want (plugin_id, submitted_at)", cols)
+	if cols := indexColumns(t, database, "plugin_review_requests", "idx_review_plugin_submitted_at"); strings.Join(cols, ",") != "plugin_id,submitted_at" {
+		t.Errorf("idx_review_plugin_submitted_at = %v, want (plugin_id, submitted_at)", cols)
 	}
 }
 
