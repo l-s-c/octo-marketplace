@@ -127,6 +127,21 @@ func (r *Repo) List(ctx context.Context, scope Scope, f ListFilter) ([]model.Plu
 	return out, total, nil
 }
 
+// listedSQL is the marketplace GRID's listing gate: only a published row is on
+// the shelf. It is deliberately NOT part of visibilitySQL, which is a scope rule
+// and still lets an owner READ their own draft (detail, versions, edit).
+//
+// Every surface that mirrors the grid must apply it — the grid itself
+// (buildListQuery), its tag chips (ListTags) and its category counts
+// (ListPlacementCategories) — or a facet advertises rows the grid will not
+// return: a chip that filters to nothing, a count that overstates the page. The
+// "mine" variants of those surfaces deliberately omit it, because 我的发布 shows
+// every state, and so does the admin listing (AllSpaces).
+//
+// 'published' is a literal, not a placeholder, so appending it never disturbs a
+// call site's argument list.
+const listedSQL = ` AND p.listing_state='published'`
+
 func buildListQuery(scope Scope, f ListFilter) (string, string, []any) {
 	from := ` FROM plugins p`
 	args := []any{}
@@ -183,7 +198,7 @@ func buildListQuery(scope Scope, f ListFilter) (string, string, []any) {
 		// lets an owner READ their own draft (detail, versions, edit), and Mine —
 		// which backs 我的发布 — deliberately shows every state. The admin listing
 		// (AllSpaces) manages rows in all states and is exempt.
-		where += ` AND p.listing_state='published'`
+		where += listedSQL
 	}
 	return from, where, args
 }

@@ -49,10 +49,13 @@ func TestSpaceIntentDraftIsInvisibleToTheSpaceButVisibleToItsOwner(t *testing.T)
 
 	probes := []struct {
 		surface string
-		// ownerMustReach is false for the two surfaces where the owner direction is
-		// not meaningful: the market GRID deliberately excludes the owner's own
-		// unpublished rows, and the adopt probe's source plugin belongs to the
-		// colleague, so the owner could never edit it in the first place.
+		// ownerMustReach is false for the surfaces where the owner direction is not
+		// meaningful or is deliberately inverted: the market GRID and the two facets
+		// that mirror it (ListTags on the grid path, ListPlacementCategories) exclude
+		// the owner's own unpublished rows by design — a chip or a count that
+		// advertises a row the grid will not return is its own defect, covered by
+		// TestGridFacetsAgreeWithTheGrid — and the adopt probe's source plugin belongs
+		// to the colleague, so the owner could never edit it in the first place.
 		ownerMustReach bool
 		reaches        func(*testing.T, pluginrepo.Scope) bool
 	}{
@@ -84,10 +87,22 @@ func TestSpaceIntentDraftIsInvisibleToTheSpaceButVisibleToItsOwner(t *testing.T)
 			}
 			return err == nil
 		}},
-		{"ListTags", true, func(t *testing.T, sc pluginrepo.Scope) bool {
+		{"ListTags", false, func(t *testing.T, sc pluginrepo.Scope) bool {
 			tags, err := repo.ListTags(ctx, sc, pluginrepo.TagListFilter{PlacementCode: "default", Type: model.PluginTypeSkill})
 			if err != nil {
 				t.Fatalf("ListTags: %v", err)
+			}
+			for _, tag := range tags {
+				if tag.Name == "draft-only-tag" {
+					return true
+				}
+			}
+			return false
+		}},
+		{"ListTags(mine)", true, func(t *testing.T, sc pluginrepo.Scope) bool {
+			tags, err := repo.ListTags(ctx, sc, pluginrepo.TagListFilter{PlacementCode: "default", Type: model.PluginTypeSkill, Mine: true})
+			if err != nil {
+				t.Fatalf("ListTags(mine): %v", err)
 			}
 			for _, tag := range tags {
 				if tag.Name == "draft-only-tag" {
@@ -105,7 +120,7 @@ func TestSpaceIntentDraftIsInvisibleToTheSpaceButVisibleToItsOwner(t *testing.T)
 			}
 			return err == nil && total > 0
 		}},
-		{"ListPlacementCategories", true, func(t *testing.T, sc pluginrepo.Scope) bool {
+		{"ListPlacementCategories", false, func(t *testing.T, sc pluginrepo.Scope) bool {
 			cats, err := repo.ListPlacementCategories(ctx, sc, "default", model.PluginTypeSkill)
 			if err != nil {
 				t.Fatalf("ListPlacementCategories: %v", err)
