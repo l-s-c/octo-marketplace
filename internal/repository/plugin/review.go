@@ -110,6 +110,30 @@ func (r *Repo) InsertReviewRequest(ctx context.Context, scope Scope, req *model.
 	if err != nil {
 		return err
 	}
+	// Review gates ORG exposure. A request is meaningful against either:
+	//   - a `space`-intent row (the normal first-listing / upgrade flow), OR
+	//   - a stranded `private`+`published` row reachable through a lost race
+	//     that PublishPlugin now refuses. ApproveReview defensively detects
+	//     that state via isFirst and stamps visibility=space on it
+	//     (TestApproveListsAStrandedPublishedPrivateRow pins the recovery).
+	// Anything else (draft/private with no prior publish history) cannot become
+	// org content via approval and is refused.
+	//
+	// The service already refused anything but these two shapes, but it decided
+	// that from an UNLOCKED Detail read taken many round trips earlier —
+	// parse-task consumption, materialization and a zip download all run in
+	// between. In that window the owner can lower a still-draft row to `private`
+	// through an ordinary upsert (legal on a draft, and Repo.Update's
+	// RefusePendingReview re-check finds no request row yet because this insert
+	// has not committed); if the update wins the plugin lock, this insert would
+	// otherwise land a pending request against a now-private draft that
+	// ApproveReview's isFirst branch would flip to space against the author's
+	// since-withdrawn intent. Re-deriving from the LOCKED row closes that
+	// window, exactly as PublishPlugin re-derives its own `private` precondition.
+	if current.Visibility != model.PluginVisibilitySpace &&
+		!(current.Visibility == model.PluginVisibilityPrivate && current.ListingState == model.PluginListingStatePublished) {
+		return ErrConflict
+	}
 	// "First listing" means the plugin is not yet listed — which is exactly
 	// listing_state != published, and nothing else.
 	//
@@ -451,6 +475,34 @@ func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewPa
 		!model.VersionNotRegressed(*current.CurrentVersion, version) {
 		return nil, ErrVersionRegressed
 	}
+	// Re-run the label-REUSE rule against the same locked row, for the same reason.
+	// publishedVersionLabels is evaluated exactly once, at insert time, so a label
+	// that entered the published set while the request sat pending is not caught by
+	// anything: the ordering guard above refuses `current > frozen` but passes
+	// equality unconditionally, and it must keep doing so — on a first listing the
+	// draft's current_version IS the request label (every save re-sends its own
+	// stored label, so VersionNotRegressed treats "unchanged" as always fine).
+	//
+	// The reachable route is an admin edit: AdminUpdate sets SnapshotVersion but
+	// neither RefusePendingReview nor EnforceListingGate, so it can move a LISTED
+	// plugin's current_version to exactly the pending request's label while that
+	// request is open. publishedVersionLabels folds a non-draft current_version into
+	// the published set, so re-deriving it here refuses that; without it
+	// snapshotVersion below would mint an already-published label over different
+	// content.
+	//
+	// This is emphatically NOT "refuse equality at approve": the published set
+	// deliberately EXCLUDES a draft's own current_version, which is precisely what
+	// separates "the author re-sent their own draft label" (the normal first
+	// listing, allowed) from "the org has already seen this label over other
+	// content" (refused).
+	published, err := publishedVersionLabels(ctx, tx, pluginID, current)
+	if err != nil {
+		return nil, err
+	}
+	if _, taken := published[version]; taken {
+		return nil, ErrConflict
+	}
 	now := p.Now
 	if now.IsZero() {
 		now = r.now()
@@ -509,14 +561,29 @@ func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewPa
 	// branch the code took is the branch the row commits to.
 	isFirst := !(current.Visibility == model.PluginVisibilitySpace && current.ListingState == model.PluginListingStatePublished)
 	if isFirst {
-		if _, err := tx.ExecContext(ctx,
+		res, err := tx.ExecContext(ctx,
 			`UPDATE plugins SET plugin_name=?,tags_json=?,manifest_json=?,plugin_json=?,attachment_keys_json=?,manifest_hash=?,plugin_hash=?,visibility=?,listing_state=?,updated_at=?
 			  WHERE plugin_id=? AND space_id=? AND deleted_at IS NULL
 			    AND NOT (visibility=? AND listing_state=?)`,
 			frozenName, frozenTags, string(manifest), string(pkg), jsonColumn(attKeys), manifestHash, pluginHash,
 			string(model.PluginVisibilitySpace), string(model.PluginListingStatePublished), now, pluginID, scope.SpaceID,
-			string(model.PluginVisibilitySpace), string(model.PluginListingStatePublished)); err != nil {
+			string(model.PluginVisibilitySpace), string(model.PluginListingStatePublished))
+		if err != nil {
 			return nil, wrapped("apply approved snapshot", err)
+		}
+		// The isFirst branch was selected from the FOR UPDATE-locked row, so under
+		// normal operation zero rows here means "predicate already matches" and the
+		// UPDATE is a no-op — the CAS is defensive, not load-bearing. But the branch
+		// selector and the UPDATE predicate are DERIVED INDEPENDENTLY, and if they
+		// ever drift (a future edit flips one but not the other) this approval would
+		// proceed with the request flipped to approved, a release minted, children
+		// promoted, an audit row written — and the plugin's content/visibility never
+		// applied: a silent half-approval. mustChangeState turns that drift into an
+		// ErrConflict rather than letting it commit. Routing through the same helper
+		// PublishPlugin/DelistPlugin use for their own state CAS keeps plugin-row
+		// UPDATE semantics consistent across the file.
+		if err := mustChangeState(res); err != nil {
+			return nil, err
 		}
 	} else {
 		if _, err := tx.ExecContext(ctx,

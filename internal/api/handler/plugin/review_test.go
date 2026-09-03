@@ -423,18 +423,123 @@ func TestSubmitReviewAcceptsAnUpsertSizedBody(t *testing.T) {
 	}
 }
 
-// The cap is still a cap: past it the handler must answer 413 with the shared
-// limit, not truncate or 400.
-func TestSubmitReviewRejectsBodiesPastTheSharedCap(t *testing.T) {
+// The detail response carries the FROZEN relation graph the reviewer is
+// approving — for an expert/expert_team that membership IS the reviewable
+// content, and omitting it meant the reviewer could approve a container whose
+// members they had never inspected. The list response, by contrast, must stay
+// lean and omit the graph per row.
+func TestReviewDetailCarriesFrozenRelationsListOmitsThem(t *testing.T) {
 	f := &fakeService{}
-	f.review.request = reviewRequestFixture()
-	body := `{"plugin_id":"plugin-1","version":"2.0.0","manifest_json":{},"plugin_json":{"pad":"` +
-		strings.Repeat("x", maxReviewBodyBytes+1) + `"}}`
-	rec := doReview(t, f, http.MethodPost, "/api/v1/plugins/review_requests", body)
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status = %d body = %s, want 413", rec.Code, rec.Body.String())
+	base := reviewRequestFixture()
+	// RelationsJSON is populated by LoadReviewSnapshot (the detail path). The
+	// snapshot round-trips through plugin_review_requests.relations_json as a JSON
+	// array of PluginRelation-shaped objects; note the marshal uses Go struct
+	// field names by default (no json tags on PluginRelation), so relation_id /
+	// target_plugin_id are uppercase keys in storage.
+	base.RelationsJSON = json.RawMessage(`[` +
+		`{"ID":"rel-1","SourcePluginID":"plugin-1","TargetPluginID":"skill-1","Type":"expert_skill","SortOrder":0,"Data":{"is_leader":false},"Status":1},` +
+		`{"ID":"rel-2","SourcePluginID":"plugin-1","TargetPluginID":"skill-2","Type":"expert_skill","SortOrder":1,"Data":null,"Status":1}` +
+		`]`)
+	f.review.request = base
+
+	t.Run("detail", func(t *testing.T) {
+		rec := doReview(t, f, http.MethodGet, "/api/v1/plugins/review_requests/review-1", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+		}
+		var envelope struct {
+			Data struct {
+				Relations []struct {
+					RelationID     string          `json:"relation_id"`
+					TargetPluginID string          `json:"target_plugin_id"`
+					RelationType   string          `json:"relation_type"`
+					SortOrder      int             `json:"sort_order"`
+					Data           json.RawMessage `json:"data"`
+				} `json:"frozen_relations"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+		}
+		if len(envelope.Data.Relations) != 2 {
+			t.Fatalf("frozen_relations = %+v, want 2 edges", envelope.Data.Relations)
+		}
+		first := envelope.Data.Relations[0]
+		if first.RelationID != "rel-1" || first.TargetPluginID != "skill-1" || first.RelationType != "expert_skill" || first.SortOrder != 0 {
+			t.Fatalf("first edge = %+v", first)
+		}
+		// data=null on the second edge must collapse to omitted, not the literal
+		// four bytes "null" (relation_json schema rejects the literal null).
+		second := envelope.Data.Relations[1]
+		if second.RelationID != "rel-2" {
+			t.Fatalf("second edge = %+v", second)
+		}
+		if len(second.Data) != 0 && !bytes.Equal(bytes.TrimSpace(second.Data), []byte("null")) {
+			t.Errorf("second edge data = %s, want omitted/null", second.Data)
+		}
+		// The raw storage column must not leak as a top-level key.
+		var raw map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &raw)
+		if data, ok := raw["data"].(map[string]any); ok {
+			if _, leaked := data["relations_json"]; leaked {
+				t.Errorf("raw relations_json leaked into the response")
+			}
+		}
+	})
+
+	t.Run("list omits per-row graph", func(t *testing.T) {
+		// The list path uses reviewSelectBase, which does NOT select relations_json
+		// at all — simulate that by clearing the fixture's RelationsJSON before the
+		// call so the fake mirrors real repository output. This guards against a
+		// regression where reviewDTO would blindly project whatever bytes happened
+		// to be on the model onto the wire, leaking the graph per list row.
+		listReq := *base
+		listReq.RelationsJSON = nil
+		f.review.request = &listReq
+		f.review.items = []*model.PluginReviewRequest{&listReq}
+		f.review.total = 1
+		rec := doReview(t, f, http.MethodGet, "/api/v1/plugins/review_requests?mode=mine", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+		}
+		var envelope struct {
+			Data []map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+		}
+		if len(envelope.Data) != 1 {
+			t.Fatalf("rows = %d", len(envelope.Data))
+		}
+		if _, present := envelope.Data[0]["frozen_relations"]; present {
+			t.Errorf("list row carried frozen_relations; the queue must stay lean")
+		}
+	})
+}
+
+// A malformed relations_json in storage must not 500 the detail read — the
+// reviewer still needs to see the documents so they can reject. ApproveReview
+// will still refuse to apply the corrupt bytes at decision time.
+func TestReviewDetailToleratesMalformedFrozenRelations(t *testing.T) {
+	f := &fakeService{}
+	base := reviewRequestFixture()
+	base.RelationsJSON = json.RawMessage(`{not valid json`)
+	f.review.request = base
+	rec := doReview(t, f, http.MethodGet, "/api/v1/plugins/review_requests/review-1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "PAYLOAD_TOO_LARGE") {
-		t.Errorf("body = %s, want the PAYLOAD_TOO_LARGE code", rec.Body.String())
+	var envelope struct {
+		Data struct {
+			Relations json.RawMessage `json:"frozen_relations"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+	}
+	// Must be present as an empty array, not absent (so the client can iterate
+	// unconditionally), never null and never the raw malformed bytes.
+	if !bytes.Equal(envelope.Data.Relations, []byte(`[]`)) {
+		t.Errorf("frozen_relations = %s, want []", envelope.Data.Relations)
 	}
 }

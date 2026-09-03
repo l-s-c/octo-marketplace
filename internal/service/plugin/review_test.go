@@ -992,3 +992,155 @@ func TestReviewIconIsResolvedToADisplayURL(t *testing.T) {
 		t.Fatalf("absolute icon = %q (%v)", out.PluginIcon, err)
 	}
 }
+
+// ErrVersionRegressed from the approve/reject repo call is PERMANENT: the
+// plugin's current_version moved past the frozen label between card delivery
+// and click, and nothing can lower it back. It must NOT be returned as an
+// error (which would surface as HTTP 503 and cause octo-server to redeliver
+// forever); instead it is a terminal in-band refusal so the card renders an
+// actionable reason and the applicant can cancel+resubmit.
+//
+// Disposition trade-off: we reuse "forbidden" rather than inventing a value.
+// None of the four documented enums (applied/replayed/conflict/not_found)
+// fits cleanly — the request is still pending (no other admin decided it),
+// was not applied, is not a replay of an existing receipt, and is not
+// not_found — so "forbidden" (the existing terminal-refusal slot) is the
+// closest fit. display.reason carries a machine-readable actionable label
+// ("version moved past; resubmit required") for a future richer renderer; if
+// octo-server later adds a dedicated "stale" disposition this branch can be
+// switched over without wire changes elsewhere.
+func TestDecideReviewFromCardVersionRegressedIsATerminalRefusal(t *testing.T) {
+	store, svc := reviewFixture(t)
+	store.review.anySpaceReq = &model.PluginReviewRequest{
+		ID: "review-1", PluginID: "plugin-1", SpaceID: "space-a",
+		Status: model.ReviewStatusPending, ApplicantUID: "user-1", PluginName: "Demo",
+	}
+	store.review.approveErr = pluginrepo.ErrVersionRegressed
+	svc = svc.WithNotify(&fakeNotifier{enabled: true, role: roleOf(SpaceRoleOwner)}, nil)
+
+	out, err := svc.DecideReviewFromCard(context.Background(), "77", "admin-1", "approve", "review-1")
+	if err != nil {
+		t.Fatalf("version regressed returned an error (would become 503 and loop forever): %v", err)
+	}
+	if out == nil {
+		t.Fatal("expected a handled CardActionResult, got nil")
+	}
+	if out.Disposition != "forbidden" {
+		t.Errorf("disposition = %q, want forbidden (terminal refusal slot)", out.Disposition)
+	}
+	if out.State != "pending" {
+		t.Errorf("state = %q, want pending (request was NOT settled by this click)", out.State)
+	}
+	if out.Requester != "user-1" {
+		t.Errorf("requester_uid = %q, want the applicant so octo-server can DM them", out.Requester)
+	}
+	if got := out.Display["reason"]; got != "version_moved_past_resubmit_required" {
+		t.Errorf("display.reason = %q, want actionable resubmit label", got)
+	}
+	if out.Display["title"] != "Demo" {
+		t.Errorf("display.title = %q", out.Display["title"])
+	}
+	// No receipt is written for a refused click — cancel+resubmit generates a
+	// fresh review_id/card, and writing a receipt here would permanently
+	// swallow any retry against a corrected version.
+	if len(store.review.receiptInserts) != 0 {
+		t.Error("refusal wrote a receipt, so a later retry against a corrected version would replay as this refusal")
+	}
+}
+
+// Regression guard: ErrDeadlock MUST stay retryable. A deadlock-victim abort
+// is transient — the transaction rolled back and did NOT settle the request —
+// so returning a handled body would ack the event and silently discard a real
+// admin's decision. The handler turns this error into HTTP 503 so octo-server
+// redelivers.
+func TestDecideReviewFromCardDeadlockStaysRetryable(t *testing.T) {
+	store, svc := reviewFixture(t)
+	store.review.anySpaceReq = &model.PluginReviewRequest{
+		ID: "review-1", PluginID: "plugin-1", SpaceID: "space-a",
+		Status: model.ReviewStatusPending, ApplicantUID: "user-1", PluginName: "Demo",
+	}
+	store.review.approveErr = pluginrepo.ErrDeadlock
+	svc = svc.WithNotify(&fakeNotifier{enabled: true, role: roleOf(SpaceRoleOwner)}, nil)
+
+	out, err := svc.DecideReviewFromCard(context.Background(), "78", "admin-1", "approve", "review-1")
+	if err == nil {
+		t.Fatalf("deadlock returned a handled result %+v; want a retryable error (503)", out)
+	}
+	if !errors.Is(err, ErrDeadlock) {
+		t.Errorf("error = %v, want ErrDeadlock so the handler maps it to 503", err)
+	}
+	if out != nil {
+		t.Errorf("a fault must not also produce a body: %+v", out)
+	}
+	if len(store.review.receiptInserts) != 0 {
+		t.Error("a retryable fault wrote a receipt, so the retry would replay it")
+	}
+}
+
+// reReadErrorStore wraps a Store and forces GetReviewRequestAnySpace to
+// return secondErr on every call after the first. This models "initial load
+// succeeded, re-read inside cardConflict failed" — the exact scenario
+// cardConflict used to swallow, answering with a self-contradictory
+// conflict/pending 200 that octo-server would never redeliver.
+type reReadErrorStore struct {
+	Store
+	calls     int
+	secondErr error
+}
+
+func (s *reReadErrorStore) GetReviewRequestAnySpace(ctx context.Context, id string) (*model.PluginReviewRequest, error) {
+	s.calls++
+	if s.calls > 1 {
+		return nil, s.secondErr
+	}
+	return s.Store.GetReviewRequestAnySpace(ctx, id)
+}
+
+// cardConflict must NOT swallow re-read errors at the pre-apply status gate
+// (req.Status != pending). When it can't re-read the settled row, returning a
+// stale conflict/pending body is self-contradictory (conflict means already
+// settled, but the body says pending) AND is a 200 that octo-server will
+// never redeliver. It must propagate the error so the handler answers 503.
+func TestCardConflictReReadErrorAtStatusGateIsRetryable(t *testing.T) {
+	store, svc := reviewFixture(t)
+	store.review.anySpaceReq = &model.PluginReviewRequest{
+		ID: "review-1", PluginID: "plugin-1", SpaceID: "space-a",
+		Status: model.ReviewStatusRejected, ApplicantUID: "user-1", PluginName: "Demo",
+	}
+	svc = svc.WithNotify(&fakeNotifier{enabled: true, role: roleOf(SpaceRoleOwner)}, nil)
+	svc.repo = &reReadErrorStore{Store: svc.repo, secondErr: errors.New("transient db failure")}
+
+	out, err := svc.DecideReviewFromCard(context.Background(), "79", "admin-1", "approve", "review-1")
+	if err == nil {
+		t.Fatalf("cardConflict on re-read failure returned a stale result %+v; want a retryable error (503)", out)
+	}
+	if out != nil {
+		t.Errorf("a fault must not also produce a body: %+v", out)
+	}
+}
+
+// Same invariant on the CAS-loss branch: after ApproveReview returns
+// ErrConflict, a failed re-read must propagate as an error, not a stale
+// conflict/pending body.
+func TestCardConflictReReadErrorAfterCasLossIsRetryable(t *testing.T) {
+	store, svc := reviewFixture(t)
+	store.review.anySpaceReq = &model.PluginReviewRequest{
+		ID: "review-1", PluginID: "plugin-1", SpaceID: "space-a",
+		Status: model.ReviewStatusPending, ApplicantUID: "user-1", PluginName: "Demo",
+	}
+	store.review.approveErr = pluginrepo.ErrConflict
+	svc = svc.WithNotify(&fakeNotifier{enabled: true, role: roleOf(SpaceRoleOwner)}, nil)
+	wrapped := &reReadErrorStore{Store: svc.repo, secondErr: errors.New("transient db failure")}
+	svc.repo = wrapped
+
+	out, err := svc.DecideReviewFromCard(context.Background(), "80", "admin-1", "approve", "review-1")
+	if err == nil {
+		t.Fatalf("cardConflict after CAS loss with re-read failure returned a stale result %+v; want a retryable error (503)", out)
+	}
+	if out != nil {
+		t.Errorf("a fault must not also produce a body: %+v", out)
+	}
+	if wrapped.calls < 2 {
+		t.Errorf("expected at least two AnySpace calls (initial load + cardConflict re-read), got %d", wrapped.calls)
+	}
+}

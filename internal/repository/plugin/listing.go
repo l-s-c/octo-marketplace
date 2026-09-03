@@ -77,8 +77,13 @@ func (r *Repo) PublishPlugin(ctx context.Context, scope Scope, p PublishParams) 
 	// this transaction the owner can raise the row to `space` through an ordinary
 	// upsert — legal on a draft — and this UPDATE would then stamp `published`
 	// onto it, putting unreviewed content on the org marketplace with no review
-	// request ever created. Re-deriving from the locked row closes the window;
-	// ApproveReview re-derives `isFirst` the same way and for the same reason.
+	// request ever created. Re-deriving from the locked row closes the window.
+	// Re-deriving from the locked row closes the window. The companion mirror —
+	// SubmitReview landing against a row that got lowered to `private` mid-flight
+	// — is closed inside InsertReviewRequest, which re-derives visibility under
+	// its own FOR UPDATE and refuses drafts that have lost their space intent;
+	// it explicitly admits the stranded `private+published` shape so ApproveReview
+	// can recover rows that PublishPlugin's lost race left behind.
 	if current.Visibility != model.PluginVisibilityPrivate {
 		return nil, ErrConflict
 	}

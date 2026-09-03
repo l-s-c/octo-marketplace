@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -472,3 +473,108 @@ func assertJSONString(t *testing.T, raw map[string]json.RawMessage, key, want st
 }
 
 func intPtr(v int) *int { return &v }
+
+// TestMemberRole_ClampsOutOfRangeValues is the IM-path mirror of the resolver
+// test: a drifted octo-server returning the inverted octo-web encoding (3=member)
+// must NOT be treated as admin here, or every plain member can approve via IM.
+func TestMemberRole_ClampsOutOfRangeValues(t *testing.T) {
+	cases := []struct {
+		name string
+		wire int // role value in {"data":{"role":<wire>}}
+		want int // clamped role we expect
+	}{
+		{"web-encoded member 3 -> member", 3, RoleMember},
+		{"large value -> member", 99, RoleMember},
+		{"negative -> member", -1, RoleMember},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]any{"data": map[string]int{"role": tc.wire}})
+			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write(body)
+			})
+			got, err := c.MemberRole(context.Background(), "sp", "u")
+			if err != nil {
+				t.Fatalf("MemberRole: %v", err)
+			}
+			if got == nil {
+				t.Fatal("expected non-nil clamped role, got nil (would read as non-member)")
+			}
+			if *got != tc.want {
+				t.Fatalf("role=%d, want %d — authorization boundary would leak", *got, tc.want)
+			}
+			// The IM path compares `*role >= RoleAdmin`; for every out-of-range
+			// input this MUST be false, or the whole point is lost.
+			if *got >= RoleAdmin {
+				t.Fatalf("clamped role %d >= RoleAdmin — fail-closed invariant broken", *got)
+			}
+		})
+	}
+}
+
+// TestMemberRole_ClampKeepsNullDistinct confirms we didn't break the "null means
+// not a member" contract when adding the clamp: a null role must STILL come back
+// as nil, not collapse to RoleMember.
+func TestMemberRole_ClampKeepsNullDistinct(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"role":null}}`))
+	})
+	got, err := c.MemberRole(context.Background(), "sp", "u")
+	if err != nil {
+		t.Fatalf("MemberRole: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("null role must return nil (not a member), got %d", *got)
+	}
+}
+
+// TestMemberRole_DriftOncePerBadValue guards the flood-control choice: each
+// distinct bad value logs once, and the server can be hit N times without N log
+// lines. Like the resolver test, we don't introspect zap; we check the once
+// bookkeeping exists and fires.
+func TestMemberRole_DriftOncePerBadValue(t *testing.T) {
+	calls := 0
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"data":{"role":3}}`))
+	})
+	for i := 0; i < 50; i++ {
+		role, err := c.MemberRole(context.Background(), "sp", "u")
+		if err != nil {
+			t.Fatalf("MemberRole[%d]: %v", i, err)
+		}
+		if role == nil || *role != RoleMember {
+			t.Fatalf("call %d: role=%v, want %d", i, role, RoleMember)
+		}
+	}
+	if calls != 50 {
+		t.Fatalf("server calls=%d, want 50", calls)
+	}
+	c.driftMu.Lock()
+	o := c.roleDriftOnce[3]
+	c.driftMu.Unlock()
+	if o == nil {
+		t.Fatal("roleDriftOnce[3] was never created despite 50 responses with role=3")
+	}
+}
+
+// TestMemberRole_ClampConcurrentSafe guards against a data race on roleDriftOnce
+// when many card-action callbacks arrive in parallel during an upstream drift.
+func TestMemberRole_ClampConcurrentSafe(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"role":3}}`))
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if _, err := c.MemberRole(ctx, "sp", "u"); err != nil {
+				t.Errorf("MemberRole: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+}

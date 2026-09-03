@@ -3,8 +3,18 @@
 
 Implements exactly the two internal endpoints internal/notify.Client calls:
 
-  GET  /v1/internal/spaces/{space_id}/members/{uid}/role  -> {"data": {"role": 2|1|0|null}}
-  POST /v1/internal/notify                                -> {"data": {"delivered": n, "filtered": 0}}
+  GET  /v1/internal/spaces/{space_id}/members/{uid}/role
+       -> {"data": {"role": 2|1|0|null}}          (notify.memberRoleEnvelope)
+  POST /v1/internal/notify
+       -> {"data": {"delivered": ["uid", ...], "filtered": {"uid": "reason"}}}
+                                                  (notify.notifyEnvelope)
+
+The response SHAPES above are load-bearing, not illustrative. internal/notify
+decodes `delivered` as []string and `filtered` as map[string]string, so returning
+counts (as an earlier version of this stub did) makes json.Unmarshal fail on
+every dispatch and the caller logs `notify_best_effort_failed` — a stub bug that
+reads exactly like a bug in the service. Likewise the request body carries the
+card under `approval_card`, not `card`.
 
 Both require the X-Internal-Token header from OCTO_MARKETPLACE_INTERNAL_TOKEN, so an
 unauthenticated caller sees the same 401 the real service returns.
@@ -40,6 +50,9 @@ for entry in os.environ.get("DEV_STUB_ROLES", "dev-user:2").split(","):
     ROLES[uid.strip()] = int(role or 0)
 
 ROLE_PATH = re.compile(r"^/v1/internal/spaces/([^/]+)/members/([^/]+)/role/?$")
+
+# The only target_role the real endpoint accepts (notify.targetRoleSpaceAdmin).
+TARGET_ROLE = "space_admin"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -85,18 +98,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length") or 0)
         req = json.loads(self.rfile.read(length) or b"{}")
+        # The real service rejects target_role and targets together; surface
+        # that here rather than silently accepting a roster. (notifyWire has no
+        # Targets field, so sending one is already a client bug.)
         if "targets" in req:
-            # The real service rejects target_role and targets together; surface
-            # that here rather than silently accepting a roster.
             self._send(400, {"error": {"code": "VALIDATION_ERROR", "message": "targets forbidden with target_role"}})
             return
-        card = req.get("card") or {}
-        print(f"[stub] notify: space={req.get('space_id')} target_role={req.get('target_role')!r}", flush=True)
-        print(f"[stub]   title: {card.get('title')!r}", flush=True)
-        print(f"[stub]   description: {card.get('description')!r}", flush=True)
-        print(f"[stub]   data: {card.get('data')}", flush=True)
+        if req.get("target_role") != TARGET_ROLE:
+            self._send(400, {"error": {"code": "VALIDATION_ERROR", "message": "unknown target_role"}})
+            return
+        card = req.get("approval_card") or {}
         admins = [uid for uid, role in ROLES.items() if role >= 1]
-        self._send(200, {"data": {"delivered": len(admins), "filtered": 0}})
+        print(f"[stub] notify: space={req.get('space_id')} target_role={req.get('target_role')!r} actor={req.get('actor_uid')!r}", flush=True)
+        print(f"[stub]   action_type: {card.get('action_type')!r}", flush=True)
+        print(f"[stub]   title:       {card.get('title')!r}", flush=True)
+        print(f"[stub]   description: {card.get('description')!r}", flush=True)
+        print(f"[stub]   data:        {card.get('data')}", flush=True)
+        print(f"[stub]   delivered={admins} filtered={{}}", flush=True)
+        # Shapes must match notifyEnvelope exactly: delivered []string,
+        # filtered map[string]string. The Go client treats these as required
+        # types; returning ints here makes json.Unmarshal fail every time.
+        self._send(200, {"data": {"delivered": admins, "filtered": {}}})
 
 
 if __name__ == "__main__":

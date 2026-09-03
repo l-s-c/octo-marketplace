@@ -28,6 +28,18 @@ const (
 	// minOctoSecretLen is the shortest accepted octo shared secret, in bytes.
 	// octo-server enforces the same floor on the mirror side at its own boot.
 	minOctoSecretLen = 32
+
+	// maxCardActionSkew is the hard ceiling on OCTO_CARD_ACTION_MAX_SKEW.
+	//
+	// The default is 5m, which is already generous for inter-pod NTP drift and
+	// octo-server's internal retry horizon. Anything beyond ~15 minutes leaves a
+	// captured valid callback replayable against a still-valid signature for
+	// longer than any realistic delivery lag: the event_id receipt blocks a
+	// DUPLICATE delivery, not a first delivery that was intercepted before it
+	// reached us. 15 minutes is three times the default, enough to absorb a
+	// badly-skewed node clock after a restart without opening a multi-hour
+	// replay window by typo (e.g. 720h).
+	maxCardActionSkew = 15 * time.Minute
 )
 
 type Config struct {
@@ -254,7 +266,21 @@ func (c Config) ValidateAPI() error {
 	if err := c.validateOctoSecrets(); err != nil {
 		return err
 	}
+	if err := c.validateCardActionSkew(); err != nil {
+		return err
+	}
 	return validatePort(c.APIPort, "API_PORT")
+}
+
+// validateCardActionSkew enforces the upper bound on OCTO_CARD_ACTION_MAX_SKEW.
+// envDuration already rejects zero/negative/malformed by falling back to the
+// default, so only over-sized positive values reach here. See maxCardActionSkew
+// for the rationale.
+func (c Config) validateCardActionSkew() error {
+	if c.OctoCardActionMaxSkew > maxCardActionSkew {
+		return fmt.Errorf("OCTO_CARD_ACTION_MAX_SKEW (%s) must not exceed %s", c.OctoCardActionMaxSkew, maxCardActionSkew)
+	}
+	return nil
 }
 
 // validateOctoSecrets checks every configured octo shared secret. A blank
@@ -262,6 +288,13 @@ func (c Config) ValidateAPI() error {
 // but a configured one must be long enough to resist offline guessing, and no
 // two surfaces may share a value: reuse means a leak of the weakest one grants
 // the others.
+//
+// A configured CARD_ACTION_SECRET without an INTERNAL_TOKEN is also rejected:
+// the callback mounts and signatures verify, but operator-role lookup returns
+// "not configured", which surfaces as 503 on every real admin click and sends
+// every event into the DLQ. That is a boot-time error rather than a silent
+// misconfiguration, because there is no confidentiality argument for leaving
+// the callback partially open the way there is for leaving it fully closed.
 //
 // Error messages name the variable and never echo the value.
 func (c Config) validateOctoSecrets() error {
@@ -281,6 +314,9 @@ func (c Config) validateOctoSecrets() error {
 			return fmt.Errorf("%s must not reuse the value of %s", secret.name, other)
 		}
 		seen[secret.value] = secret.name
+	}
+	if c.OctoCardActionSecret != "" && c.OctoInternalToken == "" {
+		return fmt.Errorf("OCTO_MARKETPLACE_CARD_ACTION_SECRET requires OCTO_MARKETPLACE_INTERNAL_TOKEN: the callback verifies signatures but cannot authorize operator roles without the internal token, so every valid admin click would 503")
 	}
 	return nil
 }

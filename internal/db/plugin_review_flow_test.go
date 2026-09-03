@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -146,22 +147,32 @@ func newRequest(pluginID, version string) *model.PluginReviewRequest {
 // TestInsertReviewRequestDerivesKindFromVisibility pins the rule that decides
 // whether approval lists a plugin at all.
 //
-// The import path snapshots a version as part of the upload, so a private draft
-// normally HAS a current_version_id. Gating "first listing" on the ABSENCE of one
-// classifies every real upload as an upgrade, and the isFirst branch of
-// ApproveReview — the only code that flips visibility to space — then never runs:
-// the request reaches `approved`, a version is minted, and the plugin stays
-// invisible forever with no error anywhere. A fixture built through the
-// plugin-write API hides the bug, because that path also leaves
-// current_version_id NULL and lands on the correct branch by accident.
+// SubmitReview is gated on visibility=='space' at the service layer and again
+// inside InsertReviewRequest under the plugin lock, so the repository never
+// sees a private row here. Fixtures below seed `space,listing_state=draft` to
+// model the space-intent first listing the real flow produces; `private,draft`
+// seeds that survive are published-without-review PublishPlugin cases (e.g.
+// TestApproveListsAStrandedPublishedPrivateRow), which this code never
+// receives.
+//
+// The import path snapshots a version as part of the upload, so a space-intent
+// draft normally HAS a current_version_id. Gating "first listing" on the
+// ABSENCE of one classifies every real upload as an upgrade, and the isFirst
+// branch of ApproveReview — the only code that flips listing_state to
+// published — then never runs: the request reaches `approved`, a version is
+// minted, and the plugin stays invisible forever with no error anywhere. A
+// fixture built through the plugin-write API hides the bug, because that path
+// also leaves current_version_id NULL and lands on the correct branch by
+// accident.
 func TestInsertReviewRequestDerivesKindFromVisibility(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 
-	// The state a real upload leaves behind: private, but already versioned.
-	seed(t, database, seedPlugin{id: "plugin-imported", visibility: "private", currentVersionID: "ver-1", currentVersion: "1.0.0"})
-	// A private draft with no version at all (created through the write API).
-	seed(t, database, seedPlugin{id: "plugin-draft", visibility: "private"})
+	// The state a real upload leaves behind: space-intent draft, but already
+	// versioned.
+	seed(t, database, seedPlugin{id: "plugin-imported", visibility: "space", listingState: "draft", currentVersionID: "ver-1", currentVersion: "1.0.0"})
+	// A space-intent draft with no version at all (created through the write API).
+	seed(t, database, seedPlugin{id: "plugin-draft", visibility: "space", listingState: "draft"})
 	// A plugin already listed to the org.
 	seed(t, database, seedPlugin{id: "plugin-listed", visibility: "space", currentVersionID: "ver-2", currentVersion: "1.0.0"})
 
@@ -172,11 +183,11 @@ func TestInsertReviewRequestDerivesKindFromVisibility(t *testing.T) {
 		want     model.ReviewKind
 	}{
 		{
-			name:     "private draft that import already versioned is still a first listing",
+			name:     "space-intent draft that import already versioned is still a first listing",
 			pluginID: "plugin-imported", version: "9.9.9", want: model.ReviewKindFirst,
 		},
 		{
-			name:     "private draft with no version is a first listing",
+			name:     "space-intent draft with no version is a first listing",
 			pluginID: "plugin-draft", version: "9.9.9", want: model.ReviewKindFirst,
 		},
 		{
@@ -211,7 +222,7 @@ func TestInsertReviewRequestDerivesKindFromVisibility(t *testing.T) {
 func TestSubmitAcceptsTheDraftLabelOnAFirstListing(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
-	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private", currentVersionID: "ver-1", currentVersion: "1.0.0"})
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft", currentVersionID: "ver-1", currentVersion: "1.0.0"})
 	if err := repo.InsertReviewRequest(context.Background(), tenantScope(), newRequest("plugin-1", "1.0.0"), snapshotOf(`{"a":1}`, `{"b":2}`, nil)); err != nil {
 		t.Fatalf("first listing at the draft label was refused: %v", err)
 	}
@@ -220,7 +231,7 @@ func TestSubmitAcceptsTheDraftLabelOnAFirstListing(t *testing.T) {
 func TestSubmitEnforcesSinglePendingPerPlugin(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
-	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private"})
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft"})
 	if err := repo.InsertReviewRequest(context.Background(), tenantScope(), newRequest("plugin-1", "1.0.0"), snapshotOf(`{"a":1}`, `{"b":2}`, nil)); err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +249,7 @@ func TestSubmitVersionLabelReuseRules(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 	ctx := context.Background()
-	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private", currentVersionID: "ver-1", currentVersion: "0.9.0"})
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft", currentVersionID: "ver-1", currentVersion: "0.9.0"})
 
 	// Submit 1.0.0 and reject it.
 	first := newRequest("plugin-1", "1.0.0")
@@ -384,13 +395,167 @@ func TestApproveReRunsForwardOnlyRuleAgainstLockedCurrentVersion(t *testing.T) {
 	}
 }
 
+// TestApproveFirstListingAcceptsTheDraftLabel pins the critical nuance of the
+// label-reuse guard: on a first listing the draft's current_version IS the
+// request label, and the approval must SUCCEED. Refusing equality at approve
+// would brick every first listing. publishedVersionLabels is what separates
+// "author re-sent their own draft label" (excluded from the published set,
+// allowed) from "this label is already published over other content" (in the
+// published set, refused).
+func TestApproveFirstListingAcceptsTheDraftLabel(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	// A space-intent draft carrying the exact label the submitter sent — the
+	// normal first-listing state an import leaves behind.
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft", currentVersionID: "ver-1", currentVersion: "1.0.0"})
+	req := newRequest("plugin-1", "1.0.0")
+	if err := repo.InsertReviewRequest(ctx, tenantScope(), req, snapshotOf(`{"plugin_name":"Frozen"}`, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatalf("InsertReviewRequest: %v", err)
+	}
+	out, err := repo.ApproveReview(ctx, reviewerScope(), pluginrepo.ApproveReviewParams{
+		ReviewID: req.ID, ReviewerUID: "admin-1", ReviewerName: "Adam",
+	})
+	if err != nil {
+		t.Fatalf("approving a first listing at the draft label was refused: %v", err)
+	}
+	if out.Visibility != model.PluginVisibilitySpace || out.ListingState != model.PluginListingStatePublished {
+		t.Fatalf("the first listing did not list the plugin: visibility=%q listing_state=%q", out.Visibility, out.ListingState)
+	}
+	if out.CurrentVersion == nil || *out.CurrentVersion != "1.0.0" {
+		t.Fatalf("current_version = %v, want 1.0.0", out.CurrentVersion)
+	}
+}
+
+// TestApproveRefusesALabelReusedMidFlight pins fix #1: publishedVersionLabels
+// must be re-run against the LOCKED plugin row at approve time, not only at
+// insert time. AdminUpdate can move a LISTED plugin's current_version to
+// exactly the pending request's label (SnapshotVersion=true, no
+// RefusePendingReview / EnforceListingGate), so without the re-check
+// snapshotVersion minted an already-published label over different content.
+//
+// The ordering guard alone (VersionNotRegressed) cannot catch this because it
+// returns true unconditionally on equality, and it MUST keep doing so — that
+// short-circuit is what lets the previous test (first listing at draft label)
+// succeed. It is the published-set check, not equality, that distinguishes the
+// two cases.
+func TestApproveRefusesALabelReusedMidFlight(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	// A plugin ALREADY listed at 1.0.0. A request for 1.0.0 is refused at insert
+	// time, so submit the NEXT label (2.0.0), then advance the live label to 2.0.0
+	// the way AdminUpdate would — minting a new current_version over different
+	// content while the request sits pending.
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "published", currentVersionID: "ver-1", currentVersion: "1.0.0"})
+	req := newRequest("plugin-1", "2.0.0")
+	if err := repo.InsertReviewRequest(ctx, tenantScope(), req, snapshotOf(`{"plugin_name":"Frozen 2.0"}`, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatalf("InsertReviewRequest: %v", err)
+	}
+	// The "AdminUpdate-shaped" writer: SnapshotVersion forces a new version row,
+	// mirroring admin.go:326. It moves current_version forward to EXACTLY the
+	// request's label, but over content no reviewer saw — that is the bug being
+	// pinned.
+	if _, err := database.Exec(`UPDATE plugins SET current_version='2.0.0', manifest_json=CAST('{"plugin_name":"Admin-dropped"}' AS JSON), plugin_hash=REPEAT('c',71) WHERE plugin_id='plugin-1'`); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := repo.ApproveReview(ctx, reviewerScope(), pluginrepo.ApproveReviewParams{
+		ReviewID: req.ID, ReviewerUID: "admin-1", ReviewerName: "Adam",
+	})
+	if !errors.Is(err, pluginrepo.ErrConflict) {
+		t.Fatalf("approving over a mid-flight label reuse = %v, want ErrConflict", err)
+	}
+
+	// The request must NOT be flipped to approved, the live label stays on the
+	// admin-dropped content, and no new version was minted by the aborted approval.
+	var status string
+	if err := database.QueryRow(`SELECT status FROM plugin_review_requests WHERE review_id=?`, req.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(model.ReviewStatusPending) {
+		t.Fatalf("the refused approval settled the request: status=%q", status)
+	}
+	var current, phash string
+	if err := database.QueryRow(`SELECT current_version, plugin_hash FROM plugins WHERE plugin_id='plugin-1'`).Scan(&current, &phash); err != nil {
+		t.Fatal(err)
+	}
+	if current != "2.0.0" {
+		t.Fatalf("current_version = %q, want 2.0.0 (unchanged by the refused approval)", current)
+	}
+	if phash != strings.Repeat("c", 71) {
+		t.Fatalf("the refused approval overwrote the live content: plugin_hash=%q", phash)
+	}
+	// No new version row was minted by the aborted approval. The seed never
+	// inserted plugin_versions rows (current_version/current_version_id are set
+	// directly on plugins, matching what some legacy imports look like), so
+	// "rows==0" here is the "nothing added" signal regardless of the seed state.
+	// plugin_versions.version is the per-plugin auto-increment counter, not the
+	// applicant semver label — look for the counter rather than the label so the
+	// assertion doesn't depend on snapshotVersion's internal sequencing.
+	var versionRows int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM plugin_versions WHERE plugin_id='plugin-1'`).Scan(&versionRows); err != nil {
+		t.Fatal(err)
+	}
+	if versionRows != 0 {
+		t.Fatalf("version rows after refused approval = %d, want 0 (no new snapshot minted)", versionRows)
+	}
+}
+
+// TestSubmitRefusesWhenVisibilityWasLoweredToPrivateMidFlight pins fix #2:
+// InsertReviewRequest must re-derive visibility == 'space' under the plugin
+// lock, not trust the service's earlier unlocked Detail read. A concurrent
+// owner upsert can lower a still-draft row to private between the unlocked
+// check and the insert transaction; RefusePendingReview finds no request row
+// yet so the update wins, and without the in-tx check the insert lands against
+// a now-private row that ApproveReview's isFirst branch would flip to space
+// against the author's since-changed intent. Mirrors
+// TestPublishRefusesAPluginWithAReviewSubmittedMidFlight for the symmetric
+// window.
+func TestSubmitRefusesWhenVisibilityWasLoweredToPrivateMidFlight(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	// A space-intent draft, the state SubmitReview expects to find.
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft", currentVersionID: "ver-1", currentVersion: "1.0.0"})
+
+	// The interleaving: between the service's unlocked Detail read and
+	// InsertReviewRequest, the owner lowers visibility to private. This is legal
+	// on a draft; Repo.Update's RefusePendingReview check sees no pending request
+	// (the insert hasn't committed yet), so the update wins the plugin row lock.
+	// Reproduce by raw UPDATE.
+	if _, err := database.Exec(`UPDATE plugins SET visibility='private' WHERE plugin_id='plugin-1'`); err != nil {
+		t.Fatal(err)
+	}
+
+	err := repo.InsertReviewRequest(ctx, tenantScope(), newRequest("plugin-1", "1.0.1"), snapshotOf(`{"plugin_name":"V2"}`, `{"attachments":[]}`, nil))
+	if !errors.Is(err, pluginrepo.ErrConflict) {
+		t.Fatalf("submit against a privately-lowered row = %v, want ErrConflict", err)
+	}
+	var pending int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM plugin_review_requests WHERE plugin_id='plugin-1'`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 {
+		t.Fatalf("a request row was written against a private plugin: %d rows", pending)
+	}
+	// The plugin stays private: the refused insert did not widen anything.
+	var vis string
+	if err := database.QueryRow(`SELECT visibility FROM plugins WHERE plugin_id='plugin-1'`).Scan(&vis); err != nil {
+		t.Fatal(err)
+	}
+	if vis != "private" {
+		t.Fatalf("visibility = %q after the refused insert, want private", vis)
+	}
+}
+
 // The whole point of the gate: approve is what makes a plugin org-visible, and it
 // applies the FROZEN documents rather than whatever the draft says now.
 func TestApproveFlipsVisibilityAndAppliesTheFrozenSnapshot(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 	ctx := context.Background()
-	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private", currentVersionID: "ver-1", currentVersion: "0.9.0"})
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft", currentVersionID: "ver-1", currentVersion: "0.9.0"})
 
 	req := newRequest("plugin-1", "1.0.0")
 	changelog := "first release"
@@ -470,7 +635,7 @@ func TestApproveReDerivesDenormalizedNameAndTagsFromFrozenManifest(t *testing.T)
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 	ctx := context.Background()
-	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private", currentVersionID: "ver-1", currentVersion: "0.9.0"})
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft", currentVersionID: "ver-1", currentVersion: "0.9.0"})
 
 	req := newRequest("plugin-1", "1.0.0")
 	frozenManifest := `{"plugin_name":"Reviewed Name","labels":["reviewed"]}`
@@ -513,7 +678,7 @@ func TestApproveAppliesTheFrozenRelationGraph(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 	ctx := context.Background()
-	seed(t, database, seedPlugin{id: "team-1", typ: "expert_team", visibility: "private", currentVersionID: "ver-1", currentVersion: "0.9.0"})
+	seed(t, database, seedPlugin{id: "team-1", typ: "expert_team", visibility: "space", listingState: "draft", currentVersionID: "ver-1", currentVersion: "0.9.0"})
 	seed(t, database, seedPlugin{id: "member-a", typ: "expert", visibility: "private", embedded: true})
 	seed(t, database, seedPlugin{id: "member-b", typ: "expert", visibility: "private", embedded: true})
 	seedRelation(t, database, "rel-a", "team-1", "member-a", "expert_team_expert")
@@ -622,12 +787,13 @@ func TestApproveUpgradeKeepsTheListingAndSwapsContent(t *testing.T) {
 	}
 }
 
-// A reject changes nothing about the plugin: a private draft stays private.
+// A reject changes nothing about the plugin: a space-intent draft stays a
+// draft, neither visibility nor listing_state move.
 func TestRejectLeavesThePluginUntouched(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 	ctx := context.Background()
-	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private", currentVersion: "0.9.0"})
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft", currentVersionID: "ver-1", currentVersion: "0.9.0"})
 	req := newRequest("plugin-1", "1.0.0")
 	if err := repo.InsertReviewRequest(ctx, tenantScope(), req, snapshotOf(`{"plugin_name":"Frozen"}`, `{"attachments":[]}`, nil)); err != nil {
 		t.Fatal(err)
@@ -637,12 +803,12 @@ func TestRejectLeavesThePluginUntouched(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var visibility, currentVersion string
-	if err := database.QueryRow(`SELECT visibility, current_version FROM plugins WHERE plugin_id='plugin-1'`).Scan(&visibility, &currentVersion); err != nil {
+	var visibility, listingState, currentVersion string
+	if err := database.QueryRow(`SELECT visibility, listing_state, current_version FROM plugins WHERE plugin_id='plugin-1'`).Scan(&visibility, &listingState, &currentVersion); err != nil {
 		t.Fatal(err)
 	}
-	if visibility != "private" || currentVersion != "0.9.0" {
-		t.Fatalf("reject changed the plugin: %q/%q", visibility, currentVersion)
+	if visibility != "space" || listingState != "draft" || currentVersion != "0.9.0" {
+		t.Fatalf("reject changed the plugin: %q/%q/%q", visibility, listingState, currentVersion)
 	}
 	var versions int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM plugin_versions WHERE plugin_id='plugin-1'`).Scan(&versions); err != nil {
@@ -666,7 +832,7 @@ func TestCancelIsApplicantOnlyAndConflictsWhenDecided(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 	ctx := context.Background()
-	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private"})
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft"})
 	req := newRequest("plugin-1", "1.0.0")
 	if err := repo.InsertReviewRequest(ctx, tenantScope(), req, snapshotOf(`{"a":1}`, `{"b":2}`, nil)); err != nil {
 		t.Fatal(err)
@@ -694,7 +860,7 @@ func TestDecisionsAreSpaceScoped(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 	ctx := context.Background()
-	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private"})
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft"})
 	req := newRequest("plugin-1", "1.0.0")
 	if err := repo.InsertReviewRequest(ctx, tenantScope(), req, snapshotOf(`{"a":1}`, `{"b":2}`, nil)); err != nil {
 		t.Fatal(err)
@@ -710,7 +876,7 @@ func TestDecisionsAreSpaceScoped(t *testing.T) {
 	if err := database.QueryRow(`SELECT rr.status, p.visibility FROM plugin_review_requests rr JOIN plugins p ON p.plugin_id=rr.plugin_id WHERE rr.review_id=?`, req.ID).Scan(&status, &visibility); err != nil {
 		t.Fatal(err)
 	}
-	if status != "pending" || visibility != "private" {
+	if status != "pending" || visibility != "space" {
 		t.Fatalf("a cross-Space decision mutated state: %q/%q", status, visibility)
 	}
 	// A reviewer in the right Space still succeeds, so the refusal above was the
@@ -726,7 +892,7 @@ func TestConcurrentDecisionsProduceOneWinner(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 	ctx := context.Background()
-	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private"})
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft"})
 	req := newRequest("plugin-1", "1.0.0")
 	if err := repo.InsertReviewRequest(ctx, tenantScope(), req, snapshotOf(`{"a":1}`, `{"b":2}`, nil)); err != nil {
 		t.Fatal(err)
@@ -787,7 +953,7 @@ func TestDecidingASettledRequestConflictsAndAMissingOneIsNotFound(t *testing.T) 
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 	ctx := context.Background()
-	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private"})
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft"})
 	req := newRequest("plugin-1", "1.0.0")
 	if err := repo.InsertReviewRequest(ctx, tenantScope(), req, snapshotOf(`{"a":1}`, `{"b":2}`, nil)); err != nil {
 		t.Fatal(err)
@@ -812,8 +978,11 @@ func TestReviewReadsAreScoped(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 	ctx := context.Background()
-	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private", owner: "user-1"})
-	seed(t, database, seedPlugin{id: "plugin-2", visibility: "private", owner: "user-2"})
+	// Review requests only ever live against space-intent drafts (SubmitReview and
+	// InsertReviewRequest both refuse visibility!=space). Use owner-distinct
+	// space,draft rows to test applicant scoping.
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft", owner: "user-1"})
+	seed(t, database, seedPlugin{id: "plugin-2", visibility: "space", listingState: "draft", owner: "user-2"})
 
 	mine := newRequest("plugin-1", "1.0.0")
 	if err := repo.InsertReviewRequest(ctx, tenantScope(), mine, snapshotOf(`{"a":1}`, `{"b":2}`, nil)); err != nil {
@@ -887,7 +1056,7 @@ func TestCardActionReceiptRoundTrip(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 	ctx := context.Background()
-	seed(t, database, seedPlugin{id: "plugin-1", visibility: "private"})
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft"})
 	req := newRequest("plugin-1", "1.0.0")
 	if err := repo.InsertReviewRequest(ctx, tenantScope(), req, snapshotOf(`{"a":1}`, `{"b":2}`, nil)); err != nil {
 		t.Fatal(err)
@@ -1131,7 +1300,7 @@ func TestApproveSelfHealsTheDefaultPlacement(t *testing.T) {
 	ctx := context.Background()
 
 	for _, id := range []string{"plugin-hidden", "plugin-missing", "plugin-visible"} {
-		seed(t, database, seedPlugin{id: id, visibility: "private", currentVersionID: "ver-1", currentVersion: "0.9.0"})
+		seed(t, database, seedPlugin{id: id, visibility: "space", listingState: "draft", currentVersionID: "ver-1", currentVersion: "0.9.0"})
 	}
 	// A publish-era row: the placement exists but was hidden when publish was removed.
 	if _, err := database.Exec(`UPDATE plugin_placements SET visible=0 WHERE plugin_id='plugin-hidden'`); err != nil {

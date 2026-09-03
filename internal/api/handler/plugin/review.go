@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -47,10 +48,22 @@ func decodeReviewBody(c *gin.Context, dst any) bool {
 	return true
 }
 
-// reviewRequestResponse is the wire form of a review request. It deliberately
-// omits the frozen manifest/package/relation bytes: a list must not carry them
-// at all, and the detail view exposes the reviewable content as readme_content
-// rather than shipping the whole snapshot to the browser.
+// reviewRequestResponse is the wire form of a review request.
+//
+// The LIST shape is deliberately lean: it omits the frozen manifest, package,
+// attachment sidecar and relation graph so the queue page stays small and never
+// ships document bytes to rows the caller did not click into.
+//
+// The DETAIL shape (returned by GET /review_requests/{review_id}) adds two
+// reviewer-facing projections of the FROZEN snapshot: readme_content (the
+// primary document text the decision will actually ship) and frozen_relations
+// (the membership graph as it was when the applicant submitted). For containers
+// (expert / expert_team) the membership graph IS part of the reviewable content,
+// and approval applies that exact graph atomically — shipping it alongside
+// whatever the live membership happened to be when the reviewer clicked approve
+// would defeat the purpose of the freeze. frozen_relations is populated only on
+// the detail read and is parsed defensively: a missing or malformed snapshot
+// degrades to an empty array rather than 500ing the endpoint.
 type reviewRequestResponse struct {
 	ReviewID       string                      `json:"review_id"`
 	PluginID       string                      `json:"plugin_id"`
@@ -85,6 +98,93 @@ type reviewRequestResponse struct {
 	// ReadmeContent is the primary document of the FROZEN submission; populated
 	// on the detail read only.
 	ReadmeContent string `json:"readme_content,omitempty"`
+	// FrozenRelations is the FROZEN relation graph the reviewer is approving.
+	// Populated ONLY on the DETAIL response (GET /review_requests/{review_id}) via
+	// the LoadReviewSnapshot read. The list projection (reviewListDTO) keeps this
+	// pointer nil so omitempty drops the key and per-row graph data never leaks to
+	// the queue. On a detail response the pointer is always non-nil and points at
+	// a slice that is either empty (for missing/empty/malformed/zero-edge
+	// snapshots — renders as JSON []) or populated (the decoded edges in stable
+	// snake_case DTO). Each element carries the edge approval will apply: target
+	// plugin id, relation type, sort order and data payload (which for
+	// expert_team members encodes is_leader/role/member_key). Target display name
+	// is intentionally not carried here — the snapshot is of the frozen edges,
+	// not of whatever the target rows are named right now, and the detail
+	// endpoint must not reach back to the live plugin table to enrich frozen
+	// data with mutable state.
+	FrozenRelations *[]reviewRelationResponse `json:"frozen_relations,omitempty"`
+}
+
+// reviewRelationResponse is one edge in the frozen membership graph carried on
+// the review detail response. The field set is deliberately narrow: it covers
+// what a reviewer needs to inspect membership (which target, what kind of edge,
+// in what order, with what role/data) and nothing the snapshot does not contain.
+// Fields that reference mutable plugin-row state (display name, embedded flag)
+// are intentionally omitted — shipping them would mislead by showing the live
+// value rather than the one under review.
+type reviewRelationResponse struct {
+	RelationID     string           `json:"relation_id"`
+	TargetPluginID string           `json:"target_plugin_id"`
+	TargetType     model.PluginType `json:"target_plugin_type,omitempty"`
+	RelationType   string           `json:"relation_type"`
+	SortOrder      int              `json:"sort_order"`
+	Data           json.RawMessage  `json:"data,omitempty" swaggertype:"object"`
+}
+
+func decodeFrozenRelations(raw json.RawMessage) []reviewRelationResponse {
+	if len(raw) == 0 {
+		return nil
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	// model.PluginRelation has no json tags, so plugin_review_requests.relations_json
+	// stores Go default field names (ID, TargetPluginID, Type, SortOrder, Data, …).
+	// Decode with those tags and project onto the stable snake_case wire DTO.
+	// Use a sentinel pointer so we can distinguish "empty array in JSON" (return
+	// non-nil empty) from "decoder error" (also return non-nil empty for the
+	// degrade-to-[] contract) — both surface as [] on the wire, but the pointer
+	// trick below is only needed if we ever need to distinguish them. We don't
+	// here; the non-nil empty slice encodes as the JSON array [] via the custom
+	// marshaler we add on the response type.
+	var edges []struct {
+		ID               string           `json:"ID"`
+		TargetPluginID   string           `json:"TargetPluginID"`
+		TargetPluginType model.PluginType `json:"TargetPluginType"`
+		Type             string           `json:"Type"`
+		SortOrder        int              `json:"SortOrder"`
+		Data             json.RawMessage  `json:"Data"`
+	}
+	if err := json.Unmarshal(raw, &edges); err != nil {
+		// A malformed snapshot must not 500 the detail read: the reviewer still
+		// needs to see the documents and reject. Surface as an explicitly tagged
+		// empty (non-nil, zero-length) slice so the wire key renders as [].
+		return []reviewRelationResponse{}
+	}
+	out := make([]reviewRelationResponse, 0, len(edges))
+	for _, e := range edges {
+		var data json.RawMessage
+		if len(e.Data) > 0 {
+			t := bytes.TrimSpace(e.Data)
+			if len(t) > 0 && !bytes.Equal(t, []byte("null")) {
+				data = normalizedObjectRaw(e.Data)
+			}
+		}
+		out = append(out, reviewRelationResponse{
+			RelationID:     e.ID,
+			TargetPluginID: e.TargetPluginID,
+			TargetType:     e.TargetPluginType,
+			RelationType:   e.Type,
+			SortOrder:      e.SortOrder,
+			Data:           data,
+		})
+	}
+	// Always return a non-nil slice here: either the populated edges, or a 0-len
+	// allocated slice for a literal JSON `[]`. The caller (reviewDTO) treats nil
+	// as "no snapshot loaded, omit the field"; a non-nil slice makes the key
+	// render as []/[..].
+	return out
 }
 
 // reviewSubmitRequest is the submit body.
@@ -123,9 +223,10 @@ type reviewRejectRequest struct {
 
 func reviewDTO(r *model.PluginReviewRequest) reviewRequestResponse {
 	if r == nil {
-		return reviewRequestResponse{}
+		empty := []reviewRelationResponse{}
+		return reviewRequestResponse{FrozenRelations: &empty}
 	}
-	return reviewRequestResponse{
+	out := reviewRequestResponse{
 		ReviewID:           r.ID,
 		PluginID:           r.PluginID,
 		SpaceID:            r.SpaceID,
@@ -151,6 +252,32 @@ func reviewDTO(r *model.PluginReviewRequest) reviewRequestResponse {
 		PluginListingState: r.PluginListingState,
 		ReadmeContent:      r.ReadmeContent,
 	}
+	// decodeFrozenRelations returns:
+	//   - nil           when RelationsJSON is nil/empty/NULL (list path, which
+	//                   does not select the column at all);
+	//   - non-nil 0-len when snapshot bytes were present but decode failed
+	//                   (malformed) or the JSON is an empty array;
+	//   - populated     when the snapshot decodes to one or more edges.
+	//
+	// We take the address for the wire field so omitempty can distinguish
+	// "absent" (nil pointer, list path) from "present but empty" (pointer to
+	// 0-len slice, detail path with no edges or corrupt bytes) from "present
+	// with edges".
+	if edges := decodeFrozenRelations(r.RelationsJSON); edges != nil {
+		out.FrozenRelations = &edges
+	}
+	return out
+}
+
+// reviewListDTO is the list projection. It is identical to reviewDTO but with
+// FrozenRelations forced to nil so the per-row graph never reaches the list
+// response even if a future refactor makes the service load snapshot bytes on
+// the list path (defense in depth against the reviewer-graph leak this change
+// closes).
+func reviewListDTO(r *model.PluginReviewRequest) reviewRequestResponse {
+	d := reviewDTO(r)
+	d.FrozenRelations = nil
+	return d
 }
 
 // SubmitReview submits a plugin for Space visibility review.
@@ -266,7 +393,7 @@ func (h *Handler) ListReviews(c *gin.Context) {
 	}
 	out := make([]reviewRequestResponse, 0, len(items))
 	for _, item := range items {
-		out = append(out, reviewDTO(item))
+		out = append(out, reviewListDTO(item))
 	}
 	apiresponse.Offset(c, out, int(total), page, pageSize)
 }

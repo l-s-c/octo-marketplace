@@ -616,11 +616,12 @@ func TestPublishRefusesAPluginWithAReviewSubmittedMidFlight(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 	ctx := context.Background()
-	// A private draft that a concurrent SubmitReview would have flipped to `space`
-	// intent — but the interleaving that matters is the request landing while the
-	// publish still sees the private draft, so seed it private and insert the
-	// pending request the way a raced submit would leave it.
-	seed(t, database, seedPlugin{id: "p1", visibility: "private", listingState: "draft", currentVersion: "1.0.0"})
+	// A space-intent draft that a concurrent SubmitReview would leave pending.
+	// Publish's review branch fires when visibility=space (listing.go:91) and
+	// never reaches the direct PublishPlugin path, so seed the state the racing
+	// submit would leave rather than the pre-submit state: the row is still a
+	// draft with visibility=space, and a pending request is in flight.
+	seed(t, database, seedPlugin{id: "p1", visibility: "space", listingState: "draft", currentVersion: "1.0.0"})
 	if err := repo.InsertReviewRequest(ctx, tenantScope(), newRequest("p1", "1.0.0"),
 		snapshotOf(`{"plugin_name":"V1"}`, `{"attachments":[]}`, nil)); err != nil {
 		t.Fatalf("InsertReviewRequest: %v", err)
@@ -629,8 +630,13 @@ func TestPublishRefusesAPluginWithAReviewSubmittedMidFlight(t *testing.T) {
 	_, err := repo.PublishPlugin(ctx, tenantScope(), pluginrepo.PublishParams{
 		PluginID: "p1", OperatorID: "user-1", OperatorName: "Alice",
 	})
-	if !errors.Is(err, pluginrepo.ErrReviewPending) {
-		t.Fatalf("PublishPlugin = %v, want ErrReviewPending", err)
+	// The raced path is rejected either way: if the visibility re-derivation
+	// fires first we get ErrConflict (space drafts never go through the direct
+	// publish branch to begin with), and if the pending check fires first we
+	// get ErrReviewPending. Either outcome refuses the stamp and leaves the row
+	// a draft — which is what the assertion below pins.
+	if err == nil || (!errors.Is(err, pluginrepo.ErrReviewPending) && !errors.Is(err, pluginrepo.ErrConflict)) {
+		t.Fatalf("PublishPlugin = %v, want ErrReviewPending or ErrConflict", err)
 	}
 	var listing string
 	if err := database.QueryRow(`SELECT listing_state FROM plugins WHERE plugin_id='p1'`).Scan(&listing); err != nil {

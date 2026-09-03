@@ -13,8 +13,29 @@
 -- would corrupt that sequence. Keeping the snapshot on the request also means a
 -- rejected submission never occupies (plugin_id, version), so a fixed
 -- resubmission may reuse the same label.
+--
+-- REPLAY SAFETY: this file carries TWO CREATE TABLE statements, and MySQL
+-- implicitly commits each DDL, so the sql-migrate transaction protects nothing.
+-- If the first CREATE commits and the process dies before the second statement
+-- or before the migration-record insert, the next boot REPLAYS the whole file.
+-- Both statements are therefore `CREATE TABLE IF NOT EXISTS`, which makes each
+-- one a no-op against an already-created table instead of ERROR 1050 (table
+-- already exists) — an error that strands the boot until a human edits
+-- gorp_migrations by hand. This mirrors the `DROP TABLE IF EXISTS` already used
+-- in the Down section below. The tables were split in the same order as their
+-- FK dependency (receipts references requests), so a partial replay always
+-- re-runs a whole, still-valid step.
+--
+-- The file is NOT split into two single-DDL files (the discipline later files
+-- such as 20260902-03 follow) because it has ALREADY BEEN APPLIED on shared and
+-- dev databases: renumbering would re-run against heads that recorded this id.
+-- `IF NOT EXISTS` is a pure idempotency addition — the resulting schema, column
+-- set, indexes, generated column, checks, charset and collation are unchanged.
+-- The known cost of `IF NOT EXISTS` is that it also silently accepts a
+-- PRE-EXISTING table of a DIFFERENT shape; that is acceptable here because these
+-- two names are owned by this migration and created nowhere else.
 
-CREATE TABLE `plugin_review_requests` (
+CREATE TABLE IF NOT EXISTS `plugin_review_requests` (
   `review_id`          VARCHAR(64)   NOT NULL,
   `plugin_id`          VARCHAR(64)   NOT NULL,
   `space_id`           VARCHAR(64)   NOT NULL,
@@ -71,7 +92,7 @@ CREATE TABLE `plugin_review_requests` (
 -- event_id is a decimal-string representation of an int64 octo-server event
 -- sequence (its full range exceeds JS Number.MAX_SAFE_INTEGER, so it is a string
 -- on the wire and stays one here); VARCHAR(32) leaves headroom over uint64.
-CREATE TABLE `plugin_card_action_receipts` (
+CREATE TABLE IF NOT EXISTS `plugin_card_action_receipts` (
   `event_id`           VARCHAR(32)   NOT NULL,
   `review_id`          VARCHAR(64)   NOT NULL,
   `decision`           VARCHAR(32)   NOT NULL,

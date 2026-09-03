@@ -70,6 +70,15 @@ func TestDeleteCancelsThePendingReviewRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// NOTE: This fixture seeds a published+space row and calls repo.Delete directly
+	// as the owner-scope. That would now be refused at the SERVICE layer (see
+	// Service.Delete's ErrListedRequiresReview gate, added to stop the author
+	// unilaterally removing a live org plugin). The repository intentionally keeps
+	// no listing_state gate of its own: AdminDelete still needs to be able to
+	// remove a listed row, and service-level authorization is the service's job.
+	// This test exercises the pending-review CASCADE from repo.Delete, not
+	// authorization — so calling the repo with the owner scope directly remains
+	// the correct shape for this assertion.
 	if err := repo.Delete(ctx, owner, "plugin-1", "user-1", "Alice", "req-1", nil); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
@@ -154,7 +163,7 @@ func TestDeleteGraphCancelsPendingReviewsAcrossTheSubtree(t *testing.T) {
 	owner := tenantScope()
 
 	seed(t, database, seedPlugin{id: "expert-1", typ: "expert", visibility: "space", listingState: "draft", currentVersion: "0.9.0"})
-	seed(t, database, seedPlugin{id: "skill-1", typ: "skill", visibility: "private", listingState: "draft", currentVersion: "0.9.0"})
+	seed(t, database, seedPlugin{id: "skill-1", typ: "skill", visibility: "space", listingState: "draft", currentVersion: "0.9.0"})
 	seedRelation(t, database, "rel-1", "expert-1", "skill-1", "expert_skill")
 
 	topReq := newRequest("expert-1", "1.0.0")

@@ -9,6 +9,15 @@ package model
 // "member" (3) read with this encoding compares as >= SpaceRoleAdmin and would
 // be handed review authority, and a web "owner" (1) would be demoted to admin.
 // Never compare, copy, or default one encoding across to the other.
+//
+// That hazard is now BOUNDED, not merely documented: SpaceRole clamps anything
+// outside 0..2 down to SpaceRoleMember (see ClampSpaceRole), so an octo-server
+// that drifted onto the web encoding hands review authority to NOBODY instead of
+// to every member of every Space. The clamp is at ingress on purpose — a single
+// accessor plus the two wire boundaries (internal/auth.HTTPResolver,
+// internal/notify.Client.MemberRole). Do NOT add another one at a `>=
+// SpaceRoleAdmin` comparison site, and do not read SpaceRoles directly to
+// recover the "real" value.
 const (
 	SpaceRoleMember = 0
 	SpaceRoleAdmin  = 1
@@ -39,12 +48,37 @@ type Identity struct {
 
 // SpaceRole returns the caller's role in spaceID, or SpaceRoleMember when the
 // Space carries no entry. See the SpaceRoles field: absent and 0 are the same
-// answer on purpose.
+// answer on purpose, and anything outside 0..2 (e.g. a drifted octo-server
+// using the inverted octo-web encoding where 3 means "member") is CLAMPED to
+// SpaceRoleMember so authorization fails closed instead of silently handing
+// every member review authority. Callers MUST NOT read SpaceRoles directly to
+// bypass the clamp.
 func (i Identity) SpaceRole(spaceID string) int {
 	if spaceID == "" {
 		return SpaceRoleMember
 	}
-	return i.SpaceRoles[spaceID]
+	r, _ := ClampSpaceRole(i.SpaceRoles[spaceID])
+	return r
+}
+
+// ClampSpaceRole bounds an incoming octo-server role value to the
+// SpaceRoleMember..SpaceRoleOwner range. Values outside 0..2 — negatives,
+// larger numbers, or a drift onto the inverted octo-web encoding (3=member) —
+// collapse to SpaceRoleMember so that `>= SpaceRoleAdmin` never accidentally
+// promotes a plain member to reviewer.
+//
+// The second return value reports whether the input was out of range, so wire-
+// ingress callers (auth resolver, notify client) can log a single "octo-server
+// drift" warning per distinct bad value without model having to depend on the
+// logging package.
+//
+// This is called from every ingress (SpaceRole accessor, auth resolver decode,
+// notify member-role response). Do NOT call it at comparison sites.
+func ClampSpaceRole(r int) (clamped int, outOfRange bool) {
+	if r < SpaceRoleMember || r > SpaceRoleOwner {
+		return SpaceRoleMember, true
+	}
+	return r, false
 }
 
 // CanReviewSpace reports whether this identity may act on Space-level plugin

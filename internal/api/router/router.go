@@ -34,6 +34,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/storage"
 	"github.com/gin-gonic/gin"
 	goredis "github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 )
 
 type Pinger interface {
@@ -109,6 +110,7 @@ func Public(database Pinger, authenticator *marketmiddleware.Authenticator, admi
 func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenticator, adminAuth *marketmiddleware.AdminAuthenticator, storageCfg StorageConfig, mcp *handler.MCP, adminMCP *handler.AdminMCP, authEnabled bool, parseCfg ParseConfig, fleetClient expertsvc.FleetProvisioner, redisCfg RedisConfig, reviewCfg ReviewConfig) *gin.Engine {
 	r := gin.New()
 	r.Use(logging.RequestID(), logging.AccessLog(), logging.Recovery(), corsMiddleware(storageCfg.CORSAllowedOrigins))
+	logReviewConfigWarnings(reviewCfg)
 
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -168,13 +170,16 @@ func publicWithOptions(database Pinger, authenticator *marketmiddleware.Authenti
 
 		pluginSvc := pluginsvc.New(pluginRepo, store)
 		pluginSvc.SetArtifactLimits(int64(storageCfg.MaxMB) << 20)
-		// Space review IM integration. A nil notifier keeps the review endpoints
-		// fully functional and simply sends no approval card.
-		if reviewCfg.OctoAPIURL != "" && reviewCfg.InternalToken != "" {
-			pluginSvc.WithNotify(
-				notify.New(reviewCfg.OctoAPIURL, reviewCfg.InternalToken, reviewCfg.NotifyTimeout),
-				notify.BestEffort,
-			)
+		// Space review IM integration. A disabled notifier keeps the review
+		// endpoints fully functional and simply sends no approval card. Partial
+		// configurations (URL-without-token, token-without-card-secret) are
+		// warned about at engine construction by logReviewConfigWarnings; a card
+		// secret without an internal token is rejected by config.ValidateAPI at
+		// boot because it would leave the callback mounted but unable to
+		// authorize anyone.
+		notifier := notify.New(reviewCfg.OctoAPIURL, reviewCfg.InternalToken, reviewCfg.NotifyTimeout)
+		if notifier.Enabled() {
+			pluginSvc.WithNotify(notifier, notify.BestEffort)
 		}
 		pluginCats := pluginsvc.NewCategories(pluginRepo, generateID)
 		pluginhandler.New(pluginSvc, pluginCats).Register(v1)
@@ -333,6 +338,30 @@ func corsMiddleware(allowedOrigins []string) gin.HandlerFunc {
 			return
 		}
 		c.Next()
+	}
+}
+
+// logReviewConfigWarnings emits a startup warning for each partial
+// plugin-review configuration. These are non-fatal: the web review path stays
+// fully usable, but one half of the IM integration is silently disabled, which
+// an operator would otherwise only discover when humans complain. Each message
+// names the variables involved and never echoes any secret value.
+//
+// A card secret without an internal token is rejected at boot by
+// config.ValidateAPI, so it does not reach here.
+func logReviewConfigWarnings(cfg ReviewConfig) {
+	hasURL := cfg.OctoAPIURL != ""
+	hasToken := cfg.InternalToken != ""
+	hasSecret := cfg.CardActionSecret != ""
+	if hasURL && !hasToken {
+		logging.Warn("review_notify_disabled",
+			zap.String("operation", "plugin_review.config"),
+			zap.String("reason", "OCTO_API_URL set without OCTO_MARKETPLACE_INTERNAL_TOKEN; approval cards will not be dispatched"))
+	}
+	if hasToken && !hasSecret {
+		logging.Warn("review_callback_disabled",
+			zap.String("operation", "plugin_review.config"),
+			zap.String("reason", "OCTO_MARKETPLACE_INTERNAL_TOKEN set without OCTO_MARKETPLACE_CARD_ACTION_SECRET; approval cards will be sent but every admin click will be rejected (401)"))
 	}
 }
 

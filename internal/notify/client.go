@@ -38,8 +38,13 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/logging"
+	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+	"go.uber.org/zap"
 )
 
 // maxRespBytes bounds any response we read from octo-server. Both the role
@@ -62,6 +67,11 @@ const targetRoleSpaceAdmin = "space_admin"
 
 // Space member roles, using octo-server's native space_member.role encoding.
 // Note this is the OPPOSITE of octo-web's display encoding; do not convert.
+//
+// These are the same numeric values as model.SpaceRole*; duplicated here so
+// that callers of notify.Client.MemberRole do not have to import model just to
+// compare the returned *int. Clamping of out-of-range wire values uses
+// model.ClampSpaceRole so the canonical range lives in one place.
 const (
 	RoleMember = 0
 	RoleAdmin  = 1
@@ -135,6 +145,14 @@ type Client struct {
 	baseURL       string
 	internalToken string
 	http          *http.Client
+
+	// roleDriftOnce bounds the log flood when octo-server returns an out-of-
+	// range member role (e.g. it drifts onto the inverted octo-web encoding).
+	// See the note on HTTPResolver.driftLogOnce in internal/auth: same shape,
+	// same reason — the bad value arrives on every MemberRole call during a
+	// drift, so one log per distinct bad value per process life is the bound.
+	roleDriftOnce map[int]*sync.Once
+	driftMu       sync.Mutex
 }
 
 // New returns a Client. An empty baseURL or internalToken yields a disabled
@@ -159,6 +177,7 @@ func New(baseURL, internalToken string, timeout time.Duration) *Client {
 				return http.ErrUseLastResponse
 			},
 		},
+		roleDriftOnce: make(map[int]*sync.Once),
 	}
 }
 
@@ -193,6 +212,14 @@ type memberRoleEnvelope struct {
 // answer would make a shared service token a cross-tenant Space-existence
 // oracle. Do not try to recover the distinction.
 //
+// Out-of-range role values (negatives, values > RoleOwner, or a drift onto the
+// inverted octo-web encoding where 3 means "member") are CLAMPED to RoleMember
+// at this boundary, matching the clamp on the HTTP-resolver identity path.
+// Review-authorization checks (`*role >= RoleAdmin`) therefore fail closed
+// instead of silently promoting every plain member. A clamped value is logged
+// once per distinct bad integer per process life so an upstream drift is loud
+// without flooding logs.
+//
 // The card-action callback carries only an asserted operator_uid and no user
 // token, so this is how the callback handler independently confirms that the
 // operator is STILL an admin at decision time.
@@ -218,7 +245,39 @@ func (c *Client) MemberRole(ctx context.Context, spaceID, uid string) (*int, err
 	if env.Data == nil {
 		return nil, errors.New("notify: member role response missing data")
 	}
+	if env.Data.Role == nil {
+		// "not an active member" — keep nil distinct from RoleMember.
+		return nil, nil
+	}
+	clamped, bad := model.ClampSpaceRole(*env.Data.Role)
+	if bad {
+		c.onceForBadRole(*env.Data.Role).Do(func() {
+			logging.Warn("notify_member_role_drift",
+				zap.String("operation", "notify.member_role"),
+				zap.Int("received_role", *env.Data.Role),
+				zap.Int("clamped_to", clamped),
+				zap.String("expected_range", "0..2 (0=member, 1=admin, 2=owner)"),
+				zap.String("hint", "octo-server returned an out-of-range role on the internal member-role endpoint — likely the inverted octo-web encoding (1=owner,2=admin,3=member). Treating as plain member; IM card-action approvals from that value fail closed."),
+			)
+		})
+		v := clamped
+		return &v, nil
+	}
 	return env.Data.Role, nil
+}
+
+// onceForBadRole returns (and lazily creates) the sync.Once for a given bad
+// role value, so each distinct bad integer is logged at most once per Client
+// (one per process life in practice).
+func (c *Client) onceForBadRole(v int) *sync.Once {
+	c.driftMu.Lock()
+	defer c.driftMu.Unlock()
+	o, ok := c.roleDriftOnce[v]
+	if !ok {
+		o = &sync.Once{}
+		c.roleDriftOnce[v] = o
+	}
+	return o
 }
 
 // notifyWire is the exact JSON body sent to POST /v1/internal/notify.

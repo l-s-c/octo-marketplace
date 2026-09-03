@@ -1901,6 +1901,21 @@ components:
         reason:
           type: string
       type: object
+    internal_api_handler_plugin.reviewRelationResponse:
+      properties:
+        data:
+          type: object
+        relation_id:
+          type: string
+        relation_type:
+          type: string
+        sort_order:
+          type: integer
+        target_plugin_id:
+          type: string
+        target_plugin_type:
+          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.PluginType'
+      type: object
     internal_api_handler_plugin.reviewRequestResponse:
       properties:
         applicant_id:
@@ -1913,6 +1928,44 @@ components:
           type: string
         decision_source:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.ReviewDecisionSource'
+        frozen_relations:
+          description: 'FrozenRelations is the FROZEN relation graph the reviewer
+            is approving.
+
+            Populated ONLY on the DETAIL response (GET /review_requests/{review_id})
+            via
+
+            the LoadReviewSnapshot read. The list projection (reviewListDTO) keeps
+            this
+
+            pointer nil so omitempty drops the key and per-row graph data never leaks
+            to
+
+            the queue. On a detail response the pointer is always non-nil and points
+            at
+
+            a slice that is either empty (for missing/empty/malformed/zero-edge
+
+            snapshots — renders as JSON []) or populated (the decoded edges in stable
+
+            snake_case DTO). Each element carries the edge approval will apply: target
+
+            plugin id, relation type, sort order and data payload (which for
+
+            expert_team members encodes is_leader/role/member_key). Target display
+            name
+
+            is intentionally not carried here — the snapshot is of the frozen edges,
+
+            not of whatever the target rows are named right now, and the detail
+
+            endpoint must not reach back to the live plugin table to enrich frozen
+
+            data with mutable state.'
+          items:
+            $ref: '#/components/schemas/internal_api_handler_plugin.reviewRelationResponse'
+          type: array
+          uniqueItems: false
         kind:
           $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.ReviewKind'
         manifest_hash:

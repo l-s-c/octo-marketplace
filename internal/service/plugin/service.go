@@ -732,6 +732,26 @@ func (s *Service) Delete(ctx context.Context, caller Caller, pluginID string) er
 	if old.OwnerUID != caller.UID || (old.SpaceID != nil && *old.SpaceID != caller.SpaceID) {
 		return ErrNotFound
 	}
+	// A LISTED, org-visible plugin may not be deleted through this path. Delist
+	// enforces the listing.go:141-148 invariant: "Space admins only… the author
+	// deliberately cannot do this — self-delisting through the write path was
+	// removed — so that a plugin the org depends on cannot vanish at its author's
+	// discretion." Delete is the same write path and would let the author bypass
+	// that takedown gate entirely, irreversibly (there is no undelete, and a
+	// manual deleted_at=NULL drops the row back to draft per the listing-state
+	// backfill migration). An admin must Delist first; once the row leaves
+	// `published` (draft, delisted, or a private-published row nobody else can
+	// read), the author can delete it again. Symmetric with the ErrListedRequiresReview
+	// gate in Service.update, and checked BEFORE the expert/expert_team type switch
+	// so DeleteGraph (the more exposed shape — graph roots almost never carry
+	// incoming live relations) is covered by the same gate.
+	//
+	// A system admin keeps the platform-operator escape hatch, matching update.
+	if !caller.IsSystemAdmin {
+		if old.ListingState == model.PluginListingStatePublished && old.Visibility == model.PluginVisibilitySpace {
+			return ErrListedRequiresReview
+		}
+	}
 	audit := s.audit(caller, storageID, "delete", old, nil, s.now())
 	// An expert/expert_team top owns embedded children (an expert's bundled skills;
 	// a squad's member experts and their skills) — the population backfilled tenant

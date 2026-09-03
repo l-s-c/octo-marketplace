@@ -37,10 +37,15 @@ func TestDeletingAPluginCollectsNoObjects(t *testing.T) {
 	skill := &model.Plugin{
 		ID: "plugin-1", Name: "S", Type: model.PluginTypeSkill,
 		OwnerUID: testCaller.UID, SpaceID: stringPtr(testCaller.SpaceID),
-		Visibility: model.PluginVisibilitySpace,
-		Tags:       json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`),
+		Visibility:   model.PluginVisibilitySpace,
+		ListingState: model.PluginListingStateDraft,
+		Tags:         json.RawMessage(`[]`), Manifest: json.RawMessage(`{}`), Package: json.RawMessage(`{}`),
 		AttachmentKeys: json.RawMessage(`{"SKILL.md":"` + liveAttachmentKey + `"}`),
 	}
+	// The published+space gate lives in Service.Delete (see
+	// TestDeleteRequiresDelistFirst); this test is about the storage policy on a
+	// row the author is allowed to delete, so seed a draft (never listed). A
+	// private-published row would also qualify; draft is the more common shape.
 	store := &fakeStore{plugins: map[string]*model.Plugin{"plugin-1": skill}}
 	objects := &importStorage{objects: map[string][]byte{
 		liveAttachmentKey:    []byte("live body"),

@@ -867,7 +867,7 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 		return &CardActionResult{Disposition: cardDispositionForbidden, State: cardStatePending}, nil
 	}
 	if req.Status != model.ReviewStatusPending {
-		return s.cardConflict(ctx, req), nil
+		return s.cardConflict(ctx, req)
 	}
 
 	adminScope := pluginrepo.Scope{CallerUID: operatorUID, SpaceID: req.SpaceID}
@@ -919,11 +919,41 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 		// silently discard a real admin's decision. It falls through to the fault
 		// return below, which the handler answers with 503 so octo-server
 		// redelivers.
+		//
+		// ErrVersionRegressed is permanent: the plugin's current_version moved past
+		// the frozen label between card delivery and the click, and nothing can
+		// lower it back. Stamping max(current, frozen) would publish content under
+		// a label the reviewer never saw, which is wrong for a review workflow.
+		// Ack the event as a handled refusal so octo-server stops redelivering; the
+		// applicant can cancel+resubmit (CancelReview is applicant-scoped and
+		// publishedVersionLabels excludes the draft's own label, so the request
+		// stays settleable). We reuse disposition=forbidden (the terminal-refusal
+		// slot shared with "operator is no longer an admin") because none of the
+		// other four enum values fit: the request is NOT applied, NOT replayed
+		// (this is the first delivery for this event_id), NOT a same-resource
+		// conflict (the row is still pending; nobody else decided), and NOT
+		// not_found. The rendering of "forbidden" as a generic refusal on the
+		// octo-server side is imperfect but acceptable — the critical fix is
+		// stopping the infinite 503 retry loop. Cross-repo: if octo-server adds a
+		// dedicated "stale" disposition, switch to it; display.reason carries the
+		// actionable message ("version moved past; applicant must resubmit") for a
+		// future richer renderer.
 		mapped := mapStoreError(applyErr)
-		if errors.Is(mapped, ErrConflict) || errors.Is(mapped, ErrNotFound) {
-			return s.cardConflict(ctx, req), nil
+		switch {
+		case errors.Is(mapped, ErrConflict) || errors.Is(mapped, ErrNotFound):
+			return s.cardConflict(ctx, req)
+		case errors.Is(mapped, ErrVersionRegressed):
+			return &CardActionResult{
+				Disposition: cardDispositionForbidden,
+				State:       cardStatePending,
+				Requester:   req.ApplicantUID,
+				Display: map[string]string{
+					"title":  req.PluginName,
+					"reason": "version_moved_past_resubmit_required",
+				},
+			}, nil
 		}
-		return nil, applyErr
+		return nil, mapped
 	}
 	result := &CardActionResult{
 		Disposition: cardDispositionApplied,
@@ -962,9 +992,21 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 // cardConflict reports the authoritative terminal state of an already-decided
 // request, re-reading it so the answer reflects the winner's outcome rather than
 // the stale row this callback started from.
-func (s *Service) cardConflict(ctx context.Context, req *model.PluginReviewRequest) *CardActionResult {
+//
+// A RE-READ FAILURE IS NOT A CONFLICT. At the call sites `req` was proven
+// pending moments ago (either by the pre-apply status gate or by the CAS-race
+// branch), so falling back to it produces disposition=conflict/state=pending —
+// self-contradictory, since conflict means already settled — on a card octo-server
+// will never redeliver. Return the error so the handler's 503 branch triggers
+// redelivery, matching the same invariant enforced for the role lookup at :857-864
+// above.
+func (s *Service) cardConflict(ctx context.Context, req *model.PluginReviewRequest) (*CardActionResult, error) {
+	cur, err := s.repo.GetReviewRequestAnySpace(ctx, req.ID)
+	if err != nil {
+		return nil, err
+	}
 	settled := req
-	if cur, err := s.repo.GetReviewRequestAnySpace(ctx, req.ID); err == nil && cur != nil {
+	if cur != nil {
 		settled = cur
 	}
 	return &CardActionResult{
@@ -972,7 +1014,7 @@ func (s *Service) cardConflict(ctx context.Context, req *model.PluginReviewReque
 		State:       cardState(settled.Status),
 		Requester:   settled.ApplicantUID,
 		Display:     map[string]string{"title": settled.PluginName},
-	}
+	}, nil
 }
 
 // operatorRole re-checks a role for the IM card-action path, which carries an
