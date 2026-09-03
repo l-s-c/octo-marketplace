@@ -753,6 +753,10 @@ func writeServiceError(c *gin.Context, err error, operation string) {
 		apiresponse.Fail(c, http.StatusConflict, errcode.Conflict, "plugin is already published", map[string]any{"conflict_reason": "already_published"}, "Refresh the plugin and try again.")
 	case errors.Is(err, pluginsvc.ErrNotPublished):
 		apiresponse.Fail(c, http.StatusConflict, errcode.Conflict, "plugin is not published", map[string]any{"conflict_reason": "not_published"}, "Only a published plugin can be delisted.")
+	// Changing the Space-wide policy is owner-only. Keep this before the generic
+	// reviewer refusal so admins get an actionable role requirement.
+	case errors.Is(err, pluginsvc.ErrReviewPolicyForbidden):
+		apiresponse.Fail(c, http.StatusForbidden, errcode.PermissionDenied, "operation requires the Space owner role", map[string]any{"required_role": "space_owner"}, "Ask the Space owner to perform this action.")
 	// Authorization refusal, distinct from "not found": the caller is in the right
 	// Space and may know the resource exists, they simply lack the reviewer role.
 	// Without this branch a permission error falls through to 500.

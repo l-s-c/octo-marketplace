@@ -12,8 +12,8 @@ func TestUpdateReviewPolicyRequiresSpaceOwner(t *testing.T) {
 	store, svc := listingFixture(t, model.PluginVisibilityPrivate, model.PluginListingStateDraft)
 	caller := testCaller
 	caller.SpaceRole = SpaceRoleAdmin
-	if _, err := svc.UpdateReviewPolicy(context.Background(), caller, false); !errors.Is(err, ErrReviewForbidden) {
-		t.Fatalf("err=%v, want ErrReviewForbidden", err)
+	if _, err := svc.UpdateReviewPolicy(context.Background(), caller, false); !errors.Is(err, ErrReviewPolicyForbidden) {
+		t.Fatalf("err=%v, want ErrReviewPolicyForbidden", err)
 	}
 	if store.reviewPolicySet != nil {
 		t.Fatal("admin changed owner-only policy")

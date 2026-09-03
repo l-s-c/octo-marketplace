@@ -52,7 +52,7 @@ func (h *Handler) GetReviewPolicy(c *gin.Context) {
 // @Success 200 {object} apiresponse.Data[reviewPolicyResponse]
 // @Failure 400 {object} apiresponse.Error "VALIDATION_ERROR"
 // @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
-// @Failure 403 {object} apiresponse.Error "FORBIDDEN"
+// @Failure 403 {object} apiresponse.Error "FORBIDDEN: Space owner required"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /plugin_review_policies [patch]

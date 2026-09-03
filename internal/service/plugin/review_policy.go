@@ -22,7 +22,7 @@ func (s *Service) UpdateReviewPolicy(ctx context.Context, caller Caller, enabled
 		return model.PluginReviewPolicy{}, err
 	}
 	if caller.SpaceRole != SpaceRoleOwner {
-		return model.PluginReviewPolicy{}, ErrReviewForbidden
+		return model.PluginReviewPolicy{}, ErrReviewPolicyForbidden
 	}
 	policy, err := s.repo.UpsertReviewPolicy(ctx, scope(caller), enabled, caller.UID, caller.Name)
 	if err != nil {

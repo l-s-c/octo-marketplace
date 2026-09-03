@@ -42,7 +42,11 @@ var (
 	// the caller may know the resource exists (it is in their Space) but lacks the
 	// reviewer role. writeServiceError maps it to 403.
 	ErrReviewForbidden = errors.New("review operation not permitted")
-	ErrReasonRequired  = errors.New("reject reason is required")
+	// ErrReviewPolicyForbidden is narrower than ErrReviewForbidden: changing the
+	// Space-wide automatic-review policy is reserved for the Space owner, while
+	// admins may still review individual requests.
+	ErrReviewPolicyForbidden = errors.New("review policy operation requires the Space owner")
+	ErrReasonRequired        = errors.New("reject reason is required")
 	// ErrReviewContentRequired is returned when an upgrade submission carries no
 	// content. Freezing the live row for an already-listed plugin would make the
 	// review theatre: the content is already visible org-wide, and approval would

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+	pluginsvc "github.com/Mininglamp-OSS/octo-marketplace/internal/service/plugin"
 )
 
 func TestReviewPolicyEndpointsUseAuthenticatedSpaceAndStandardEnvelope(t *testing.T) {
@@ -45,5 +46,23 @@ func TestUpdateReviewPolicyRequiresBoolean(t *testing.T) {
 	engineWithIdentity(identity, f).ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), `"code":"VALIDATION_ERROR"`) {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestUpdateReviewPolicyOwnerOnlyError(t *testing.T) {
+	f := &fakeService{err: pluginsvc.ErrReviewPolicyForbidden}
+	identity := model.Identity{UID: "admin-1", SpaceRoles: map[string]int{"space-a": model.SpaceRoleAdmin}}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/plugin_review_policies", bytes.NewBufferString(`{"is_auto_approve_enabled":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Space-Id", "space-a")
+	engineWithIdentity(identity, f).ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"required_role":"space_owner"`) ||
+		!strings.Contains(recorder.Body.String(), `"message":"operation requires the Space owner role"`) {
+		t.Fatalf("body=%s", recorder.Body.String())
 	}
 }
