@@ -32,6 +32,17 @@ import (
 // @title Octo Marketplace API
 // @version 1.0.0
 // @description Skill and MCP marketplace API for OCTO.
+// @description
+// @description A 409 CONFLICT carries `error.details.conflict_reason`, which is what a
+// @description client should branch on — the status code alone does not distinguish these:
+// @description `review_pending` (a request is already open on this plugin; cancel it first),
+// @description `listed_requires_review` (the plugin is listed to the organization, so the
+// @description change must go through review or an admin must delist it first),
+// @description `label_taken` (the submitted version label is already published; pick another
+// @description and resubmit), `already_published` / `not_published` (the listing transition
+// @description does not apply in the plugin's current state), `deadlock` (transient lock
+// @description contention; also sets `retryable: true`, so retry the request unchanged), and
+// @description `state` (a generic raced state change; refresh and retry).
 // @contact.name OCTO API Team
 // @contact.url https://github.com/Mininglamp-OSS/octo-marketplace
 // @BasePath /v1

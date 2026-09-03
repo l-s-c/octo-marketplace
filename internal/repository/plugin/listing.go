@@ -57,7 +57,8 @@ type DelistParams struct {
 // (plugin_versions is per-save history), and plugin_versions.version is a
 // per-plugin auto-increment counter rather than the author's label, so minting
 // here would perturb that counter for no new content.
-func (r *Repo) PublishPlugin(ctx context.Context, scope Scope, p PublishParams) (*model.Plugin, error) {
+func (r *Repo) PublishPlugin(ctx context.Context, scope Scope, p PublishParams) (_ *model.Plugin, err error) {
+	defer func() { err = classifyDeadlock(err) }()
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -167,7 +168,8 @@ func (r *Repo) PublishPlugin(ctx context.Context, scope Scope, p PublishParams) 
 // The row stays editable and re-publishable afterwards — delisting is a takedown,
 // not a deletion — and its current_version label stays spent so a republish
 // cannot reuse a label the org already saw.
-func (r *Repo) DelistPlugin(ctx context.Context, scope Scope, p DelistParams) (*model.Plugin, error) {
+func (r *Repo) DelistPlugin(ctx context.Context, scope Scope, p DelistParams) (_ *model.Plugin, err error) {
+	defer func() { err = classifyDeadlock(err) }()
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err

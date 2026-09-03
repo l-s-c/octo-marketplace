@@ -838,3 +838,59 @@ func TestEnforceListingGateAllowsEditingAnUnlistedRow(t *testing.T) {
 		t.Fatalf("listing_state = %q, want draft; the widen did not un-list from the locked row", after.ListingState)
 	}
 }
+
+// Forward-only, restated under the row lock. Both update surfaces compare the
+// submitted label against an UNLOCKED read and then take the FOR UPDATE lock
+// several round trips later; anything that advances current_version in that window
+// makes the comparison stale. The reachable route is an admin edit racing an
+// approval: AdminUpdate sets SnapshotVersion without EnforceListingGate, so before
+// this guard a regressing label could land on an already-listed row.
+//
+// The mutation carries a label BELOW the stored one, which is exactly the state the
+// service hands the repo after losing that race — the pre-check saw 1.0.0 and
+// approved 1.0.0, but the locked row is already at 2.0.0. It must be refused, and
+// the row must be untouched.
+func TestUpdateRefusesALabelTheLockedRowHasMovedPast(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	owner := tenantScope()
+
+	seed(t, database, seedPlugin{id: "p1", visibility: "space", listingState: "published", currentVersion: "2.0.0"})
+	current, err := repo.Get(ctx, owner, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := *current
+	behind := "1.0.0"
+	stale.CurrentVersion = &behind
+	stale.Publisher = "edited"
+
+	_, err = repo.Update(ctx, owner, pluginrepo.Mutation{
+		Plugin: stale, OperatorID: "user-1", SnapshotVersion: true, EnforceForwardOnlyVersion: true,
+	})
+	if !errors.Is(err, pluginrepo.ErrVersionRegressed) {
+		t.Fatalf("Update with a label below the locked row = %v, want ErrVersionRegressed", err)
+	}
+	after, err := repo.Get(ctx, owner, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.CurrentVersion == nil || *after.CurrentVersion != "2.0.0" {
+		t.Errorf("current_version = %v, want 2.0.0 untouched", after.CurrentVersion)
+	}
+	if after.Publisher == "edited" {
+		t.Error("the refused update committed its other columns; the guard must abort the whole transaction")
+	}
+
+	// The same save with the label the locked row actually carries is fine — the
+	// guard must not refuse an ordinary edit that re-sends the stored label, which
+	// is what every fetch-edit-save client does.
+	unchanged := *current
+	unchanged.Publisher = "edited"
+	if _, err := repo.Update(ctx, owner, pluginrepo.Mutation{
+		Plugin: unchanged, OperatorID: "user-1", SnapshotVersion: true, EnforceForwardOnlyVersion: true,
+	}); err != nil {
+		t.Fatalf("re-sending the stored label was refused: %v", err)
+	}
+}

@@ -54,6 +54,27 @@ type Mutation struct {
 	// service's read and this write and turns an edit that looked legal on the
 	// stale value into unreviewed content on a live org row (or a gate bypass).
 	EnforceListingGate bool
+	// EnforceForwardOnlyVersion makes Repo.Update re-derive the version ordering
+	// rule against the label on the plugin row it LOCKS. Both write surfaces check
+	// it first from an UNLOCKED read — Service.update (service.go) and
+	// Service.AdminUpdate via adminVersionGuard (admin.go) — and both then take a
+	// FOR UPDATE lock several round trips later. Anything that advances
+	// current_version in that window (an ApproveReview publishing the frozen label,
+	// a concurrent save) makes the earlier comparison stale, and the UPDATE would
+	// stamp a label the locked row has already moved past. Restating it here is the
+	// same discipline RefusePendingReview and EnforceListingGate apply, against the
+	// same lock, and it shares one implementation (model.VersionNotRegressed) with
+	// the unlocked pre-checks and with InsertReviewRequest's locked re-check so the
+	// three cannot drift.
+	//
+	// Set by both update surfaces, so the locked verdict is authoritative rather
+	// than additional: it is evaluated on the same two values the pre-check used
+	// (stored label vs submitted label), so a caller the pre-check exempted — no
+	// stored label, an omitted version that carries the stored one forward, or a
+	// legacy unorderable current — is exempt here for the same reason and not by a
+	// separate rule. Container reupload and the create paths do not set it: a graph
+	// rebuild mints its own labels, and a create has no prior label to regress from.
+	EnforceForwardOnlyVersion bool
 }
 
 // RelationSync reports the outcome of synchronizing a Plugin's one-level
@@ -305,7 +326,8 @@ func (r *Repo) CreateGraph(ctx context.Context, scope Scope, nodes []Mutation) (
 // prior op committed. This closes the concurrent-reupload / delete-vs-reupload
 // race where a stale snapshot severed the top→child edge but soft-deleted the
 // already-gone old child, leaving the swapped-in child live and unreachable.
-func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newChildren []Mutation) (*RelationSync, error) {
+func (r *Repo) RebuildGraph(ctx context.Context, scope Scope, top Mutation, newChildren []Mutation) (_ *RelationSync, err error) {
+	defer func() { err = classifyDeadlock(err) }()
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -505,7 +527,8 @@ WHERE source_plugin_id=? AND deleted_at IS NULL`, now, now, id); err != nil {
 
 // Update atomically updates an owned Plugin, synchronizes its one-level
 // relations to the submitted target state, and appends audit.
-func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSync, error) {
+func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (_ *RelationSync, err error) {
+	defer func() { err = classifyDeadlock(err) }()
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -556,6 +579,19 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 			return nil, ErrListedRequiresReview
 		}
 		resetListing = before.ListingState == model.PluginListingStatePublished && m.Plugin.Visibility != before.Visibility
+	}
+	// Forward-only, restated against the LOCKED label. Both update surfaces compare
+	// the submitted label against an unlocked read taken several round trips before
+	// this lock; an ApproveReview that publishes a frozen label in that window (or
+	// a concurrent save) advances current_version, and without this the UPDATE
+	// would stamp a label the locked row has already moved past — the same staleness
+	// the two guards above close for the listing decisions. The rule and its
+	// grandfathering both live in model.VersionNotRegressed, shared with the
+	// unlocked pre-checks and with InsertReviewRequest, so an unchanged label and a
+	// legacy unorderable one behave here exactly as they do there.
+	if m.EnforceForwardOnlyVersion && before.CurrentVersion != nil && m.Plugin.CurrentVersion != nil &&
+		!model.VersionNotRegressed(*before.CurrentVersion, *m.Plugin.CurrentVersion) {
+		return nil, ErrVersionRegressed
 	}
 	now := r.now()
 	p := m.Plugin
@@ -660,7 +696,8 @@ func (r *Repo) Update(ctx context.Context, scope Scope, m Mutation) (*RelationSy
 // Delete soft-deletes an owned Plugin, invalidates its outgoing relation edges,
 // and appends an audit event. A live Plugin cannot be deleted while another
 // live, active Plugin has a live, active incoming relation to it.
-func (r *Repo) Delete(ctx context.Context, scope Scope, pluginID, operatorID, operatorName, requestID string, remark *string) error {
+func (r *Repo) Delete(ctx context.Context, scope Scope, pluginID, operatorID, operatorName, requestID string, remark *string) (err error) {
+	defer func() { err = classifyDeadlock(err) }()
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -770,7 +807,8 @@ WHERE source_plugin_id=? AND deleted_at IS NULL`, now, now, pluginID)
 // softDeleteRebuiltChild, which is idempotent and carries the same operator
 // identity. A failure at any step rolls the whole delete back. Connector/skill
 // deletes stay on the single-row Delete.
-func (r *Repo) DeleteGraph(ctx context.Context, scope Scope, topID string, operatorID, operatorName, requestID string, remark *string) error {
+func (r *Repo) DeleteGraph(ctx context.Context, scope Scope, topID string, operatorID, operatorName, requestID string, remark *string) (err error) {
+	defer func() { err = classifyDeadlock(err) }()
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

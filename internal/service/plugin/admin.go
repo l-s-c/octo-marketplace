@@ -324,6 +324,12 @@ func (s *Service) AdminUpdate(ctx context.Context, caller Caller, pluginID strin
 	audit := s.audit(caller, storageID, "update", old, p, s.now())
 	m := mutation(*p, rels, audit)
 	m.SnapshotVersion = true
+	// adminVersionGuard compared forward-only against the UNLOCKED `old` read; have
+	// the repo restate it under the row lock. The admin is exempt from the listing
+	// gates, not from version ordering — and this is the path that reaches an
+	// already-listed row without EnforceListingGate, so leaving it unrestated is
+	// what let a label raced past by an approval still land.
+	m.EnforceForwardOnlyVersion = true
 	sync, err := s.repo.Update(ctx, adminScope(caller), m)
 	if err != nil {
 		return nil, mapStoreError(err)

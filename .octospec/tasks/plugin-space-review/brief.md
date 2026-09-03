@@ -1088,6 +1088,25 @@ by the explicit path, and the risk argument only cuts one way.
 Consequence: an admin who submits sees their own request in the pending queue.
 That is intended — it is the confirmation step.
 
+**Named residual: self-approval is PERMITTED, and nothing refuses it.**
+`Service.ApproveReview` gates on `isReviewer(caller)` and nothing else; the repo's
+locked read carries `review_id`, `status='pending'` and `space_id` but no
+`applicant_uid` predicate; the IM path checks only `*role >= SpaceRoleAdmin`. So a
+Space admin or owner can approve their own submission on either surface. Stated here
+because the rest of this design went the other way — self-delist was removed, and
+round 15 added the Delete gate on the reasoning that "a plugin the org depends on
+cannot vanish at its author's discretion" — and listing is the mirror operation.
+
+It is not refused, and the reason is not oversight: `Publish` routes `space` intent
+through review rather than listing directly, so refusing `applicant_uid ==
+reviewer_uid` would leave the ONLY admin of a single-admin Space permanently unable
+to list their own plugin. A workable version of that rule needs a fallback (a second
+reviewer role, an org-level approver, or an explicit single-admin exemption), and
+that is a product decision rather than a patch. Until then the honest reading of
+"listing to the org requires admin approval" is "requires an admin decision, which
+may be the applicant's own" — recorded, audited (`reviewer_uid` = self,
+`decision_source`), and reversible by Delist.
+
 ### 27. Notification metrics are deferred; the paths log.
 
 The acceptance criteria ask the notify failure path to "log AND increment a
@@ -1636,8 +1655,25 @@ none of them.
   re-apply, the fail-closed `draft` DEFAULT, the enum being exactly
   `('draft','published','delisted')` and no more, `listing_state` as the third
   column of `idx_plugins_scope_category_created`, the new
-  `idx_review_plugin_submitted`, and the grandfathering (a live row becomes
+  `idx_review_plugin_submitted_at`, and the grandfathering (a live row becomes
   `published`, a soft-deleted one stays `draft`).
+- **Migration replay (round 16).** MySQL implicitly commits every DDL, so
+  sql-migrate's transaction protects nothing: a crash between the statements and the
+  `gorp_migrations` insert replays the file. `TestMigrationsConvergeOnReplayAfterALostRecord`
+  reproduces exactly that state — run Up, delete the six records, run Up again — and
+  asserts both that it succeeds and that the schema fingerprint is unchanged. It
+  fails with the real error codes against the pre-fix files (1060 on the two
+  `ADD COLUMN`s, 1061 on the `ADD INDEX`), which is why the three are now guarded on
+  `information_schema` rather than bare. **The DROP+ADD shape that makes
+  `20260902-02` self-idempotent is NOT the fix for the other three** and was
+  measured, not argued: it rebuilds an index that already exists, so its DROP always
+  has a target, whereas applying it to a file that CREATES one fails with 1091 on
+  every clean install (MySQL has no `DROP INDEX IF EXISTS`).
+  `TestSubmittedIndexMigrationRemovesTheStaleDuplicate` covers the other collision:
+  an environment that ran an intermediate branch head carries
+  `idx_review_plugin_submitted` over the same columns, and `20260902-03` now drops it
+  instead of promising a follow-up migration — which is also what makes its `Down`
+  converge.
 - **Stated gap, so nobody infers coverage from the list above.** The super-admin
   escape hatch in item 36 has **no test**. Nothing drives an `IsSystemAdmin` caller
   through `Service.update` against a published `space` row to pin either half of
@@ -1649,7 +1685,7 @@ none of them.
 
 ---
 
-## Invariant coverage table (head `ec75376`, 2026-09-03)
+## Invariant coverage table (round 16, 2026-09-03 — ships in the same commit as the code below)
 
 Both reviewers flagged the recurring defect pattern "an invariant enforced in
 three places and missed in a fourth". The table below records, for each
@@ -1660,11 +1696,16 @@ restated in a CAS `UPDATE ... WHERE` predicate that makes a stale pre-check
 harmless), and which surface reaches it: **T**enant, **A**dmin (`/api/v1/admin/*`),
 or **IM** card callback.
 
-**This table is anchored to head `ec75376`. Several fixes are landing on
-parallel agents RIGHT NOW** (including, by the looks of the in-flight edits,
-at least one more forward-only and one more deadlock-classification site).
-Refresh it line by line against the code before merging; do not trust it
-across a rebase.
+**Anchoring.** This table was wrong in BOTH directions across two rounds — first
+it named a real Delete gap the code then closed, then it kept asserting that gap
+after the fix landed — so it is no longer pinned to a SHA that the next commit
+invalidates. It is re-derived against, and committed together with, the code it
+describes: the round-16 commit on top of `080fc75`. If you are reading it at a
+later head, the rule is unchanged and worth keeping: re-derive a row before
+trusting it, because a table that lags the code is worse than no table (it is what
+the next change to this area gets planned against). What is different is that it no
+longer lags by construction — a gap row closed by a commit is closed in the same
+commit.
 
 Legend:
 - **lock = yes**  — site runs inside a transaction and either reads the
@@ -1690,7 +1731,7 @@ Legend:
 | Container reupload (`ReuploadContainer`) | — | n/a (trivially holds) | A | Container rebuild preserves `old.CurrentVersion` when no new label is declared; the archive-derived top gets `defaultCurrentVersion="1.0.0"` but `container.go:225-227` overwrites with the stored label, so no new label is ever introduced on this path. |
 | Grandfathering (stored label always accepted) | `service.go:595` sets `req.grandfatheredVersion`; `service.go:811` lets it through; `admin.go:253-255` same; `import.go:264` (`isStoredVersionLabel`) same | yes when inside a tx | T, A | |
 | `versionNotRegressed` / `model.VersionNotRegressed` shared impl | `internal/service/plugin/validation.go:128` and `internal/model/version.go:42` | n/a | n/a | Comment pledges one implementation across unlocked and locked sites. |
-| **Gap — not re-derived under lock for non-review writes:** `Repo.Update` (`write.go:508-650`) | — | no | T, A | Unlike `EnforceListingGate` and the pending-review check (both re-derived under lock at `write.go:554-557` and :524-534), forward-only is NOT re-derived inside the `Repo.Update` transaction against the FOR UPDATE-locked row. The service pre-checks race with any concurrent writer that moves `current_version` forward; ApproveReview closes the race for its own label, but an admin edit or tenant upsert that regresses can land if it wins the TOCTOU. The review path is fully guarded. |
+| `Repo.Update` locked re-derivation (`EnforceForwardOnlyVersion`) | `internal/repository/plugin/write.go` — beside the `EnforceListingGate` block | yes (`getOwnedForUpdate`) | T, A | **CLOSED (round 16).** Was the third of this table's three highest-confidence defects. Both update surfaces now set the flag (`Service.update`, and `AdminUpdate` — the reachable route, since it sets `SnapshotVersion` without `EnforceListingGate`), and the repo restates `model.VersionNotRegressed` against the locked `before.CurrentVersion`. Evaluated on the same two values as the pre-check, so a caller the pre-check exempted (no stored label, omitted version, legacy unorderable current) is exempt here for the same reason rather than by a separate rule. |
 
 ### 2. Published-label uniqueness (label reuse across approved versions)
 
@@ -1773,7 +1814,7 @@ Legend:
 | Upsert service gate (ErrListedRequiresReview) | `service.go:603-605` predicate `old.ListingState == published AND old.Visibility == space` | pre | T | Refuses ALL edits to published+space rows, which closes the "lower visibility to private" loophole; comment at `service.go:574-576` says so explicitly. |
 | Upsert LOCKED re-derivation (`EnforceListingGate`) | `write.go:554-557` | yes (`getOwnedForUpdate` at :514) | T | Authoritative; restates the published+space conjunction from the locked row, so a concurrent Approve that flips a draft published between the service read and the lock is caught. |
 | Delete service gate | `service.go:750-753` | pre | T | Identical conjunction; closes the "delete to self-delist" loophole at the service layer. |
-| **Gap — Delete does NOT restate under lock:** `Repo.Delete` (`write.go:663-743`) | — | no | T | Takes `getOwnedForUpdate` at :669 then soft-deletes directly; does NOT re-check the (published AND space) conjunction against the locked row the way Repo.Update does at `write.go:554-557`. A concurrent Approve that publishes a draft between the service's unlocked read (:728) and the FOR UPDATE lock (:669) can let a tenant delete a just-published Space-visible plugin. This is the cleanest "three places, missing a fourth" instance the reviewer pattern describes. |
+| Delete / DeleteGraph LOCKED re-derivation | `write.go` — after `getOwnedForUpdate` in both `Repo.Delete` and `Repo.DeleteGraph` | yes | T | **CLOSED (round 15).** Restates the (published AND space) conjunction against the locked row, mirroring `Repo.Update`'s `EnforceListingGate`, so an Approve that publishes a draft between the service's unlocked read and the FOR UPDATE lock can no longer let a tenant delete a just-listed plugin. `!scope.Admin` exempts the system admin, who is the Delist actor and must be able to remove abusive listed content. Pinned by `TestDeleteRefusesAPluginApprovedMidFlight` and `TestDeleteGraphRefusesAContainerApprovedMidFlight` (real-MySQL interleavings; removing the gate makes them fail). |
 | Delist (only takedown path) is Space-admin-gated | `service/listing.go:162` + repo lock by Space not owner | yes | T (Space admin) | `getReviewedPluginForUpdate` (`review.go:814-824`) locks by `space_id` not `owner_uid` so a non-owner admin can take it down. |
 | Delist CAS restates visibility + listing_state + is_embedded | `listing.go:210-216` | yes (CAS) | T (Space admin) | Defense in depth. |
 | Visibility change while a review is pending | `service.go:658-667` (`HasPendingReview`) + locked re-derivation `write.go:524-534` (`RefusePendingReview`) | pre + yes | T | The actual invariant here (visibility cannot change while pending) is enforced by the service pre-check and re-checked under lock in Repo.Update. ApproveReview's isFirst branch at `review.go:562-570` decides its branch from the LOCKED `current.Visibility/ListingState` and restates the expected (space,published) in the CAS WHERE, so a visibility flip after the service read does not cause a silent wrong-branch apply — it causes mustChangeState to return ErrConflict. The distinct race where an author flips visibility to private WHILE an approval is in flight is safe: isFirst fires, the UPDATE sets visibility=space back (a no-op for re-approve), and mustChangeState on the upgrade branch is satisfied only when the row is genuinely in the upgrade state. |
@@ -1783,7 +1824,7 @@ Legend:
 
 | site | file:line | applied? | surface | notes |
 |---|---|---|---|---|
-| `classifyDeadlock` maps 1213 → ErrDeadlock | `repository/plugin/review.go:85-94` | n/a | n/a | 1205 (lock-wait timeout) passes through as raw 500 deliberately. |
+| `classifyDeadlock` maps 1213 AND 1205 → ErrDeadlock | `repository/plugin/review.go` (`classifyDeadlock`) | n/a | n/a | **1205 added in round 16.** It was previously excluded with the note "deliberately", which did not survive scrutiny: `getOwnedForUpdate` queues on the plugin row for a whole approve transaction (relation sync, version snapshot, child promotion, audit), so a waiter can cross `innodb_lock_wait_timeout` with no cycle forming — 1205 is the LIKELIER of the two here, and it was falling through to HTTP 500. Both mean "lost a lock race, nothing committed, retry"; the wire value stays `conflict_reason=deadlock` so the client contract does not move. |
 | InsertReviewRequest (Submit) | `review.go:100` | yes | T | |
 | ApproveReview | `review.go:421` | yes | T, IM | |
 | RejectReview | `review.go:864` | yes | T, IM | |
@@ -1791,12 +1832,19 @@ Legend:
 | `mapStoreError` surfaces to service | `service/service.go:917-918` | yes | T, A, IM | |
 | Web handler → retryable 409 | `handler.go:746-747` | yes | T, A, IM | Body carries `conflict_reason="deadlock", retryable=true`. |
 | IM card path treats ErrDeadlock as non-terminal | `review.go:916` comment + :941 mapping | yes | IM | Surfaces as `fault` so octo-server re-delivers. |
-| **NOT applied — confirmed gap (lock-order argument below):** PublishPlugin | `repository/plugin/listing.go:61` BeginTx — no defer | **no** | T | Publish locks plugin (`getOwnedForUpdate` at :69) then reads pending requests and writes placements + audit; concurrent InsertReviewRequest takes the same plugin lock in the SAME order (getOwnedForUpdate first, then pending SELECT), so same-order deadlock is unlikely. But it writes multiple tables (plugins, plugin_placements, plugin_audit_logs) and races with Delist/Delete which may take locks in a different order. |
-| **NOT applied — real deadlock risk:** DelistPlugin | `repository/plugin/listing.go:168` BeginTx — no defer | **no** | T | Lock-order problem: ApproveReview takes the REQUEST row FOR UPDATE first (`review.go:440`) then the PLUGIN row (`review.go:448`); DelistPlugin takes the PLUGIN row first (getReviewedPluginForUpdate at :174) then issues `cancelPendingReviewFor` which UPDATEs the REQUEST row without first locking it. InnoDB will take an exclusive lock on that request row during the UPDATE, creating a classic AB-BA deadlock. Classifying it would surface retryable 409; without the defer, this deadlock surfaces as raw MySQL 1213 → 500. |
-| **NOT applied:** Repo.Create / Repo.Update / Repo.Delete / CreateGraph / RebuildGraph | `write.go:77, 211, 309, 509, 664, 761` BeginTx | **no** | T, A | Six transactions with no classification. Lower contention than Delist/Approve but not zero; at minimum the Delete+cancelPendingReview path participates in the same lock order as Delist. |
-| **NOT applied:** admin category mutations | `admin_category.go:68, 140` | no | A | Low contention. |
+| PublishPlugin | `repository/plugin/listing.go` — `defer` after the signature | yes | T | **CLOSED (round 16).** |
+| DelistPlugin | `repository/plugin/listing.go` — `defer` | yes | T | **CLOSED (round 16).** This was the highest-confidence race: ApproveReview takes the REQUEST row FOR UPDATE first then the PLUGIN row; DelistPlugin takes the PLUGIN row first, then `cancelPendingReviewFor` UPDATEs the request row (taking an exclusive lock on it) — textbook AB-BA. |
+| Repo.Update / Repo.Delete / Repo.DeleteGraph / Repo.RebuildGraph | `write.go` — `defer` on each | yes | T, A | **CLOSED (round 16).** All four reach `plugin_review_requests` (pending-check or `cancelPendingReviewFor` cascade), so all four sit on the plugin-row-first side of the AB-BA. |
+| **NOT applied, and correctly so:** Repo.Create / CreateGraph | `write.go` BeginTx — no defer | **no** | T, A | A plugin being created cannot yet have a review request, so these never take the second lock and cannot participate in the cycle. Named here so the omission reads as a decision rather than the next round's finding. |
+| **NOT applied:** admin category mutations | `admin_category.go:68, 140` | no | A | Low contention, and no review-request lock. |
 
-Score: **4 of ~13+ write transactions are classified.** The Delist-vs-Approve order is the highest-confidence race; Publish-vs-Submit is next (both touch plugin + audit + placements/versions in potentially divergent orders because of ensureVisibleDefaultPlacement). Expect fixes to land that either wrap BeginTx in a helper that installs the defer, or add `defer func() { err = classifyDeadlock(err) }()` to each of these. The table will need refreshing.
+Score: **10 of 10 transactions that touch both `plugins` and `plugin_review_requests`
+are classified** (the four review paths plus Publish, Delist, Update, Delete,
+DeleteGraph, RebuildGraph). The reason this had to be all-or-nothing: one physical
+deadlock produces exactly one victim, and which transaction loses is up to InnoDB —
+so classifying half of them meant the SAME race answered a retryable 409 or a raw
+1213 → HTTP 500 depending on scheduling. Create/CreateGraph and the admin category
+mutations are deliberately excluded (no second lock).
 
 ### 10. Published + space edits refuse (ErrListedRequiresReview)
 
@@ -1840,19 +1888,20 @@ pattern should:
    re-check only in admin, or vice versa).
 3. Look for transactions under "NOT applied to" rows in the deadlock section —
    those are the obvious candidates for the same miss.
-4. The three highest-confidence defects at this head, in order:
-   - **ErrListedRequiresReview is not re-derived under the Delete lock**
-     (item 8 gap row). Fix is a one-line conjunction in `Repo.Delete` after
-     `getOwnedForUpdate`, mirroring `write.go:554-557`.
-   - **Deadlock classification is missing from DelistPlugin (and other
-     non-review transactions)** (item 9). DelistPlugin vs ApproveReview is
-     AB-BA on plugin/request rows; add `defer func(){ err = classifyDeadlock(err) }()`
-     after every `BeginTx` (or wrap BeginTx in a helper).
-   - **Forward-only version is not re-derived under the Repo.Update lock**
-     (item 1 gap row); a concurrent admin version edit vs tenant upsert race
-     is not closed the way it is for ApproveReview. Mirror the
-     `model.VersionNotRegressed` check from `review.go:464-466` against the
-     `before` row in `Repo.Update`.
-5. Every cell in this table was verified against code at head `ec75376`;
-   no UNVERIFIED cells remain. Refresh the whole table before merge because
-   parallel agents are landing fixes to the gaps called out here.
+4. **All three of the highest-confidence defects this table named are now closed**
+   (Delete's locked listing gate in round 15; deadlock classification and
+   forward-only under the `Repo.Update` lock in round 16). The list is kept rather
+   than deleted, because "the table predicted the next round's findings three times
+   running" is the useful fact about it — and because a reviewer should be able to
+   check the closures rather than take them on faith. What remains open at this head
+   is smaller and is stated as such, not left for inference:
+   - **Self-approval is permitted.** A Space admin or owner can approve their own
+     submission on both surfaces — see item 26, where the residual and the reason
+     it is not simply refused are recorded.
+   - **The super-admin content escape hatch has no test** (item 36, first bullet;
+     item 37's stated gap). Unchanged.
+   - **Terminal card refusals are unreceipted on purpose**, so one `event_id` is
+     never double-applied but is not answered verbatim across deliveries either.
+     The trade-off is stated at each branch in `service/plugin/review.go`.
+5. Every cell was re-derived against the code it ships with, and the gap rows that
+   closed were closed in the same commit as the fix. No UNVERIFIED cells remain.

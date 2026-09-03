@@ -653,7 +653,9 @@ func TestDecideReviewFromCardReportsAlreadyDecided(t *testing.T) {
 	if out.State != "denied" {
 		t.Fatalf("state = %q, want the protocol spelling of rejected", out.State)
 	}
-	// Terminal states must carry requester_uid or octo-server rejects the response.
+	// approved/denied are the states octo-server's decoder requires a requester on
+	// (cardactiondispatch/contract.go); cardConflict reaches both, so it must carry
+	// one or the callback response is rejected and the event redelivered.
 	if out.Requester != "user-1" {
 		t.Fatalf("requester_uid = %q, want the applicant", out.Requester)
 	}
@@ -664,6 +666,15 @@ func TestDecideReviewFromCardReportsAlreadyDecided(t *testing.T) {
 
 // A vanished review is terminal, not a server fault: reporting it in-band stops
 // octo-server from retrying the event into the DLQ.
+//
+// The state is `cancelled`, not `pending`. All three request-is-gone branches
+// (this lookup, the apply-time ErrNotFound, and cardConflict's re-read) report one
+// physical condition, so a card renderer keyed on `state` must not see two
+// different answers for it; and every path that removes the plugin cancels its
+// request in the same transaction, so cancelled is the accurate one. No requester
+// is knowable here — the row that holds the applicant is the row that is gone —
+// which is legal precisely because cancelled is outside octo-server's
+// requester-required set.
 func TestDecideReviewFromCardReportsMissingReview(t *testing.T) {
 	store, svc := reviewFixture(t)
 	store.review.anySpaceErr = pluginrepo.ErrNotFound
@@ -671,8 +682,8 @@ func TestDecideReviewFromCardReportsMissingReview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Disposition != "not_found" || out.State != "pending" {
-		t.Fatalf("result = %+v, want not_found/pending", out)
+	if out.Disposition != "not_found" || out.State != "cancelled" {
+		t.Fatalf("result = %+v, want not_found/cancelled", out)
 	}
 	if len(store.review.receiptInserts) != 0 {
 		t.Error("missing review wrote a receipt")
@@ -1167,5 +1178,102 @@ func TestCardConflictReReadErrorAfterCasLossIsRetryable(t *testing.T) {
 	}
 	if wrapped.calls < 2 {
 		t.Errorf("expected at least two AnySpace calls (initial load + cardConflict re-read), got %d", wrapped.calls)
+	}
+}
+
+// ErrLabelTaken must reach the card path as a TERMINAL refusal, not as a
+// conflict. The repository split it out of ErrConflict precisely because
+// cardConflict treats ErrConflict as "another admin already settled this" and
+// renders the request as decided — which for a label collision is false (the row
+// is still pending) and discards the admin's click with no way to retry. Reverting
+// this arm to the cardConflict route is the mutation this test exists to catch.
+func TestDecideReviewFromCardLabelTakenIsATerminalRefusal(t *testing.T) {
+	store, svc := reviewFixture(t)
+	store.review.anySpaceReq = &model.PluginReviewRequest{
+		ID: "review-1", PluginID: "plugin-1", SpaceID: "space-a",
+		Status: model.ReviewStatusPending, ApplicantUID: "user-1", PluginName: "Demo",
+	}
+	store.review.approveErr = pluginrepo.ErrLabelTaken
+	svc = svc.WithNotify(&fakeNotifier{enabled: true, role: roleOf(SpaceRoleOwner)}, nil)
+
+	out, err := svc.DecideReviewFromCard(context.Background(), "81", "admin-1", "approve", "review-1")
+	if err != nil {
+		t.Fatalf("label collision returned an error (would become 503 and loop forever): %v", err)
+	}
+	if out == nil {
+		t.Fatal("expected a handled CardActionResult, got nil")
+	}
+	if out.Disposition != "forbidden" || out.State != "pending" {
+		t.Fatalf("result = %+v, want forbidden/pending; conflict/<settled> would tell the admin someone else decided a request that is still open", out)
+	}
+	if got := out.Display["reason"]; got != "version_label_taken_resubmit_required" {
+		t.Errorf("display.reason = %q, want the label-collision label distinguishable from version_moved_past", got)
+	}
+	if out.Requester != "user-1" {
+		t.Errorf("requester_uid = %q, want the applicant", out.Requester)
+	}
+	if len(store.review.receiptInserts) != 0 {
+		t.Error("refusal wrote a receipt, so a retry after the applicant resubmits would replay this refusal")
+	}
+}
+
+// A plugin deleted or delisted between the request lock and the approve body
+// leaves the request gone for good. The answer must be terminal — an error here
+// becomes 503 and octo-server redelivers forever against a row that cannot come
+// back — and it must report the same state the other two request-is-gone branches
+// report, so a renderer keyed on `state` shows one thing for one fact.
+func TestDecideReviewFromCardApplyTimeNotFoundIsTerminal(t *testing.T) {
+	store, svc := reviewFixture(t)
+	store.review.anySpaceReq = &model.PluginReviewRequest{
+		ID: "review-1", PluginID: "plugin-1", SpaceID: "space-a",
+		Status: model.ReviewStatusPending, ApplicantUID: "user-1", PluginName: "Demo",
+	}
+	store.review.approveErr = pluginrepo.ErrNotFound
+	svc = svc.WithNotify(&fakeNotifier{enabled: true, role: roleOf(SpaceRoleOwner)}, nil)
+
+	out, err := svc.DecideReviewFromCard(context.Background(), "82", "admin-1", "approve", "review-1")
+	if err != nil {
+		t.Fatalf("a vanished request returned an error (503 -> infinite redelivery): %v", err)
+	}
+	if out.Disposition != "not_found" || out.State != "cancelled" {
+		t.Fatalf("result = %+v, want not_found/cancelled", out)
+	}
+	// Unlike the initial-lookup branch, the applicant IS known here — the request
+	// was loaded before the apply — so it is carried. cancelled sits outside
+	// octo-server's requester-required set, so this is belt-and-braces rather than
+	// mandatory; it is pinned so the field does not silently disappear if that set
+	// ever widens.
+	if out.Requester != "user-1" {
+		t.Errorf("requester_uid = %q, want the applicant that was already loaded", out.Requester)
+	}
+	if len(store.review.receiptInserts) != 0 {
+		t.Error("a terminal not_found wrote a receipt")
+	}
+}
+
+// Same invariant on cardConflict's re-read: ErrNotFound there is permanent and
+// must not fall through to the retryable-error branch, which would loop as 503.
+// The distinction matters — a re-read that fails TRANSIENTLY must still be an
+// error (pinned by TestCardConflictReReadErrorAfterCasLossIsRetryable), so only
+// the not-found case may short-circuit.
+func TestCardConflictNotFoundOnReReadIsTerminal(t *testing.T) {
+	store, svc := reviewFixture(t)
+	store.review.anySpaceReq = &model.PluginReviewRequest{
+		ID: "review-1", PluginID: "plugin-1", SpaceID: "space-a",
+		Status: model.ReviewStatusPending, ApplicantUID: "user-1", PluginName: "Demo",
+	}
+	store.review.approveErr = pluginrepo.ErrConflict
+	svc = svc.WithNotify(&fakeNotifier{enabled: true, role: roleOf(SpaceRoleOwner)}, nil)
+	svc.repo = &reReadErrorStore{Store: svc.repo, secondErr: pluginrepo.ErrNotFound}
+
+	out, err := svc.DecideReviewFromCard(context.Background(), "83", "admin-1", "approve", "review-1")
+	if err != nil {
+		t.Fatalf("a soft-deleted request on re-read returned an error (503 -> infinite redelivery): %v", err)
+	}
+	if out.Disposition != "not_found" || out.State != "cancelled" {
+		t.Fatalf("result = %+v, want not_found/cancelled", out)
+	}
+	if out.Requester != "user-1" {
+		t.Errorf("requester_uid = %q, want the applicant from the request already in hand", out.Requester)
 	}
 }

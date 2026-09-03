@@ -381,6 +381,25 @@ func TestListedAndContentRequiredErrorsMapToStatusCodes(t *testing.T) {
 			}
 		}
 	})
+	// A label collision is NOT the generic conflict_reason="state": the client has
+	// to know the version field is the thing to change, and the applicant has to be
+	// told to resubmit. Folding ErrLabelTaken back into the ErrConflict arm — which
+	// is what shipped before the sentinel was split out — leaves the status at 409
+	// and only the reason changes, so this asserts the reason and the field, not the
+	// code.
+	t.Run("label taken", func(t *testing.T) {
+		f := &fakeService{}
+		f.review.approveErr = pluginsvc.ErrLabelTaken
+		rec := doReview(t, f, http.MethodPost, "/api/v1/plugins/review_requests/review-1/approve", `{}`)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409 (%s)", rec.Code, rec.Body.String())
+		}
+		for _, want := range []string{`"code":"CONFLICT"`, `"conflict_reason":"label_taken"`, `"field":"version"`} {
+			if !strings.Contains(rec.Body.String(), want) {
+				t.Fatalf("body missing %s: %s", want, rec.Body.String())
+			}
+		}
+	})
 	t.Run("listed requires review", func(t *testing.T) {
 		space := "space-a"
 		f := &fakeService{err: pluginsvc.ErrListedRequiresReview, detail: &pluginsvc.Detail{Plugin: &model.Plugin{ID: "plugin-1", SpaceID: &space}}}

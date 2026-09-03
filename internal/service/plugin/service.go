@@ -651,6 +651,12 @@ func (s *Service) update(ctx context.Context, caller Caller, pluginID string, re
 	m := mutation(*p, rels, audit)
 	m.SnapshotVersion = true
 	m.Changelog = req.Changelog
+	// Forward-only was compared against the UNLOCKED `old` read above. Let the repo
+	// restate it against the row it locks, for the same reason the two listing
+	// decisions below are re-derived: an approval that publishes a frozen label can
+	// advance current_version between that read and the write, after which this save
+	// would snapshot a label the row has already moved past.
+	m.EnforceForwardOnlyVersion = true
 	// The unlocked pending guard above (non-admin visibility change) is a fast
 	// pre-check; make it authoritative by re-checking under the plugin row lock in
 	// the write transaction. Same condition as that guard so a content-only save

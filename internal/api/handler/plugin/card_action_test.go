@@ -104,6 +104,27 @@ func TestCardActionRejectsUnverifiableRequests(t *testing.T) {
 			want:   http.StatusUnauthorized,
 		},
 		{
+			// The case an attacker would actually try once they know the secret is
+			// unset: sign the canonical string with the EMPTY secret, so the HMAC is
+			// self-consistent and only a deliberate refusal stops it.
+			//
+			// Two independent guards enforce this — card_action.go's `h.secret == ""`
+			// short-circuit and notify.Verify's own empty-secret refusal (pinned by
+			// notify/signature_test.go) — and that is on purpose, so removing either
+			// ALONE leaves this test green. It is layered, not redundant: this asserts
+			// the invariant survives, and the signature-package test asserts the lower
+			// guard exists. Deleting both is what this catches, which is the failure
+			// that matters, because then any caller who can reach the endpoint can
+			// forge a decision.
+			name:   "a callback signed with the empty secret is still refused",
+			secret: "",
+			mutate: func(r *http.Request) {
+				stamp := r.Header.Get(notify.HeaderTimestamp)
+				r.Header.Set(notify.HeaderSignature, notify.Sign("", http.MethodPost, CardActionPath, stamp, goodEvent, []byte(goodBody)))
+			},
+			want: http.StatusUnauthorized,
+		},
+		{
 			name:   "missing signature",
 			secret: cardSecret,
 			mutate: func(r *http.Request) { r.Header.Del(notify.HeaderSignature) },

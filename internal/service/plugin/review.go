@@ -865,9 +865,16 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 	if err != nil {
 		// A vanished request is terminal, not a server fault: report it in-band so
 		// octo-server renders the card and stops redelivering instead of pushing the
-		// event to the DLQ.
+		// event to the DLQ. `cancelled` is the same state the two not_found branches
+		// below emit, so one physical condition — the request is gone — renders as
+		// one thing on a card keyed by state. Every path that removes the plugin
+		// cascade-cancels its request in the same transaction
+		// (cancelPendingReviewFor), so cancelled is also the accurate reading; an
+		// id that never existed at all is indistinguishable from here and renders
+		// the same way. No requester is knowable on this branch, and cancelled does
+		// not require one (see the contract note on the applied result below).
 		if errors.Is(mapStoreError(err), ErrNotFound) {
-			return &CardActionResult{Disposition: cardDispositionNotFound, State: cardStatePending}, nil
+			return &CardActionResult{Disposition: cardDispositionNotFound, State: cardStateCancelled}, nil
 		}
 		return nil, mapStoreError(err)
 	}
@@ -963,9 +970,20 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 			// request is gone and no redelivery will change that. cardConflict would
 			// try to re-read and re-return ErrNotFound; treat it as terminal here so
 			// the re-read does not loop as 503.
+			//
+			// Deliberately UNRECEIPTED, like the two refusals below: the event is
+			// answered in-band but nothing is stored under its event_id, so a
+			// redelivery of the same event re-runs the decision. That is the right
+			// trade for a transient-looking outcome (a retry that finds the row back
+			// — restored, or a re-read that now succeeds — must be able to apply it)
+			// and it is why the answer for one event_id is not guaranteed verbatim
+			// across deliveries. Only the applied path is receipted, which is the
+			// case where a differing replay would double-apply.
 			return &CardActionResult{
 				Disposition: cardDispositionNotFound,
 				State:       cardStateCancelled,
+				Requester:   req.ApplicantUID,
+				Display:     map[string]string{"title": req.PluginName},
 			}, nil
 		case errors.Is(mapped, ErrConflict):
 			return s.cardConflict(ctx, req)
@@ -974,6 +992,15 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 			// current (draft label moved) or already-taken (concurrent label
 			// collision). Ack as a handled refusal; display.reason distinguishes the
 			// two for a future richer renderer.
+			//
+			// Unreceipted on purpose. The row is still PENDING, so a later delivery
+			// of this event must be free to apply the decision once the applicant has
+			// resubmitted — storing a refusal under this event_id would swallow that
+			// retry. The cost is that one event_id can answer `{forbidden, pending}`
+			// now and `{conflict, cancelled}` after the applicant cancels; the answer
+			// is not verbatim-idempotent, only never-double-applying. Receipting is
+			// reserved for the applied path, the only one where a differing replay
+			// would apply a decision twice.
 			reason := "version_moved_past_resubmit_required"
 			if errors.Is(mapped, ErrLabelTaken) {
 				reason = "version_label_taken_resubmit_required"
@@ -993,8 +1020,21 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 	result := &CardActionResult{
 		Disposition: cardDispositionApplied,
 		State:       state,
-		// Terminal states must carry requester_uid or octo-server's finalizer
-		// cannot DM the applicant, and DecodeDecisionResult rejects the response.
+		// approved/denied MUST carry requester_uid. Those two are what octo-server
+		// calls a terminal decision, and both of its layers reject a response
+		// without one: DecodeDecisionResult (cardactiondispatch/contract.go:228)
+		// errors on `(approved|denied) && requester_uid == ""`, and
+		// StandardActionFinalizer (modules/notify/standard_action_finalizer.go:34-36)
+		// repeats the check before DMing the applicant. A rejected response reads as
+		// a callback failure, which octo-server redelivers.
+		//
+		// `cancelled` is NOT in that set on either side — the finalizer edits the
+		// card and returns before the applicant DM — so the not_found branches below
+		// are accepted without a requester. They send one anyway: it costs nothing
+		// and the field stays present if octo-server ever widens its terminal set.
+		// Do not read this as "every terminal state requires it"; an earlier
+		// revision of this comment said so and that is not what the companion
+		// repository enforces.
 		Requester: req.ApplicantUID,
 		Display:   map[string]string{"title": req.PluginName},
 	}
@@ -1041,10 +1081,14 @@ func (s *Service) cardConflict(ctx context.Context, req *model.PluginReviewReque
 		// The request (or its plugin) was soft-deleted between the CAS race and
 		// this re-read. Permanent: return not_found/cancelled as a terminal
 		// outcome instead of letting the error fall through to 503-redelivery,
-		// which would loop forever on a row that cannot come back.
+		// which would loop forever on a row that cannot come back. Same state the
+		// other two request-is-gone branches emit, and `req` is still in hand from
+		// the caller, so the requester and title come along.
 		return &CardActionResult{
 			Disposition: cardDispositionNotFound,
 			State:       cardStateCancelled,
+			Requester:   req.ApplicantUID,
+			Display:     map[string]string{"title": req.PluginName},
 		}, nil
 	}
 	if err != nil {

@@ -39,11 +39,23 @@
 -- visibility` silently degrades to a full clustered-index rebuild under the
 -- migration lock on 8.0.12–8.0.28. An explicit clause turns that into an error an
 -- operator sees rather than a surprise table rebuild on the largest table.
-ALTER TABLE `plugins`
-  ADD COLUMN `listing_state` ENUM('draft','published','delisted') NOT NULL DEFAULT 'published'
-    COMMENT 'Listing lifecycle, independent of review state. Never add review values.'
-    AFTER `visibility`,
-  ALGORITHM=INSTANT;
+-- Guarded so the replay this header describes CONVERGES instead of dying on
+-- ERROR 1060. Splitting the file into one DDL each bounded the damage to "a whole,
+-- re-appliable step"; it did not make the step re-appliable, because MySQL has no
+-- ADD COLUMN IF NOT EXISTS. The information_schema lookup supplies it: on a clean
+-- schema @ddl is the ALTER, on a replay it is a no-op, and the ALTER text itself is
+-- unchanged (same default, same AFTER, same ALGORITHM=INSTANT, so the 8.0.29 floor
+-- still fails loudly rather than silently rebuilding the table).
+SET @ddl := IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+     WHERE table_schema = DATABASE()
+       AND table_name = 'plugins'
+       AND column_name = 'listing_state') > 0,
+  'DO 0',
+  'ALTER TABLE `plugins` ADD COLUMN `listing_state` ENUM(''draft'',''published'',''delisted'') NOT NULL DEFAULT ''published'' COMMENT ''Listing lifecycle, independent of review state. Never add review values.'' AFTER `visibility`, ALGORITHM=INSTANT');
+PREPARE add_listing_state FROM @ddl;
+EXECUTE add_listing_state;
+DEALLOCATE PREPARE add_listing_state;
 
 -- +migrate Down
 ALTER TABLE `plugins` DROP COLUMN `listing_state`;

@@ -233,6 +233,12 @@ func TestSubmitAcceptsTheDraftLabelOnAFirstListing(t *testing.T) {
 	}
 }
 
+// The sentinel is ErrReviewPending, not ErrConflict. Both are 409, so the status
+// code does not discriminate — what does is the conflict_reason the handler
+// derives: review_pending carries "cancel the pending request first", which is the
+// actual next step, while the generic `state` arm ErrConflict lands on says only
+// that something raced. This is the most common way a submit fails, so it is the
+// one that least deserves the unactionable reason.
 func TestSubmitEnforcesSinglePendingPerPlugin(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
@@ -241,8 +247,11 @@ func TestSubmitEnforcesSinglePendingPerPlugin(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := repo.InsertReviewRequest(context.Background(), tenantScope(), newRequest("plugin-1", "1.0.1"), snapshotOf(`{"a":1}`, `{"b":2}`, nil))
-	if !errors.Is(err, pluginrepo.ErrConflict) {
-		t.Fatalf("second pending submit = %v, want ErrConflict", err)
+	if !errors.Is(err, pluginrepo.ErrReviewPending) {
+		t.Fatalf("second pending submit = %v, want ErrReviewPending", err)
+	}
+	if errors.Is(err, pluginrepo.ErrConflict) {
+		t.Fatal("ErrReviewPending must not also satisfy ErrConflict, or the handler's generic arm wins the switch")
 	}
 }
 

@@ -75,11 +75,23 @@ type FrozenSnapshot struct {
 }
 
 // classifyDeadlock maps InnoDB's deadlock-victim abort (error 1213) to the
-// repository's typed ErrDeadlock. Submit and the three decision paths (approve/
-// reject/cancel) take the plugin row and the request row in OPPOSITE orders, so
-// a submit overlapping an in-flight decision on the same plugin can deadlock;
-// InnoDB aborts one side with 1213. Without this it surfaces as a raw 500 on the
-// exact concurrent-decision scenario this workflow is designed for.
+// repository's typed ErrDeadlock. The decision paths (approve/reject/cancel)
+// take the REQUEST row before the plugin row, while every other transaction that
+// touches both — submit, and the mutations that cascade-cancel or pending-check
+// through cancelPendingReviewFor — takes the PLUGIN row first. That AB-BA order
+// means two overlapping writers on the same plugin can deadlock, and InnoDB
+// aborts one side with 1213.
+//
+// It must therefore be installed on BOTH sides of the hazard, not just the review
+// paths: one physical deadlock produces one victim, and whichever transaction
+// happens to lose has to report it the same way. Left off half the transactions,
+// the loser inside an unclassified one falls through as a raw 1213 and the
+// handler answers HTTP 500 for what is a retryable outcome. The full set is
+// InsertReviewRequest / ApproveReview / RejectReview / CancelReview here, plus
+// PublishPlugin and DelistPlugin (listing.go) and Update / Delete / DeleteGraph /
+// RebuildGraph (write.go). Create and CreateGraph are excluded on purpose: a
+// plugin being created cannot yet have a review request, so they never take the
+// second lock.
 //
 // It is deliberately NOT mapped to ErrConflict: ErrConflict is the repository's
 // word for "you lost the CAS race and the request is already settled", which the
@@ -91,12 +103,24 @@ type FrozenSnapshot struct {
 // the web paths and a 503 on the card path so octo-server redelivers. Any
 // non-1213 error passes through unchanged. Applied via defer at each transaction
 // boundary so it catches a deadlock raised by any statement or by commit.
+//
+// 1205 (ER_LOCK_WAIT_TIMEOUT) is classified alongside 1213, and in this design it
+// is the LIKELIER of the two: getOwnedForUpdate queues on the plugin row for the
+// entire duration of an approve — relation sync, version snapshot, child
+// promotion, audit — so a waiter can cross innodb_lock_wait_timeout with no cycle
+// ever forming. Both mean "lost a lock race, nothing committed, retry", which is
+// what the sentinel name is about even though the two server errors differ: 1213
+// rolls the whole transaction back, while 1205 aborts only the statement. That
+// difference does not reach a caller, because every path here returns the error
+// and the deferred tx.Rollback discards the transaction either way. The wire value
+// stays conflict_reason=deadlock so the client contract does not move for what is
+// the same retry instruction.
 func classifyDeadlock(err error) error {
 	if err == nil {
 		return nil
 	}
 	var me *mysql.MySQLError
-	if errors.As(err, &me) && me.Number == 1213 {
+	if errors.As(err, &me) && (me.Number == 1213 || me.Number == 1205) {
 		return ErrDeadlock
 	}
 	return err
@@ -198,7 +222,16 @@ func (r *Repo) InsertReviewRequest(ctx context.Context, scope Scope, req *model.
 	// Take the single-pending lock in the same transaction as the label check so
 	// two concurrent submits cannot both pass. The UNIQUE index on the generated
 	// pending_plugin_id column is the hard guarantee; this read gives the loser a
-	// typed ErrConflict instead of a raw 1062.
+	// typed error instead of a raw 1062.
+	//
+	// ErrReviewPending, not ErrConflict. It is the same physical fact the visibility
+	// and delete paths already report that way ("a review request is pending on this
+	// plugin", conflict_reason=review_pending, hint: cancel it first), and the
+	// actionable next step is identical. Reporting it as ErrConflict instead put the
+	// most common submit failure on the generic conflict_reason=state arm, which
+	// tells a client only that something raced — the one arm that cannot be acted on
+	// — while the arm carrying the exact instruction was reachable only from the
+	// publish/visibility paths.
 	var pendingID string
 	if err := tx.QueryRowContext(ctx,
 		`SELECT review_id FROM plugin_review_requests
@@ -207,7 +240,7 @@ func (r *Repo) InsertReviewRequest(ctx context.Context, scope Scope, req *model.
 		return err
 	}
 	if pendingID != "" {
-		return ErrConflict
+		return ErrReviewPending
 	}
 
 	relations := snap.Relations
@@ -245,7 +278,12 @@ func (r *Repo) InsertReviewRequest(ctx context.Context, scope Scope, req *model.
 	if err != nil {
 		var me *mysql.MySQLError
 		if errors.As(err, &me) && me.Number == 1062 {
-			return ErrConflict
+			// The unique index on the generated pending_plugin_id column. Reaching it
+			// means a concurrent submit committed between the FOR UPDATE read above and
+			// this INSERT, so it is the same fact that read reports and must carry the
+			// same sentinel — otherwise which of two identical races a client sees
+			// depends on scheduling.
+			return ErrReviewPending
 		}
 		return err
 	}

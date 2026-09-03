@@ -112,17 +112,20 @@ type relationRequest struct {
 }
 
 type pluginWriteRequest struct {
-	PluginID     string                 `json:"plugin_id,omitempty"`
-	PluginName   string                 `json:"plugin_name"`
-	PluginType   model.PluginType       `json:"plugin_type"`
-	CategoryID   *string                `json:"category_id,omitempty"`
-	Tags         []string               `json:"tags"`
-	Publisher    string                 `json:"publisher,omitempty"`
-	Icon         string                 `json:"icon,omitempty"`
-	Visibility   model.PluginVisibility `json:"visibility"`
-	Version      string                 `json:"version,omitempty"`
-	ManifestJSON json.RawMessage        `json:"manifest_json" swaggertype:"object"`
-	PluginJSON   json.RawMessage        `json:"plugin_json" swaggertype:"object"`
+	PluginID   string                 `json:"plugin_id,omitempty"`
+	PluginName string                 `json:"plugin_name"`
+	PluginType model.PluginType       `json:"plugin_type"`
+	CategoryID *string                `json:"category_id,omitempty"`
+	Tags       []string               `json:"tags"`
+	Publisher  string                 `json:"publisher,omitempty"`
+	Icon       string                 `json:"icon,omitempty"`
+	Visibility model.PluginVisibility `json:"visibility"`
+	// Version label as MAJOR.MINOR.PATCH, each part 1-9 digits. Omit to keep the
+	// stored label. A plugin whose stored label predates this format stays editable by
+	// re-sending that exact label.
+	Version      string          `json:"version,omitempty" pattern:"^\\d{1,9}\\.\\d{1,9}\\.\\d{1,9}$"`
+	ManifestJSON json.RawMessage `json:"manifest_json" swaggertype:"object"`
+	PluginJSON   json.RawMessage `json:"plugin_json" swaggertype:"object"`
 }
 
 type upsertRequest struct {
@@ -681,6 +684,17 @@ func splitQuery(values []string) []string {
 	}
 	return result
 }
+
+// writeServiceError maps a service sentinel onto the wire shape.
+//
+// Every 409 arm below MUST set a distinct conflict_reason, and the set is
+// documented in the spec (cmd/marketplace-api/main.go's @description) because the
+// status code alone cannot tell a client whether to cancel a pending request, pick
+// a new version label, or simply retry. `state` is the residual for a raced state
+// change with no more specific reading — adding a sentinel to that arm rather than
+// giving it its own reason is how an actionable failure ends up unactionable, which
+// is what happened to the single-pending refusal and to label collisions. Keep the
+// three in sync: the sentinel, the reason string, and the @description list.
 func writeServiceError(c *gin.Context, err error, operation string) {
 	var fieldErr *pluginsvc.ReviewFieldError
 	switch {
@@ -746,10 +760,14 @@ func writeServiceError(c *gin.Context, err error, operation string) {
 		apiresponse.Fail(c, http.StatusRequestEntityTooLarge, errcode.FileTooLarge, "plugin artifact exceeds the size limit", nil, "Reduce the attachment size and try again.")
 	case errors.Is(err, pluginsvc.ErrConflict):
 		apiresponse.Fail(c, http.StatusConflict, errcode.Conflict, "plugin state conflicts with an existing resource", map[string]any{"conflict_reason": "state"}, "Refresh the resource and try again.")
-	// A transient InnoDB deadlock (submit racing a decision on the same plugin).
-	// The transaction rolled back and did not commit, so it is safe — and
-	// expected — to retry. Reported as a retryable conflict rather than a 500 so
-	// the client re-issues the request instead of surfacing an internal error.
+	// Transient InnoDB lock contention (a deadlock victim, or a lock-wait timeout)
+	// between two writers on the same plugin that take the plugin row and its
+	// review request in opposite orders — a submit or a decision racing a save,
+	// delete, publish or delist. Nothing committed, so it is safe — and expected —
+	// to retry. Reported as a retryable conflict rather than a 500 so the client
+	// re-issues the request instead of surfacing an internal error. The
+	// conflict_reason stays "deadlock" for both server errors: it is one retry
+	// instruction to a client, and splitting it would move the wire contract.
 	case errors.Is(err, pluginsvc.ErrDeadlock):
 		apiresponse.Fail(c, http.StatusConflict, errcode.Conflict, "the request conflicted with a concurrent change", map[string]any{"conflict_reason": "deadlock", "retryable": true}, "Please retry the request.")
 	default:

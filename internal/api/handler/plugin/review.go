@@ -208,8 +208,10 @@ func decodeFrozenRelations(raw json.RawMessage) []reviewRelationResponse {
 // live graph — so a client editing only documents cannot empty an expert team by
 // forgetting the field.
 type reviewSubmitRequest struct {
-	PluginID     string             `json:"plugin_id"`
-	Version      string             `json:"version"`
+	PluginID string `json:"plugin_id"`
+	// Version label as MAJOR.MINOR.PATCH, each part 1-9 digits. Must be at least the
+	// plugin's current label, and must not already be published.
+	Version      string             `json:"version" pattern:"^\\d{1,9}\\.\\d{1,9}\\.\\d{1,9}$"`
 	Changelog    string             `json:"changelog,omitempty"`
 	ParseTaskID  string             `json:"parse_task_id,omitempty"`
 	ManifestJSON json.RawMessage    `json:"manifest_json,omitempty" swaggertype:"object"`
