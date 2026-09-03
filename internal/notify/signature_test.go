@@ -117,6 +117,19 @@ func TestVerify_Rejections(t *testing.T) {
 			}
 		})
 	}
+
+	// Pin the empty-secret close specifically: Sign("", …) computes an HMAC
+	// with an empty key, and Verify("", Sign("", …), …) MUST return false even
+	// though the two match byte-for-byte. A test that only feeds a signature
+	// produced with a DIFFERENT secret passes whether or not the empty-secret
+	// guard exists (HMAC mismatch alone rejects it), so this case would catch
+	// a regression where someone removes the `secret == ""` early-return.
+	t.Run("empty secret rejects a signature produced with the empty key", func(t *testing.T) {
+		sig := Sign("", vectorMethod, vectorPath, vectorTimestamp, vectorEventID, body)
+		if Verify("", sig, vectorMethod, vectorPath, vectorTimestamp, vectorEventID, body) {
+			t.Fatal("Verify accepted an empty-secret signature; the endpoint must be closed when unconfigured")
+		}
+	})
 }
 
 // TestVerify_ReSerializedBodyFails is the reason the callback handler must read

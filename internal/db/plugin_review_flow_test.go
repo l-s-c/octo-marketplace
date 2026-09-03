@@ -129,6 +129,11 @@ func snapshotOf(manifest, pkg string, relations []model.PluginRelation) pluginre
 		Relations:    relations,
 		ManifestHash: "sha256:frozen-manifest",
 		PluginHash:   "sha256:frozen-package",
+		// These fixtures stand in for a submit that declared its own content, which
+		// is what freezeSubmission produces for every shape except the contentless
+		// live-row copy. TestSubmitRefusesAContentlessSnapshotAgainstAPublishedRow
+		// is the one case that clears this flag on purpose.
+		DeclaredContent: true,
 	}
 }
 
@@ -281,8 +286,8 @@ func TestSubmitVersionLabelReuseRules(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.InsertReviewRequest(ctx, tenantScope(), newRequest("plugin-1", "1.0.0"), snapshotOf(`{"a":1}`, `{"b":2}`, nil)); !errors.Is(err, pluginrepo.ErrConflict) {
-		t.Fatalf("republishing an approved label = %v, want ErrConflict", err)
+	if err := repo.InsertReviewRequest(ctx, tenantScope(), newRequest("plugin-1", "1.0.0"), snapshotOf(`{"a":1}`, `{"b":2}`, nil)); !errors.Is(err, pluginrepo.ErrLabelTaken) {
+		t.Fatalf("republishing an approved label = %v, want ErrLabelTaken", err)
 	}
 	// A different label is fine.
 	if err := repo.InsertReviewRequest(ctx, tenantScope(), newRequest("plugin-1", "1.1.0"), snapshotOf(`{"a":1}`, `{"b":2}`, nil)); err != nil {
@@ -297,8 +302,8 @@ func TestSubmitRefusesTheLiveLabelOfAnAlreadyListedPlugin(t *testing.T) {
 	database := reviewDB(t)
 	repo := pluginrepo.New(database)
 	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", currentVersionID: "ver-1", currentVersion: "2.4.0"})
-	if err := repo.InsertReviewRequest(context.Background(), tenantScope(), newRequest("plugin-1", "2.4.0"), snapshotOf(`{"a":1}`, `{"b":2}`, nil)); !errors.Is(err, pluginrepo.ErrConflict) {
-		t.Fatalf("resubmitting the live label = %v, want ErrConflict", err)
+	if err := repo.InsertReviewRequest(context.Background(), tenantScope(), newRequest("plugin-1", "2.4.0"), snapshotOf(`{"a":1}`, `{"b":2}`, nil)); !errors.Is(err, pluginrepo.ErrLabelTaken) {
+		t.Fatalf("resubmitting the live label = %v, want ErrLabelTaken", err)
 	}
 }
 
@@ -463,8 +468,8 @@ func TestApproveRefusesALabelReusedMidFlight(t *testing.T) {
 	_, err := repo.ApproveReview(ctx, reviewerScope(), pluginrepo.ApproveReviewParams{
 		ReviewID: req.ID, ReviewerUID: "admin-1", ReviewerName: "Adam",
 	})
-	if !errors.Is(err, pluginrepo.ErrConflict) {
-		t.Fatalf("approving over a mid-flight label reuse = %v, want ErrConflict", err)
+	if !errors.Is(err, pluginrepo.ErrLabelTaken) {
+		t.Fatalf("approving over a mid-flight label reuse = %v, want ErrLabelTaken", err)
 	}
 
 	// The request must NOT be flipped to approved, the live label stays on the
@@ -546,6 +551,60 @@ func TestSubmitRefusesWhenVisibilityWasLoweredToPrivateMidFlight(t *testing.T) {
 	}
 	if vis != "private" {
 		t.Fatalf("visibility = %q after the refused insert, want private", vis)
+	}
+}
+
+// A contentless submit is legal on a draft (the draft row IS what the reviewer
+// should see) and illegal on a published plugin (freezing the live content makes
+// the review theatre and approval would only mint a label for content that has
+// already shipped). The service refuses it from an UNLOCKED read taken before the
+// freeze window; this pins the under-lock twin, i.e. the interleaving where a
+// concurrent approval promoted the row to published after that read. Seeding the
+// row as published is exactly the state the locked read finds in that race.
+func TestSubmitRefusesAContentlessSnapshotAgainstAPublishedRow(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "published", currentVersionID: "ver-1", currentVersion: "1.0.0"})
+
+	contentless := snapshotOf(`{"plugin_name":"Live row"}`, `{"attachments":[]}`, nil)
+	contentless.DeclaredContent = false
+	err := repo.InsertReviewRequest(ctx, tenantScope(), newRequest("plugin-1", "1.1.0"), contentless)
+	if !errors.Is(err, pluginrepo.ErrReviewContentRequired) {
+		t.Fatalf("contentless submit against a published row = %v, want ErrReviewContentRequired", err)
+	}
+	var pending int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM plugin_review_requests WHERE plugin_id='plugin-1'`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 {
+		t.Fatalf("a contentless request row was written against a published plugin: %d rows", pending)
+	}
+	// The same insert with declared content is accepted, so the guard is keyed on
+	// the flag and not on something incidental to this fixture.
+	if err := repo.InsertReviewRequest(ctx, tenantScope(), newRequest("plugin-1", "1.1.0"),
+		snapshotOf(`{"plugin_name":"Declared"}`, `{"attachments":[]}`, nil)); err != nil {
+		t.Fatalf("declared-content submit against the same row was refused: %v", err)
+	}
+}
+
+// A first listing may still snapshot the live draft row: the content-required
+// rule is keyed on the LOCKED listing_state, so clamping it to every submit would
+// break the ordinary "submit my draft for review" path.
+func TestSubmitAllowsAContentlessSnapshotOnAFirstListing(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", listingState: "draft", currentVersionID: "ver-1", currentVersion: "1.0.0"})
+
+	contentless := snapshotOf(`{"plugin_name":"Draft"}`, `{"attachments":[]}`, nil)
+	contentless.DeclaredContent = false
+	req := newRequest("plugin-1", "1.0.0")
+	if err := repo.InsertReviewRequest(ctx, tenantScope(), req, contentless); err != nil {
+		t.Fatalf("contentless first-listing submit was refused: %v", err)
+	}
+	if req.Kind != model.ReviewKindFirst {
+		t.Fatalf("kind = %q, want first", req.Kind)
 	}
 }
 

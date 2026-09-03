@@ -337,6 +337,14 @@ func TestValidateAPIOctoSecrets(t *testing.T) {
 			mutate: func(c *Config) {
 				c.OctoCardActionSecret = tokB
 			}, wantErr: true, wantSub: "OCTO_MARKETPLACE_CARD_ACTION_SECRET requires OCTO_MARKETPLACE_INTERNAL_TOKEN"},
+		// (b') CARD_ACTION_SECRET without OCTO_API_URL: signature verifies but
+		// role lookup has no endpoint → 503 forever. Fail boot (same DLQ class).
+		{name: "card secret without URL fails boot",
+			mutate: func(c *Config) {
+				c.OctoCardActionSecret = tokB
+				c.OctoInternalToken = tokA
+				c.OctoAPIURL = ""
+			}, wantErr: true, wantSub: "OCTO_MARKETPLACE_CARD_ACTION_SECRET requires OCTO_API_URL"},
 		{name: "only internal token configured (no url, no card secret) boots",
 			mutate: func(c *Config) {
 				c.OctoInternalToken = tokA

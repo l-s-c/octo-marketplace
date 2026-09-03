@@ -36,6 +36,23 @@ var (
 	// holds even under that race. The service maps it back to its own
 	// ErrVersionRegressed so both paths surface identically.
 	ErrVersionRegressed = errors.New("version must not go backwards")
+	// ErrLabelTaken indicates an UPGRADE whose version label is already in the
+	// set of labels the org has seen for this plugin. It is distinct from
+	// ErrConflict because ErrConflict means "you lost a CAS race and the request
+	// is already settled" — a terminal ack on the IM card path. A label-taken
+	// refusal, by contrast, means the request is still pending and the admin's
+	// click must not be silently ack'd: the web path surfaces it as a named
+	// field conflict and the card path renders it as a terminal refusal with an
+	// actionable reason (version_moved_past), exactly like ErrVersionRegressed.
+	ErrLabelTaken = errors.New("version label is already published")
+	// ErrReviewContentRequired indicates a submitted request that was admitted
+	// at the service layer as a content-carrying upgrade but, against the
+	// FOR UPDATE-locked row, turns out to be against a now-published plugin with
+	// no declared content (i.e. a concurrent approval promoted a draft to
+	// published between the unlocked read and this transaction). Such a snapshot
+	// would silently roll back live content on approval, so it is refused with
+	// the same error the service returns for a contentless upgrade.
+	ErrReviewContentRequired = errors.New("review submission must carry the reviewed content")
 	// ErrDeadlock indicates an InnoDB deadlock-victim abort (error 1213) on a
 	// review transaction. Submit and the three decision paths take the plugin row
 	// and the request row in OPPOSITE orders, so a submit overlapping an in-flight

@@ -318,6 +318,9 @@ func (c Config) validateOctoSecrets() error {
 	if c.OctoCardActionSecret != "" && c.OctoInternalToken == "" {
 		return fmt.Errorf("OCTO_MARKETPLACE_CARD_ACTION_SECRET requires OCTO_MARKETPLACE_INTERNAL_TOKEN: the callback verifies signatures but cannot authorize operator roles without the internal token, so every valid admin click would 503")
 	}
+	if c.OctoCardActionSecret != "" && c.OctoAPIURL == "" {
+		return fmt.Errorf("OCTO_MARKETPLACE_CARD_ACTION_SECRET requires OCTO_API_URL: the callback re-derives operator roles against octo-server at that URL; without it every valid admin click fails role lookup and returns 503")
+	}
 	return nil
 }
 

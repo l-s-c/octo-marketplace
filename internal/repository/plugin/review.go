@@ -63,6 +63,15 @@ type FrozenSnapshot struct {
 	Relations      []model.PluginRelation
 	ManifestHash   string
 	PluginHash     string
+	// DeclaredContent reports whether the submission carried its own content
+	// (declared manifest+package, or a materialized zip) rather than being a
+	// copy of the plugin's live row. InsertReviewRequest re-checks the
+	// content-required rule against the LOCKED row and cannot infer this from the
+	// snapshot bytes: an author may legitimately resubmit content identical to the
+	// live row, and comparing hashes would refuse that while still missing nothing
+	// this flag catches. Set by freezeSubmission, which is the only place that
+	// knows which of the three submit shapes arrived.
+	DeclaredContent bool
 }
 
 // classifyDeadlock maps InnoDB's deadlock-victim abort (error 1213) to the
@@ -155,6 +164,19 @@ func (r *Repo) InsertReviewRequest(ctx context.Context, scope Scope, req *model.
 	} else {
 		req.Kind = model.ReviewKindUpgrade
 	}
+	// Re-run the content-required precondition against the LOCKED row: an
+	// UPGRADE (a published plugin) must carry declared content — a manifest+package
+	// pair or a materialized zip — rather than snapshotting the live row. The
+	// service already refused that shape, but from an UNLOCKED Detail read taken
+	// before the freeze window; a concurrent approval of an earlier pending request
+	// can flip the row to published inside that window, and a contentless snapshot
+	// admitted here would mint an approval carrying content the reviewer never saw.
+	// First-listing drafts are still allowed to snapshot the live row (that IS what
+	// the reviewer should see), which is why this is gated on the locked
+	// listing_state rather than applied unconditionally.
+	if !snap.DeclaredContent && current.ListingState == model.PluginListingStatePublished {
+		return ErrReviewContentRequired
+	}
 	// Re-run the forward-only ordering rule against the LOCKED current_version.
 	// The service checked this on its earlier unlocked read, but a concurrent
 	// approve (or an admin version edit) can move current_version forward during
@@ -171,7 +193,7 @@ func (r *Repo) InsertReviewRequest(ctx context.Context, scope Scope, req *model.
 		return err
 	}
 	if _, taken := published[req.Version]; taken {
-		return ErrConflict
+		return ErrLabelTaken
 	}
 	// Take the single-pending lock in the same transaction as the label check so
 	// two concurrent submits cannot both pass. The UNIQUE index on the generated
@@ -464,13 +486,23 @@ func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewPa
 	// plugins.current_version = version unconditionally). The insert-time check in
 	// InsertReviewRequest only guarantees the label was forward-only at SUBMIT
 	// time; any writer that moves current_version forward while the request is
-	// pending (an admin version edit, or the author's own draft label edit while
-	// the plugin is not yet listed) invalidates that guarantee, and without this
-	// the approval would stamp a LOWER label and regress the plugin's public
-	// version. This is the apply-time half of the same invariant, enforced where
-	// the label is actually written. First listings have no prior published label
-	// to regress, so the guard is naturally a no-op there (current_version is the
-	// draft label and the request label is >= it by the submit-time check).
+	// pending (an admin version edit on a listed plugin, or the author's own draft
+	// label bump while the plugin is still a draft — content edits stay allowed
+	// by design, service.go:606-609, and every save snapshots current_version)
+	// invalidates that guarantee, and without this the approval would stamp a
+	// LOWER label and regress the plugin's public version. This is the apply-time
+	// half of the same invariant, enforced where the label is actually written.
+	//
+	// On a FIRST listing the parenthetical ("the request label was forward at
+	// submit time") is NOT a guarantee that the guard cannot fire here: the draft
+	// label can move forward after submit (see above), which is exactly when this
+	// guard deliberately returns ErrVersionRegressed. The refusal is terminal on
+	// the card path (disposition=forbidden, reason=version_moved_past_resubmit_required)
+	// and surfaces as a typed error on the web path; the applicant escapes via
+	// cancel+resubmit (publishedVersionLabels excludes a draft's own current_version,
+	// so the new label is not "taken"). This comment is explicit because a reader
+	// who believes the guard is a no-op on first listings would be tempted to
+	// "simplify" the terminal branch away, re-introducing the 503-wedge.
 	if current.CurrentVersion != nil &&
 		!model.VersionNotRegressed(*current.CurrentVersion, version) {
 		return nil, ErrVersionRegressed
@@ -501,7 +533,7 @@ func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewPa
 		return nil, err
 	}
 	if _, taken := published[version]; taken {
-		return nil, ErrConflict
+		return nil, ErrLabelTaken
 	}
 	now := p.Now
 	if now.IsZero() {

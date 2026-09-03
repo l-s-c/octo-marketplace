@@ -154,8 +154,8 @@ func TestPublishedLabelsIncludeADelistedPluginsCurrentVersion(t *testing.T) {
 
 	err := repo.InsertReviewRequest(ctx, tenantScope(), newRequest("plugin-1", "1.0.0"),
 		snapshotOf(`{"plugin_name":"Again"}`, `{"attachments":[]}`, nil))
-	if !errors.Is(err, pluginrepo.ErrConflict) {
-		t.Fatalf("reusing a delisted plugin's live label err = %v, want ErrConflict", err)
+	if !errors.Is(err, pluginrepo.ErrLabelTaken) {
+		t.Fatalf("reusing a delisted plugin's live label err = %v, want ErrLabelTaken", err)
 	}
 	// A fresh label is fine.
 	if err := repo.InsertReviewRequest(ctx, tenantScope(), newRequest("plugin-1", "1.0.1"),

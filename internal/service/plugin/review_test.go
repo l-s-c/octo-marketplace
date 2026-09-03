@@ -524,6 +524,7 @@ func TestDecideReviewFromCardReplaysStoredResponse(t *testing.T) {
 	store, svc := reviewFixture(t)
 	store.review.receipt = &model.CardActionReceipt{
 		EventID:        "42",
+		ReviewID:       "review-1",
 		StoredResponse: `{"disposition":"applied","state":"approved","requester_uid":"user-1"}`,
 	}
 	out, err := svc.DecideReviewFromCard(context.Background(), "42", "admin-1", "approve", "review-1")
@@ -538,6 +539,30 @@ func TestDecideReviewFromCardReplaysStoredResponse(t *testing.T) {
 	}
 	if len(store.review.receiptInserts) != 0 {
 		t.Error("replay wrote a second receipt")
+	}
+}
+
+// The receipt is keyed on event_id alone, but the response it stores describes ONE
+// review. If octo-server ever reuses an event_id across two card actions (or a
+// caller crafts one), replaying the stored answer would report the wrong review's
+// outcome as if it were this one's. The review_id in the signed path is
+// cross-checked against the receipt for exactly that reason.
+func TestDecideReviewFromCardRefusesAReceiptForADifferentReview(t *testing.T) {
+	store, svc := reviewFixture(t)
+	store.review.receipt = &model.CardActionReceipt{
+		EventID:        "42",
+		ReviewID:       "review-OTHER",
+		StoredResponse: `{"disposition":"applied","state":"approved","requester_uid":"user-1"}`,
+	}
+	out, err := svc.DecideReviewFromCard(context.Background(), "42", "admin-1", "approve", "review-1")
+	if !errors.Is(err, ErrCardBadDecision) {
+		t.Fatalf("mismatched receipt = (%+v, %v), want ErrCardBadDecision", out, err)
+	}
+	if store.review.approveParams.ReviewID != "" {
+		t.Error("the mismatched replay applied a decision")
+	}
+	if len(store.review.receiptInserts) != 0 {
+		t.Error("the mismatched replay wrote a receipt")
 	}
 }
 

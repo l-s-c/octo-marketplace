@@ -353,6 +353,11 @@ func logReviewConfigWarnings(cfg ReviewConfig) {
 	hasURL := cfg.OctoAPIURL != ""
 	hasToken := cfg.InternalToken != ""
 	hasSecret := cfg.CardActionSecret != ""
+	if hasSecret && !hasURL {
+		logging.Warn("review_callback_misconfigured",
+			zap.String("operation", "plugin_review.config"),
+			zap.String("reason", "OCTO_MARKETPLACE_CARD_ACTION_SECRET set without OCTO_API_URL; the card callback will verify signatures but operator role lookups always fail (no notifier endpoint), so every real admin click returns 503 forever"))
+	}
 	if hasURL && !hasToken {
 		logging.Warn("review_notify_disabled",
 			zap.String("operation", "plugin_review.config"),
@@ -362,6 +367,14 @@ func logReviewConfigWarnings(cfg ReviewConfig) {
 		logging.Warn("review_callback_disabled",
 			zap.String("operation", "plugin_review.config"),
 			zap.String("reason", "OCTO_MARKETPLACE_INTERNAL_TOKEN set without OCTO_MARKETPLACE_CARD_ACTION_SECRET; approval cards will be sent but every admin click will be rejected (401)"))
+	}
+	if hasSecret && !hasToken {
+		// This is a boot-failure (see Config.validateOctoSecrets); unreachable
+		// at runtime but kept as a belt-and-braces warning if anyone constructs
+		// ReviewConfig directly outside ValidateAPI.
+		logging.Warn("review_callback_misconfigured",
+			zap.String("operation", "plugin_review.config"),
+			zap.String("reason", "OCTO_MARKETPLACE_CARD_ACTION_SECRET set without OCTO_MARKETPLACE_INTERNAL_TOKEN; card signatures verify but operator role lookups always 503"))
 	}
 }
 

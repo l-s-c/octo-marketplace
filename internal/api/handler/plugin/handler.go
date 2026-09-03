@@ -713,6 +713,13 @@ func writeServiceError(c *gin.Context, err error, operation string) {
 	// reporting a generic bad body.
 	case errors.Is(err, pluginsvc.ErrVersionRegressed):
 		apiresponse.Fail(c, http.StatusBadRequest, errcode.BadRequest, "version must not go backwards", map[string]any{"field": "version", "reason": "must_not_decrease"}, "Use the current version or a higher one.")
+	// Label already in the published set. Same shape as ErrVersionRegressed
+	// from the client's perspective (fix the version field); surfaced at approve
+	// time when a concurrent writer published the same label while the request
+	// sat pending, so it is a 409 Conflict rather than a 400 — the label was
+	// valid at submit but is no longer available.
+	case errors.Is(err, pluginsvc.ErrLabelTaken):
+		apiresponse.Fail(c, http.StatusConflict, errcode.Conflict, "version label is already published", map[string]any{"field": "version", "conflict_reason": "label_taken"}, "Use a different version label; the applicant must resubmit.")
 	// A state conflict, not a permission problem: the owner may change this
 	// plugin, but only through a review request. Self-delisting is no longer an
 	// option, so the hint points at the two things that actually work.

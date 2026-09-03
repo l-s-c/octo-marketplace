@@ -56,8 +56,14 @@ var (
 	ErrListedRequiresReview = errors.New("a listed plugin may only be changed through review")
 	// ErrVersionRegressed is returned when a write would move a plugin's version
 	// label backwards. It names the field so the form can point at the input
-	// rather than failing the whole body.
+	// rather than failing the whole body. Terminal on the IM card path.
 	ErrVersionRegressed = errors.New("version must not go backwards")
+	// ErrLabelTaken is returned when a request's version label is already in
+	// the published set — either at insert or because a concurrent writer
+	// published the same label while the request sat pending. Permanent on the
+	// card path: the admin's click is answered as a terminal refusal rather than
+	// being silently ack'd as conflict/pending on a still-pending request.
+	ErrLabelTaken = errors.New("version label is already published")
 	// ErrReviewPending is returned when a change cannot be applied while a review
 	// request is open on the plugin. Content edits during a pending review are
 	// deliberately fine — the reviewer acts on a frozen snapshot — so this covers
@@ -354,6 +360,10 @@ func (s *Service) freezeSubmission(ctx context.Context, caller Caller, detail *D
 		}
 		snap.Manifest, snap.Package, snap.AttachmentKeys = docs.Manifest, docs.Package, docs.AttachmentKeys
 		snap.ManifestHash, snap.PluginHash = docs.ManifestHash, docs.PluginHash
+		// The submission carries its own content, so the repository's under-lock
+		// re-check of the content-required rule must let it through even if a
+		// concurrent approval turned the row published in the meantime.
+		snap.DeclaredContent = true
 	}
 	if params.Relations != nil {
 		rels, err := s.buildRelations(ctx, caller, false, plugin, *params.Relations, s.now())
@@ -448,6 +458,8 @@ func (s *Service) freezeSubmissionFromParseTask(ctx context.Context, caller Call
 		Relations:      rels,
 		ManifestHash:   docs.ManifestHash,
 		PluginHash:     docs.PluginHash,
+		// A materialized zip is declared content by definition.
+		DeclaredContent: true,
 	}, nil
 }
 
@@ -831,10 +843,15 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 		return nil, ErrCardBadDecision
 	}
 	// Idempotency first: a redelivered event must replay the stored answer
-	// verbatim rather than re-running the decision.
+	// verbatim rather than re-running the decision. Cross-check the receipt's
+	// ReviewID against the signed path param so an event_id reused across two
+	// reviews cannot silently render the wrong response.
 	if existing, err := s.repo.GetCardActionReceipt(ctx, eventID); err != nil {
 		return nil, err
 	} else if existing != nil {
+		if existing.ReviewID != reviewID {
+			return nil, ErrCardBadDecision
+		}
 		var out CardActionResult
 		if err := json.Unmarshal([]byte(existing.StoredResponse), &out); err != nil {
 			return nil, err
@@ -940,16 +957,34 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 		// future richer renderer.
 		mapped := mapStoreError(applyErr)
 		switch {
-		case errors.Is(mapped, ErrConflict) || errors.Is(mapped, ErrNotFound):
+		case errors.Is(mapped, ErrNotFound):
+			// A concurrent soft-delete (delete or delist winning the row lock between
+			// the request FOR UPDATE and the approve/reject body) is PERMANENT — the
+			// request is gone and no redelivery will change that. cardConflict would
+			// try to re-read and re-return ErrNotFound; treat it as terminal here so
+			// the re-read does not loop as 503.
+			return &CardActionResult{
+				Disposition: cardDispositionNotFound,
+				State:       cardStateCancelled,
+			}, nil
+		case errors.Is(mapped, ErrConflict):
 			return s.cardConflict(ctx, req)
-		case errors.Is(mapped, ErrVersionRegressed):
+		case errors.Is(mapped, ErrVersionRegressed), errors.Is(mapped, ErrLabelTaken):
+			// Both are permanent on a still-pending row: the label is either behind
+			// current (draft label moved) or already-taken (concurrent label
+			// collision). Ack as a handled refusal; display.reason distinguishes the
+			// two for a future richer renderer.
+			reason := "version_moved_past_resubmit_required"
+			if errors.Is(mapped, ErrLabelTaken) {
+				reason = "version_label_taken_resubmit_required"
+			}
 			return &CardActionResult{
 				Disposition: cardDispositionForbidden,
 				State:       cardStatePending,
 				Requester:   req.ApplicantUID,
 				Display: map[string]string{
 					"title":  req.PluginName,
-					"reason": "version_moved_past_resubmit_required",
+					"reason": reason,
 				},
 			}, nil
 		}
@@ -1002,6 +1037,16 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 // above.
 func (s *Service) cardConflict(ctx context.Context, req *model.PluginReviewRequest) (*CardActionResult, error) {
 	cur, err := s.repo.GetReviewRequestAnySpace(ctx, req.ID)
+	if errors.Is(err, pluginrepo.ErrNotFound) {
+		// The request (or its plugin) was soft-deleted between the CAS race and
+		// this re-read. Permanent: return not_found/cancelled as a terminal
+		// outcome instead of letting the error fall through to 503-redelivery,
+		// which would loop forever on a row that cannot come back.
+		return &CardActionResult{
+			Disposition: cardDispositionNotFound,
+			State:       cardStateCancelled,
+		}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
