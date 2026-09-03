@@ -23,6 +23,15 @@ var (
 	ErrConflict       = errors.New("plugin conflict")
 	ErrInvalidRequest = errors.New("invalid plugin request")
 	ErrTooLarge       = errors.New("plugin artifact exceeds size limit")
+	// ErrDeadlock is returned when a review transaction was chosen as the InnoDB
+	// deadlock victim (submit and the decision paths take the plugin/request rows
+	// in opposite orders). It is TRANSIENT — the aborted transaction did not
+	// commit and a retry succeeds — and deliberately distinct from ErrConflict so
+	// the IM card path does not treat it as a settled decision and silently
+	// discard a real admin's click. Web decision handlers surface it as a
+	// retryable 409; the card path lets it fall through to a 503 so octo-server
+	// redelivers.
+	ErrDeadlock = errors.New("plugin transaction deadlock, retry")
 	// ErrDependencyHidden is returned when an install cannot see every declared
 	// relation target, so the full published topology cannot be reproduced —
 	// refused loudly rather than provisioning a partial expert/squad (P1-1).
@@ -885,6 +894,8 @@ func mapStoreError(err error) error {
 		return ErrNotFound
 	case errors.Is(err, pluginrepo.ErrConflict):
 		return ErrConflict
+	case errors.Is(err, pluginrepo.ErrDeadlock):
+		return ErrDeadlock
 	case errors.Is(err, pluginrepo.ErrReviewPending):
 		return ErrReviewPending
 	case errors.Is(err, pluginrepo.ErrListedRequiresReview):

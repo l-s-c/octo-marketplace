@@ -339,6 +339,51 @@ func TestSubmitReRunsForwardOnlyRuleAgainstLockedCurrentVersion(t *testing.T) {
 	}
 }
 
+// TestApproveReRunsForwardOnlyRuleAgainstLockedCurrentVersion pins the apply-time
+// half of the forward-only invariant. The submit-time check only guarantees the
+// request label was forward-only WHEN IT WAS SUBMITTED; any writer that advances
+// current_version while the request sits pending (an admin version edit, or the
+// author's own draft label edit while the plugin is not yet listed) invalidates
+// that guarantee. ApproveReview stamps the applicant's frozen label, so without a
+// re-check under the plugin lock the approval would regress the public version.
+func TestApproveReRunsForwardOnlyRuleAgainstLockedCurrentVersion(t *testing.T) {
+	database := reviewDB(t)
+	repo := pluginrepo.New(database)
+	ctx := context.Background()
+	seed(t, database, seedPlugin{id: "plugin-1", visibility: "space", currentVersionID: "ver-1", currentVersion: "1.5.0"})
+
+	// The owner submits 1.6.0. It passes the locked insert check against 1.5.0 and
+	// sits pending.
+	req := newRequest("plugin-1", "1.6.0")
+	if err := repo.InsertReviewRequest(ctx, tenantScope(), req, snapshotOf(`{"a":1}`, `{"b":2}`, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	// A concurrent writer advances current_version to 3.0.0 while the request is
+	// pending — the admin-edit / draft-label-edit route the reviewers reproduced.
+	// The pending request's frozen 1.6.0 is now BACKWARD of the live label.
+	if _, err := database.Exec(`UPDATE plugins SET current_version='3.0.0' WHERE plugin_id='plugin-1'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Approving now would stamp 1.6.0 over the live 3.0.0 — a public regression.
+	// The under-lock re-check must refuse it.
+	if _, err := repo.ApproveReview(ctx, reviewerScope(), pluginrepo.ApproveReviewParams{
+		ReviewID: req.ID, ReviewerUID: "admin-1", ReviewerName: "Adam",
+	}); !errors.Is(err, pluginrepo.ErrVersionRegressed) {
+		t.Fatalf("approve after the version advanced = %v, want ErrVersionRegressed", err)
+	}
+
+	// The public label is untouched: the refused approval did not commit.
+	var current string
+	if err := database.QueryRow(`SELECT current_version FROM plugins WHERE plugin_id='plugin-1'`).Scan(&current); err != nil {
+		t.Fatal(err)
+	}
+	if current != "3.0.0" {
+		t.Fatalf("current_version = %q after a refused approval, want 3.0.0 (unchanged)", current)
+	}
+}
+
 // The whole point of the gate: approve is what makes a plugin org-visible, and it
 // applies the FROZEN documents rather than whatever the draft says now.
 func TestApproveFlipsVisibilityAndAppliesTheFrozenSnapshot(t *testing.T) {

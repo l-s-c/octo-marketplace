@@ -66,22 +66,29 @@ type FrozenSnapshot struct {
 }
 
 // classifyDeadlock maps InnoDB's deadlock-victim abort (error 1213) to the
-// repository's typed ErrConflict. Submit and the three decision paths (approve/
+// repository's typed ErrDeadlock. Submit and the three decision paths (approve/
 // reject/cancel) take the plugin row and the request row in OPPOSITE orders, so
 // a submit overlapping an in-flight decision on the same plugin can deadlock;
 // InnoDB aborts one side with 1213. Without this it surfaces as a raw 500 on the
-// exact concurrent-decision scenario this workflow is designed for. Mapped to
-// ErrConflict, the service returns the same retryable 409 it already returns for
-// the single-pending race, and a retry succeeds. Any non-1213 error passes
-// through unchanged. Applied via defer at each transaction boundary so it catches
-// a deadlock raised by any statement or by commit.
+// exact concurrent-decision scenario this workflow is designed for.
+//
+// It is deliberately NOT mapped to ErrConflict: ErrConflict is the repository's
+// word for "you lost the CAS race and the request is already settled", which the
+// IM card path (DecideReviewFromCard) treats as TERMINAL — acking the event as
+// handled. A deadlock is transient (the aborted transaction did not commit and a
+// retry succeeds), so folding it into ErrConflict would make the card path
+// silently discard a real admin's decision and render the card as already
+// settled. Kept distinct as ErrDeadlock, the service surfaces a retryable 409 on
+// the web paths and a 503 on the card path so octo-server redelivers. Any
+// non-1213 error passes through unchanged. Applied via defer at each transaction
+// boundary so it catches a deadlock raised by any statement or by commit.
 func classifyDeadlock(err error) error {
 	if err == nil {
 		return nil
 	}
 	var me *mysql.MySQLError
 	if errors.As(err, &me) && me.Number == 1213 {
-		return ErrConflict
+		return ErrDeadlock
 	}
 	return err
 }
@@ -427,6 +434,22 @@ func (r *Repo) ApproveReview(ctx context.Context, scope Scope, p ApproveReviewPa
 	current, err := getReviewedPluginForUpdate(ctx, tx, scope.SpaceID, pluginID)
 	if err != nil {
 		return nil, err
+	}
+	// Re-run the forward-only ordering rule against the LOCKED current_version
+	// before stamping the applicant's frozen label below (snapshotVersion writes
+	// plugins.current_version = version unconditionally). The insert-time check in
+	// InsertReviewRequest only guarantees the label was forward-only at SUBMIT
+	// time; any writer that moves current_version forward while the request is
+	// pending (an admin version edit, or the author's own draft label edit while
+	// the plugin is not yet listed) invalidates that guarantee, and without this
+	// the approval would stamp a LOWER label and regress the plugin's public
+	// version. This is the apply-time half of the same invariant, enforced where
+	// the label is actually written. First listings have no prior published label
+	// to regress, so the guard is naturally a no-op there (current_version is the
+	// draft label and the request label is >= it by the submit-time check).
+	if current.CurrentVersion != nil &&
+		!model.VersionNotRegressed(*current.CurrentVersion, version) {
+		return nil, ErrVersionRegressed
 	}
 	now := p.Now
 	if now.IsZero() {

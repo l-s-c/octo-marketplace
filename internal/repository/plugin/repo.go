@@ -36,6 +36,19 @@ var (
 	// holds even under that race. The service maps it back to its own
 	// ErrVersionRegressed so both paths surface identically.
 	ErrVersionRegressed = errors.New("version must not go backwards")
+	// ErrDeadlock indicates an InnoDB deadlock-victim abort (error 1213) on a
+	// review transaction. Submit and the three decision paths take the plugin row
+	// and the request row in OPPOSITE orders, so a submit overlapping an in-flight
+	// decision on the same plugin can deadlock and InnoDB aborts one side. It is
+	// TRANSIENT — the aborted transaction did not commit and a retry succeeds — so
+	// it is deliberately distinct from ErrConflict, which means "you lost a CAS
+	// race and the request is already settled". The distinction matters on the IM
+	// card path: DecideReviewFromCard treats ErrConflict as terminal (acks the
+	// event as handled), which would silently discard a real admin's decision if a
+	// transient deadlock were folded into it. Mapped instead to a retryable service
+	// error that surfaces as 409 on the web paths and, on the card path, falls
+	// through to a 503 so octo-server redelivers.
+	ErrDeadlock = errors.New("transaction deadlock, retry")
 	// ErrInvalidRelation indicates a relation whose source/target types are incompatible.
 	ErrInvalidRelation = errors.New("invalid plugin relation")
 	// ErrInvalidCategory indicates a missing, inactive, or type-incompatible category.

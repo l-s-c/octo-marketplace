@@ -875,8 +875,13 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 	var applyErr error
 	if decision == "approve" {
 		_, applyErr = s.repo.ApproveReview(ctx, adminScope, pluginrepo.ApproveReviewParams{
-			ReviewID:       reviewID,
-			ReviewerUID:    operatorUID,
+			ReviewID:    reviewID,
+			ReviewerUID: operatorUID,
+			// TODO(cross-repo): stamp the operator's DISPLAY NAME here once the
+			// companion octo-server role-lookup returns it. MemberRole currently
+			// yields only a role, so IM decisions record the raw operator UID as
+			// reviewer_name while web decisions record a human name — the audit
+			// trail is half-attributable until the server change lands.
 			ReviewerName:   operatorUID,
 			DecisionSource: model.ReviewDecisionSourceIM,
 		})
@@ -885,8 +890,10 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 		var frozenKeys json.RawMessage
 		var retained map[string]struct{}
 		frozenKeys, retained, applyErr = s.repo.RejectReview(ctx, adminScope, pluginrepo.RejectReviewParams{
-			ReviewID:       reviewID,
-			ReviewerUID:    operatorUID,
+			ReviewID:    reviewID,
+			ReviewerUID: operatorUID,
+			// TODO(cross-repo): same as the approve path above — record the
+			// operator's display name once octo-server returns it.
 			ReviewerName:   operatorUID,
 			Reason:         model.DefaultIMDenyReason,
 			DecisionSource: model.ReviewDecisionSourceIM,
@@ -905,6 +912,13 @@ func (s *Service) DecideReviewFromCard(ctx context.Context, eventID, operatorUID
 		// (or a web decision) already settled this request. Report the authoritative
 		// terminal state so the card renders correctly, rather than returning 5xx
 		// and having the event retried into the DLQ.
+		//
+		// ErrDeadlock is deliberately NOT in this terminal set. A deadlock-victim
+		// abort is transient — the transaction rolled back and did NOT settle the
+		// request — so treating it as a conflict would ack the event as handled and
+		// silently discard a real admin's decision. It falls through to the fault
+		// return below, which the handler answers with 503 so octo-server
+		// redelivers.
 		mapped := mapStoreError(applyErr)
 		if errors.Is(mapped, ErrConflict) || errors.Is(mapped, ErrNotFound) {
 			return s.cardConflict(ctx, req), nil
