@@ -285,7 +285,7 @@ func reviewListDTO(r *model.PluginReviewRequest) reviewRequestResponse {
 // SubmitReview submits a plugin for Space visibility review.
 //
 // @Summary Submit a plugin for Space review
-// @Description Freezes the reviewed content under a caller-supplied version label and queues it for Space owner/admin approval. Content is supplied one of three ways: (1) parse_task_id for a skill zip upload processed server-side, materializing the package exactly as /plugins/import does; (2) manifest_json and plugin_json together for declared JSON documents (connectors, experts, expert teams, or a skill text edit without reupload); (3) neither, which snapshots the live draft row and is valid only while the plugin is private. Submitting NEVER changes the plugin row — the listed content only changes when a reviewer approves. Only the plugin owner may submit, only one request per plugin may be pending, and a version label already published for that plugin is refused.
+// @Description Freezes the reviewed content under a caller-supplied version label. When the authenticated Space's automatic-review policy is enabled (the default), the request is approved immediately and the published Plugin is updated; otherwise it remains pending for a Space owner/admin. Content is supplied one of three ways: (1) parse_task_id for a skill zip upload processed server-side; (2) manifest_json and plugin_json together for declared JSON documents; (3) neither, which snapshots the live draft row and is valid only while the plugin is private. Only the plugin owner may submit, only one request per plugin may be pending, and a version label already published for that plugin is refused.
 // @Tags plugin
 // @ID plugin.review_request.create
 // @Accept json

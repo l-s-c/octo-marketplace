@@ -48,6 +48,8 @@ type Service interface {
 	ApproveReview(context.Context, pluginsvc.Caller, string) (*model.Plugin, error)
 	RejectReview(context.Context, pluginsvc.Caller, string, string) error
 	CancelReview(context.Context, pluginsvc.Caller, string) error
+	GetReviewPolicy(context.Context, pluginsvc.Caller) (model.PluginReviewPolicy, error)
+	UpdateReviewPolicy(context.Context, pluginsvc.Caller, bool) (model.PluginReviewPolicy, error)
 
 	// Listing lifecycle (see listing.go). Publish is the single 发布 door: it
 	// routes to an immediate listing or a review request based on the Plugin's
@@ -100,6 +102,8 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	reviews.POST("/:review_id/approve", h.ApproveReview)
 	reviews.POST("/:review_id/reject", h.RejectReview)
 	reviews.POST("/:review_id/cancel", h.CancelReview)
+	rg.GET("/plugin_review_policies", h.GetReviewPolicy)
+	rg.PATCH("/plugin_review_policies", h.UpdateReviewPolicy)
 }
 
 type relationRequest struct {

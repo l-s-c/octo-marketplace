@@ -125,8 +125,35 @@ type ReviewSubmitParams struct {
 }
 
 // SubmitReview freezes the plugin's current draft content under the applicant's
-// version label and queues it for Space review.
+// version label, then either approves it under the Space policy or queues it for
+// manual review.
 func (s *Service) SubmitReview(ctx context.Context, caller Caller, params ReviewSubmitParams) (*model.PluginReviewRequest, error) {
+	if err := validateCaller(caller); err != nil {
+		return nil, err
+	}
+	policy, err := s.repo.GetReviewPolicy(ctx, scope(caller))
+	if err != nil {
+		return nil, mapStoreError(err)
+	}
+	stored, err := s.submitReview(ctx, caller, params, !policy.IsAutoApproveEnabled)
+	if err != nil || !policy.IsAutoApproveEnabled {
+		return stored, err
+	}
+	if _, err := s.repo.ApproveReview(ctx, scope(caller), pluginrepo.ApproveReviewParams{
+		ReviewID: stored.ID, ReviewerUID: caller.UID, ReviewerName: caller.Name,
+		DecisionSource: model.ReviewDecisionSourcePolicy, RequestID: caller.RequestID,
+	}); err != nil {
+		return nil, mapStoreError(err)
+	}
+	approved, err := s.repo.GetReviewRequest(ctx, scope(caller), stored.ID, false)
+	if err != nil {
+		return nil, mapStoreError(err)
+	}
+	s.decorateReview(ctx, approved)
+	return approved, nil
+}
+
+func (s *Service) submitReview(ctx context.Context, caller Caller, params ReviewSubmitParams, dispatchCard bool) (*model.PluginReviewRequest, error) {
 	if err := validateCaller(caller); err != nil {
 		return nil, err
 	}
@@ -272,7 +299,9 @@ func (s *Service) SubmitReview(ctx context.Context, caller Caller, params Review
 		return nil, mapStoreError(err)
 	}
 	s.decorateReview(ctx, stored)
-	s.dispatchReviewCard(caller, stored, detail.Plugin)
+	if dispatchCard {
+		s.dispatchReviewCard(caller, stored, detail.Plugin)
+	}
 	return stored, nil
 }
 

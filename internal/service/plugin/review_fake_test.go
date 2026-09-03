@@ -195,6 +195,11 @@ func (f *fakeStore) ApproveReview(_ context.Context, s pluginrepo.Scope, p plugi
 	if f.review.approveErr != nil {
 		return nil, f.review.approveErr
 	}
+	if f.review.stored != nil {
+		f.review.stored.Status = model.ReviewStatusApproved
+		source := p.DecisionSource
+		f.review.stored.DecisionSource = &source
+	}
 	if f.review.approved == nil {
 		return &model.Plugin{ID: p.ReviewID}, nil
 	}
