@@ -144,15 +144,31 @@ func (s *Service) SubmitReview(ctx context.Context, caller Caller, params Review
 	if err != nil || !policy.IsAutoApproveEnabled {
 		return stored, err
 	}
-	if _, err := s.autoApproveReview(ctx, caller, stored, params.ParseTaskID); err != nil {
+	published, err := s.autoApproveReview(ctx, caller, stored, params.ParseTaskID)
+	if err != nil {
 		return nil, err
 	}
-	approved, err := s.repo.GetReviewRequest(ctx, scope(caller), stored.ID, false)
-	if err != nil {
-		return nil, mapStoreError(err)
+	// Prefer the committed request projection, which carries the repository's
+	// decision timestamp and joined plugin state. A transient post-commit read must
+	// not turn a successful approval into an error, so fall back to a consistent
+	// projection built from the plugin returned by the approve transaction.
+	approved, readErr := s.repo.GetReviewRequest(ctx, scope(caller), stored.ID, false)
+	if readErr == nil {
+		s.decorateReview(ctx, approved)
+		return approved, nil
 	}
-	s.decorateReview(ctx, approved)
-	return approved, nil
+	now := s.now()
+	source := model.ReviewDecisionSourcePolicy
+	stored.Status = model.ReviewStatusApproved
+	stored.ReviewerUID = &caller.UID
+	stored.ReviewerName = &caller.Name
+	stored.DecisionSource = &source
+	stored.ReviewedAt = &now
+	if published != nil {
+		stored.CurrentVersion = published.CurrentVersion
+		stored.PluginListingState = published.ListingState
+	}
+	return stored, nil
 }
 
 func (s *Service) submitReview(ctx context.Context, caller Caller, params ReviewSubmitParams, dispatchCard bool) (*model.PluginReviewRequest, error) {
@@ -293,18 +309,23 @@ func (s *Service) submitReview(ctx context.Context, caller Caller, params Review
 		}
 		return nil, mapStoreError(err)
 	}
-	stored, err := s.repo.GetReviewRequest(ctx, sc, req.ID, false)
-	if err != nil {
-		// Request was committed but the read-back failed. Do NOT release the parse
-		// task or delete objects — the row is already persisted. The caller will
-		// see a 500 but the data is intact.
-		return nil, mapStoreError(err)
-	}
-	s.decorateReview(ctx, stored)
+	// InsertReviewRequest assigns ID/kind/timestamps on req. Build the remaining
+	// response projection from the frozen snapshot and the already-authorized
+	// plugin detail instead of doing a fallible post-commit read. In auto mode a
+	// read failure here previously returned before approval or compensation,
+	// stranding an unnotified pending request in the single-pending slot.
+	req.ManifestHash = snap.ManifestHash
+	req.PluginHash = snap.PluginHash
+	req.PluginName = detail.Plugin.Name
+	req.PluginType = detail.Plugin.Type
+	req.PluginIcon = detail.Plugin.Icon
+	req.CurrentVersion = detail.Plugin.CurrentVersion
+	req.PluginListingState = detail.Plugin.ListingState
+	s.decorateReview(ctx, req)
 	if dispatchCard {
-		s.dispatchReviewCard(caller, stored, detail.Plugin)
+		s.dispatchReviewCard(caller, req, detail.Plugin)
 	}
-	return stored, nil
+	return req, nil
 }
 
 // autoApproveReview applies an auto-policy decision and compensates if the
@@ -331,10 +352,15 @@ func (s *Service) autoApproveReview(ctx context.Context, caller Caller, review *
 		s.dispatchReviewCard(caller, review, nil)
 		return nil, fmt.Errorf("auto-approve review: %w (cancel compensation: %v)", mapStoreError(approveErr), mapStoreError(cancelErr))
 	}
+	// CancelReview returns the frozen and retained sidecars from its transaction;
+	// use the normal cancel/reject GC so shared and version-owned objects survive.
+	// Cleanup MUST finish before the consumed parse task becomes retryable. Object
+	// keys are content-addressed: a concurrent retry could otherwise observe and
+	// reuse a key that this failed attempt is about to delete.
+	s.cleanupOrphanedReviewObjects(compensationCtx, frozenKeys, retained)
 	// Unlike a user cancellation, this rollback represents a failed submit. A
-	// consumed parse task therefore needs releasing so the exact request is
-	// retryable after a transient approval failure. Do this before best-effort
-	// object cleanup so a slow storage backend cannot prevent task recovery.
+	// consumed parse task therefore becomes retryable after its orphaned objects
+	// have been removed.
 	parseTaskID = strings.TrimSpace(parseTaskID)
 	if parseTaskID != "" && s.parseTasks != nil {
 		if releaseErr := s.parseTasks.ReleaseConsumedParseTask(compensationCtx, parseTaskID); releaseErr != nil {
@@ -344,9 +370,6 @@ func (s *Service) autoApproveReview(ctx context.Context, caller Caller, review *
 				zap.Error(releaseErr))
 		}
 	}
-	// CancelReview returns the frozen and retained sidecars from its transaction;
-	// use the normal cancel/reject GC so shared and version-owned objects survive.
-	s.cleanupOrphanedReviewObjects(compensationCtx, frozenKeys, retained)
 	return nil, mapStoreError(approveErr)
 }
 

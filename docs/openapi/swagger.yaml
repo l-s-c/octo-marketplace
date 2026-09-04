@@ -863,16 +863,6 @@ components:
         url:
           type: string
       type: object
-    github_com_Mininglamp-OSS_octo-marketplace_internal_model.ReviewDecisionSource:
-      enum:
-      - web
-      - im
-      - policy
-      type: string
-      x-enum-varnames:
-      - ReviewDecisionSourceWeb
-      - ReviewDecisionSourceIM
-      - ReviewDecisionSourcePolicy
     github_com_Mininglamp-OSS_octo-marketplace_internal_model.ReviewKind:
       enum:
       - first
@@ -1911,6 +1901,14 @@ components:
           type: array
           uniqueItems: false
       type: object
+    internal_api_handler_plugin.reviewDecisionSourceResponse:
+      enum:
+      - web
+      - im
+      type: string
+      x-enum-varnames:
+      - reviewDecisionSourceWeb
+      - reviewDecisionSourceIM
     internal_api_handler_plugin.reviewPolicyResponse:
       properties:
         is_auto_approve_enabled:
@@ -1949,7 +1947,7 @@ components:
         current_version:
           type: string
         decision_source:
-          $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_model.ReviewDecisionSource'
+          $ref: '#/components/schemas/internal_api_handler_plugin.reviewDecisionSourceResponse'
         frozen_relations:
           description: 'FrozenRelations is the FROZEN relation graph the reviewer
             is approving.
@@ -5317,11 +5315,7 @@ paths:
         content:
           application/json:
             schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/internal_api_handler_plugin.updateReviewPolicyRequest'
-                description: Effective automatic approval setting
-                summary: body
+              $ref: '#/components/schemas/internal_api_handler_plugin.updateReviewPolicyRequest'
         description: Effective automatic approval setting
         required: true
       responses:

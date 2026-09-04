@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -34,6 +35,16 @@ func TestReviewPolicyEndpointsUseAuthenticatedSpaceAndStandardEnvelope(t *testin
 	}
 	if f.caller.SpaceID != "space-a" || f.caller.SpaceRole != 2 {
 		t.Fatalf("caller=%#v", f.caller)
+	}
+}
+
+func TestReviewPolicyHandlersRemainInOpenAPICoverageScope(t *testing.T) {
+	data, err := os.ReadFile("../../../../Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("internal/api/handler/plugin/review_policy.go")) {
+		t.Fatal("OPENAPI_SCAN_DIRS omits review_policy.go")
 	}
 }
 

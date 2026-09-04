@@ -154,10 +154,13 @@ func (f *fakeStore) InsertReviewRequest(_ context.Context, s pluginrepo.Scope, r
 	if f.review.insertErr != nil {
 		return f.review.insertErr
 	}
-	// The repository assigns the id and derives kind; mirror just enough of that
-	// so the service's follow-up read-back has something to key on.
+	// The repository assigns the id and derives kind; mirror that mutation.
 	if req.ID == "" {
-		req.ID = "review-new"
+		if f.review.stored != nil && f.review.stored.ID != "" {
+			req.ID = f.review.stored.ID
+		} else {
+			req.ID = "review-new"
+		}
 	}
 	if req.Kind == "" {
 		req.Kind = model.ReviewKindFirst

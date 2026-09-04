@@ -64,27 +64,40 @@ func decodeReviewBody(c *gin.Context, dst any) bool {
 // would defeat the purpose of the freeze. frozen_relations is populated only on
 // the detail read and is parsed defensively: a missing or malformed snapshot
 // degrades to an empty array rather than 500ing the endpoint.
+// reviewDecisionSourceResponse preserves the existing web contract. The
+// marketplace persists "policy" internally for audit attribution, but current
+// web clients treat every non-IM decision as the web/manual branch and some
+// generated clients exhaustively decode the original web|im enum. Auto-policy
+// decisions therefore serialize as "web" until a versioned/extensible wire
+// contract is coordinated with those consumers.
+type reviewDecisionSourceResponse string
+
+const (
+	reviewDecisionSourceWeb reviewDecisionSourceResponse = "web"
+	reviewDecisionSourceIM  reviewDecisionSourceResponse = "im"
+)
+
 type reviewRequestResponse struct {
-	ReviewID       string                      `json:"review_id"`
-	PluginID       string                      `json:"plugin_id"`
-	SpaceID        string                      `json:"space_id"`
-	TargetScope    string                      `json:"target_scope"`
-	Status         model.ReviewStatus          `json:"status"`
-	Kind           model.ReviewKind            `json:"kind"`
-	Version        string                      `json:"version"`
-	Changelog      *string                     `json:"changelog,omitempty"`
-	ManifestHash   string                      `json:"manifest_hash"`
-	PluginHash     string                      `json:"plugin_hash"`
-	ApplicantID    string                      `json:"applicant_id"`
-	ApplicantName  string                      `json:"applicant_name"`
-	ReviewerID     *string                     `json:"reviewer_id,omitempty"`
-	ReviewerName   *string                     `json:"reviewer_name,omitempty"`
-	Reason         *string                     `json:"reason,omitempty"`
-	DecisionSource *model.ReviewDecisionSource `json:"decision_source,omitempty"`
-	SubmittedAt    time.Time                   `json:"submitted_at" swaggertype:"string,date-time"`
-	ReviewedAt     *time.Time                  `json:"reviewed_at,omitempty" swaggertype:"string,date-time"`
-	PluginName     string                      `json:"plugin_name,omitempty"`
-	PluginType     model.PluginType            `json:"plugin_type,omitempty"`
+	ReviewID       string                        `json:"review_id"`
+	PluginID       string                        `json:"plugin_id"`
+	SpaceID        string                        `json:"space_id"`
+	TargetScope    string                        `json:"target_scope"`
+	Status         model.ReviewStatus            `json:"status"`
+	Kind           model.ReviewKind              `json:"kind"`
+	Version        string                        `json:"version"`
+	Changelog      *string                       `json:"changelog,omitempty"`
+	ManifestHash   string                        `json:"manifest_hash"`
+	PluginHash     string                        `json:"plugin_hash"`
+	ApplicantID    string                        `json:"applicant_id"`
+	ApplicantName  string                        `json:"applicant_name"`
+	ReviewerID     *string                       `json:"reviewer_id,omitempty"`
+	ReviewerName   *string                       `json:"reviewer_name,omitempty"`
+	Reason         *string                       `json:"reason,omitempty"`
+	DecisionSource *reviewDecisionSourceResponse `json:"decision_source,omitempty"`
+	SubmittedAt    time.Time                     `json:"submitted_at" swaggertype:"string,date-time"`
+	ReviewedAt     *time.Time                    `json:"reviewed_at,omitempty" swaggertype:"string,date-time"`
+	PluginName     string                        `json:"plugin_name,omitempty"`
+	PluginType     model.PluginType              `json:"plugin_type,omitempty"`
 	// PluginIcon is a display URL (an uploaded icon is stored as an object key and
 	// must be presigned), resolved by the service through the same path the plugin
 	// list uses.
@@ -223,6 +236,17 @@ type reviewRejectRequest struct {
 	Reason string `json:"reason"`
 }
 
+func reviewDecisionSourceDTO(source *model.ReviewDecisionSource) *reviewDecisionSourceResponse {
+	if source == nil {
+		return nil
+	}
+	out := reviewDecisionSourceWeb
+	if *source == model.ReviewDecisionSourceIM {
+		out = reviewDecisionSourceIM
+	}
+	return &out
+}
+
 func reviewDTO(r *model.PluginReviewRequest) reviewRequestResponse {
 	if r == nil {
 		empty := []reviewRelationResponse{}
@@ -244,7 +268,7 @@ func reviewDTO(r *model.PluginReviewRequest) reviewRequestResponse {
 		ReviewerID:         r.ReviewerUID,
 		ReviewerName:       r.ReviewerName,
 		Reason:             r.Reason,
-		DecisionSource:     r.DecisionSource,
+		DecisionSource:     reviewDecisionSourceDTO(r.DecisionSource),
 		SubmittedAt:        r.SubmittedAt,
 		ReviewedAt:         r.ReviewedAt,
 		PluginName:         r.PluginName,

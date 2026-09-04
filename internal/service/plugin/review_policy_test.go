@@ -62,6 +62,55 @@ func TestSubmitReviewAutoApprovesWithoutReviewerRole(t *testing.T) {
 	}
 }
 
+func TestSubmitReviewAutoApproveDoesNotDependOnPostInsertReadback(t *testing.T) {
+	store, svc := listingFixture(t, model.PluginVisibilitySpace, model.PluginListingStateDraft)
+	store.reviewPolicy = model.PluginReviewPolicy{IsAutoApproveEnabled: true}
+	store.review.getErr = errors.New("read replica unavailable")
+	version := "1.0.0"
+	store.review.approved = &model.Plugin{
+		ID:             "plugin-1",
+		CurrentVersion: &version,
+		ListingState:   model.PluginListingStatePublished,
+	}
+
+	review, err := svc.SubmitReview(context.Background(), testCaller, ReviewSubmitParams{PluginID: "plugin-1", Version: "1.0.0"})
+	if err != nil {
+		t.Fatalf("SubmitReview: %v", err)
+	}
+	if review.ID != "review-1" || review.Status != model.ReviewStatusApproved {
+		t.Fatalf("review=%#v, want committed approval without readback", review)
+	}
+	if review.PluginListingState != model.PluginListingStatePublished {
+		t.Fatalf("listing_state=%q, want published committed projection", review.PluginListingState)
+	}
+	if review.CurrentVersion == nil || *review.CurrentVersion != "1.0.0" {
+		t.Fatalf("current_version=%v, want approved version 1.0.0", review.CurrentVersion)
+	}
+	if store.review.approveParams.ReviewID != "review-1" || store.review.cancelCalls != 0 {
+		t.Fatalf("approve=%#v cancelCalls=%d", store.review.approveParams, store.review.cancelCalls)
+	}
+}
+
+func TestPublishAutoApproveDoesNotDependOnPostInsertReadback(t *testing.T) {
+	store, svc := listingFixture(t, model.PluginVisibilitySpace, model.PluginListingStateDraft)
+	store.reviewPolicy = model.PluginReviewPolicy{IsAutoApproveEnabled: true}
+	store.review.getErr = errors.New("read replica unavailable")
+	published := *store.plugins["plugin-1"]
+	published.ListingState = model.PluginListingStatePublished
+	store.review.approved = &published
+
+	result, err := svc.Publish(context.Background(), testCaller, PublishParams{PluginID: "plugin-1"})
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if result.Review != nil || result.Plugin.Plugin.ListingState != model.PluginListingStatePublished {
+		t.Fatalf("result=%#v, want committed publication without readback", result)
+	}
+	if store.review.approveParams.ReviewID != "review-1" || store.review.cancelCalls != 0 {
+		t.Fatalf("approve=%#v cancelCalls=%d", store.review.approveParams, store.review.cancelCalls)
+	}
+}
+
 func TestSubmitReviewAutoApproveFailureCancelsAndAllowsRetry(t *testing.T) {
 	store, svc := listingFixture(t, model.PluginVisibilitySpace, model.PluginListingStateDraft)
 	store.reviewPolicy = model.PluginReviewPolicy{IsAutoApproveEnabled: true}
@@ -133,6 +182,29 @@ func TestAutoApproveCompensationCleansOnlyOrphanedObjects(t *testing.T) {
 	}
 	if _, ok := objects.objects[sharedKey]; !ok {
 		t.Fatal("compensation deleted an object retained by the live row or version history")
+	}
+}
+
+func TestAutoApproveCompensationCleansObjectsBeforeReleasingParseTask(t *testing.T) {
+	store, _ := listingFixture(t, model.PluginVisibilitySpace, model.PluginListingStateDraft)
+	store.reviewPolicy = model.PluginReviewPolicy{IsAutoApproveEnabled: true}
+	store.review.approveErr = pluginrepo.ErrDeadlock
+	store.review.cancelFrozen = json.RawMessage(`{"orphan":"` + orphanedKey + `"}`)
+	var events []string
+	objects := &importStorage{
+		objects: map[string][]byte{orphanedKey: []byte("orphan")},
+		events:  &events,
+	}
+	parseTasks := &fakeParseTasks{events: &events}
+	svc := New(store, objects).WithParseTasks(parseTasks)
+
+	_, err := svc.autoApproveReview(context.Background(), testCaller, store.review.stored, "task-1")
+	if !errors.Is(err, ErrDeadlock) {
+		t.Fatalf("err=%v, want ErrDeadlock", err)
+	}
+	want := []string{"delete:" + orphanedKey, "release:task-1"}
+	if len(events) != len(want) || events[0] != want[0] || events[1] != want[1] {
+		t.Fatalf("events=%v, want %v", events, want)
 	}
 }
 
