@@ -49,9 +49,9 @@ func TestUpdateReviewPolicyRequiresBoolean(t *testing.T) {
 	}
 }
 
-func TestUpdateReviewPolicyOwnerOnlyError(t *testing.T) {
+func TestUpdateReviewPolicyReviewerOnlyError(t *testing.T) {
 	f := &fakeService{err: pluginsvc.ErrReviewPolicyForbidden}
-	identity := model.Identity{UID: "admin-1", SpaceRoles: map[string]int{"space-a": model.SpaceRoleAdmin}}
+	identity := model.Identity{UID: "member-1", SpaceRoles: map[string]int{"space-a": model.SpaceRoleMember}}
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/plugin_review_policies", bytes.NewBufferString(`{"is_auto_approve_enabled":false}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -61,8 +61,8 @@ func TestUpdateReviewPolicyOwnerOnlyError(t *testing.T) {
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), `"required_role":"space_owner"`) ||
-		!strings.Contains(recorder.Body.String(), `"message":"operation requires the Space owner role"`) {
+	if !strings.Contains(recorder.Body.String(), `"required_role":"space_admin"`) ||
+		!strings.Contains(recorder.Body.String(), `"message":"operation requires the Space owner or admin role"`) {
 		t.Fatalf("body=%s", recorder.Body.String())
 	}
 }

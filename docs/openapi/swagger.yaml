@@ -5310,7 +5310,8 @@ paths:
       tags:
       - plugin
     patch:
-      description: Space owners only. Existing pending requests are unchanged.
+      description: Space owners and admins may update the one shared policy for their
+        Space. Existing pending requests are unchanged.
       operationId: plugin_review_policy.update
       requestBody:
         content:
@@ -5347,7 +5348,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
-          description: 'FORBIDDEN: Space owner required'
+          description: 'FORBIDDEN: Space owner or admin required'
         '404':
           content:
             application/json:
