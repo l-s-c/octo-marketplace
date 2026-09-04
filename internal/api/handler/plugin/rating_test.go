@@ -49,6 +49,19 @@ func TestAdminUpdateRatingAcceptsValueAndNull(t *testing.T) {
 	}
 }
 
+func TestAdminUpdateRatingMapsEmbeddedNotFound(t *testing.T) {
+	f := &fakeAdminService{err: pluginsvc.ErrNotFound}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/plugins/skill-embedded/rating", bytes.NewBufferString(`{"rating":5}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	adminTestEngine(f, &fakeAdminCategories{}).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound || !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"NOT_FOUND"`)) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAdminUpdateRatingRejectsMalformedBodies(t *testing.T) {
 	for _, body := range []string{`{}`, `{"rating":1.5}`, `{"rating":"5"}`, `{"rating":5,"extra":true}`} {
 		f := &fakeAdminService{detail: &pluginsvc.Detail{Plugin: &model.Plugin{ID: "plugin-1"}}}

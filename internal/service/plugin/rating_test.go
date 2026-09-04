@@ -29,6 +29,22 @@ func TestAdminUpdateRatingValidatesAndForwardsAuditIdentity(t *testing.T) {
 	}
 }
 
+func TestAdminUpdateRatingRejectsEmbeddedChildAsNotFound(t *testing.T) {
+	store := &fakeStore{plugins: map[string]*model.Plugin{
+		"skill-embedded": {ID: "skill-embedded", IsEmbedded: true},
+	}}
+	svc := New(store)
+	rating := 5
+
+	_, err := svc.AdminUpdateRating(context.Background(), Caller{UID: "admin"}, "skill-embedded", &rating)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err=%v want ErrNotFound", err)
+	}
+	if store.ratingParams.PluginID != "" {
+		t.Fatalf("embedded child reached UpdateRating: %#v", store.ratingParams)
+	}
+}
+
 func TestAdminUpdateRatingRejectsOutOfRangeWithoutStoreCall(t *testing.T) {
 	store := &fakeStore{plugins: map[string]*model.Plugin{"plugin-1": {ID: "plugin-1"}}}
 	svc := New(store)

@@ -355,6 +355,15 @@ func (s *Service) AdminUpdateRating(ctx context.Context, caller Caller, pluginID
 	if rating != nil && (*rating < 1 || *rating > 5) {
 		return nil, ErrInvalidRequest
 	}
+	old, _, err := s.repo.GetWithRelations(ctx, adminScope(caller), storageID)
+	if err != nil {
+		return nil, mapStoreError(err)
+	}
+	// Embedded children are owned by their container graph and are not standalone
+	// admin mutation targets. Match the other mutators and conceal them as missing.
+	if old.IsEmbedded {
+		return nil, ErrNotFound
+	}
 	p, err := s.repo.UpdateRating(ctx, adminScope(caller), pluginrepo.RatingParams{
 		PluginID: storageID, Rating: rating, OperatorID: caller.UID,
 		OperatorName: caller.Name, RequestID: caller.RequestID,
