@@ -113,12 +113,9 @@ func (s *Service) Publish(ctx context.Context, caller Caller, params PublishPara
 			return nil, err
 		}
 		if policy.IsAutoApproveEnabled {
-			published, err := s.repo.ApproveReview(ctx, scope(caller), pluginrepo.ApproveReviewParams{
-				ReviewID: review.ID, ReviewerUID: caller.UID, ReviewerName: caller.Name,
-				DecisionSource: model.ReviewDecisionSourcePolicy, RequestID: caller.RequestID,
-			})
+			published, err := s.autoApproveReview(ctx, caller, review, "")
 			if err != nil {
-				return nil, mapStoreError(err)
+				return nil, err
 			}
 			published.IconURL = s.resolveIcon(ctx, published.Icon)
 			return &PublishResult{Plugin: &Detail{Plugin: published, Relations: detail.Relations}}, nil

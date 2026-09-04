@@ -2,10 +2,12 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/model"
+	pluginrepo "github.com/Mininglamp-OSS/octo-marketplace/internal/repository/plugin"
 )
 
 func TestUpdateReviewPolicyRequiresSpaceReviewerAndIsSharedBySpace(t *testing.T) {
@@ -57,5 +59,100 @@ func TestSubmitReviewAutoApprovesWithoutReviewerRole(t *testing.T) {
 	}
 	if got := store.review.approveParams.DecisionSource; got != model.ReviewDecisionSourcePolicy {
 		t.Fatalf("decision_source=%q, want policy", got)
+	}
+}
+
+func TestSubmitReviewAutoApproveFailureCancelsAndAllowsRetry(t *testing.T) {
+	store, svc := listingFixture(t, model.PluginVisibilitySpace, model.PluginListingStateDraft)
+	store.reviewPolicy = model.PluginReviewPolicy{IsAutoApproveEnabled: true}
+	store.review.approveErr = pluginrepo.ErrDeadlock
+
+	_, err := svc.SubmitReview(context.Background(), testCaller, ReviewSubmitParams{PluginID: "plugin-1", Version: "1.0.0"})
+	if !errors.Is(err, ErrDeadlock) {
+		t.Fatalf("err=%v, want ErrDeadlock", err)
+	}
+	if store.review.cancelCalls != 1 || store.review.cancelReviewID != "review-1" || store.review.cancelUID != testCaller.UID {
+		t.Fatalf("cancel = calls:%d review:%q uid:%q", store.review.cancelCalls, store.review.cancelReviewID, store.review.cancelUID)
+	}
+	if store.review.stored.Status != model.ReviewStatusCanceled || store.review.hasPending {
+		t.Fatalf("compensation left review pending: status=%q pending=%v", store.review.stored.Status, store.review.hasPending)
+	}
+
+	store.review.approveErr = nil
+	store.review.stored.Status = model.ReviewStatusPending
+	review, err := svc.SubmitReview(context.Background(), testCaller, ReviewSubmitParams{PluginID: "plugin-1", Version: "1.0.0"})
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if review.Status != model.ReviewStatusApproved {
+		t.Fatalf("retry status=%q, want approved", review.Status)
+	}
+}
+
+func TestPublishAutoApproveFailureCancelsAndAllowsRetry(t *testing.T) {
+	store, svc := listingFixture(t, model.PluginVisibilitySpace, model.PluginListingStateDraft)
+	store.reviewPolicy = model.PluginReviewPolicy{IsAutoApproveEnabled: true}
+	store.review.approveErr = pluginrepo.ErrDeadlock
+
+	if _, err := svc.Publish(context.Background(), testCaller, PublishParams{PluginID: "plugin-1"}); !errors.Is(err, ErrDeadlock) {
+		t.Fatalf("err=%v, want ErrDeadlock", err)
+	}
+	if store.review.cancelCalls != 1 || store.review.stored.Status != model.ReviewStatusCanceled || store.review.hasPending {
+		t.Fatalf("compensation did not clear publish review: calls=%d status=%q pending=%v", store.review.cancelCalls, store.review.stored.Status, store.review.hasPending)
+	}
+
+	store.review.approveErr = nil
+	store.review.stored.Status = model.ReviewStatusPending
+	published := *store.plugins["plugin-1"]
+	published.ListingState = model.PluginListingStatePublished
+	store.review.approved = &published
+	result, err := svc.Publish(context.Background(), testCaller, PublishParams{PluginID: "plugin-1"})
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if result.Review != nil || result.Plugin.Plugin.ListingState != model.PluginListingStatePublished {
+		t.Fatalf("retry result=%#v, want published", result)
+	}
+}
+
+func TestAutoApproveCompensationCleansOnlyOrphanedObjects(t *testing.T) {
+	store, _ := listingFixture(t, model.PluginVisibilitySpace, model.PluginListingStateDraft)
+	store.reviewPolicy = model.PluginReviewPolicy{IsAutoApproveEnabled: true}
+	store.review.approveErr = pluginrepo.ErrDeadlock
+	store.review.cancelFrozen = json.RawMessage(`{"only":"` + orphanedKey + `","shared":"` + sharedKey + `"}`)
+	store.review.cancelRetained = map[string]struct{}{sharedKey: {}}
+	objects := &importStorage{objects: map[string][]byte{orphanedKey: []byte("orphan"), sharedKey: []byte("shared")}}
+	svc := New(store, objects)
+
+	_, err := svc.SubmitReview(context.Background(), testCaller, ReviewSubmitParams{PluginID: "plugin-1", Version: "1.0.0"})
+	if !errors.Is(err, ErrDeadlock) {
+		t.Fatalf("err=%v, want ErrDeadlock", err)
+	}
+	if len(objects.deletes) != 1 || objects.deletes[0] != orphanedKey {
+		t.Fatalf("deleted=%v, want only %q", objects.deletes, orphanedKey)
+	}
+	if _, ok := objects.objects[sharedKey]; !ok {
+		t.Fatal("compensation deleted an object retained by the live row or version history")
+	}
+}
+
+func TestAutoApproveCompensationFailureDispatchesFallbackCard(t *testing.T) {
+	store, _ := listingFixture(t, model.PluginVisibilitySpace, model.PluginListingStateDraft)
+	store.reviewPolicy = model.PluginReviewPolicy{IsAutoApproveEnabled: true}
+	store.review.approveErr = pluginrepo.ErrDeadlock
+	store.review.cancelErr = errors.New("database unavailable")
+	notifier := &fakeNotifier{enabled: true}
+	var hooks []string
+	svc := fixedService(store).WithNotify(notifier, syncBestEffort(&hooks))
+
+	_, err := svc.SubmitReview(context.Background(), testCaller, ReviewSubmitParams{PluginID: "plugin-1", Version: "1.0.0"})
+	if !errors.Is(err, ErrDeadlock) {
+		t.Fatalf("err=%v, want original ErrDeadlock", err)
+	}
+	if len(hooks) != 1 || len(notifier.notifyIn) != 1 {
+		t.Fatalf("fallback dispatch hooks=%v notifications=%d", hooks, len(notifier.notifyIn))
+	}
+	if store.review.stored.Status != model.ReviewStatusPending {
+		t.Fatalf("failed compensation unexpectedly changed status to %q", store.review.stored.Status)
 	}
 }

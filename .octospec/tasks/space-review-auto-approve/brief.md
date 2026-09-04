@@ -8,17 +8,18 @@ slug: space-review-auto-approve
 
 ## Goal
 
-Let each Space owner choose whether organization-visible plugin submissions are
-approved automatically. The effective default is enabled, so Spaces without a
-stored override publish immediately while retaining an approval audit record.
+Let each Space owner or admin choose whether organization-visible plugin
+submissions are approved automatically. The effective default is enabled, so
+Spaces without a stored override publish immediately while retaining an
+approval audit record.
 
 ## Load-bearing behavior
 
 - The policy is owned and persisted by marketplace and scoped by authenticated
   `space_id`; request bodies never carry a Space identifier.
 - A missing policy row resolves to `is_auto_approve_enabled=true`.
-- Any authenticated Space member may read the effective policy; only the Space
-  owner (`space_member.role=2`) may update it.
+- Any authenticated Space member may read the effective policy; Space admins
+  and owners (`space_member.role>=1`) may update the one shared Space policy.
 - When enabled, publishing a Space-visible plugin still freezes a review request
   and then approves it with `decision_source=policy`; no approval card is sent.
 - When disabled, the existing pending-review and notification-card flow is used.
@@ -34,7 +35,8 @@ stored override publish immediately while retaining an approval audit record.
 ## Acceptance criteria
 
 - GET/PATCH endpoints use authenticated Space context and standard envelopes.
-- The PATCH endpoint rejects admins and members with `FORBIDDEN`.
+- The PATCH endpoint accepts owners and admins and rejects ordinary members with
+  `FORBIDDEN`.
 - Default-enabled, disabled, lookup-failure, and automatic audit-source paths
   have tests.
 - OpenAPI validation and compatibility checks pass.

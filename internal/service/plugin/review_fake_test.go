@@ -33,6 +33,7 @@ type reviewFake struct {
 	cancelReviewID string
 	cancelUID      string
 	cancelScope    pluginrepo.Scope
+	cancelCalls    int
 	receiptInserts []*model.CardActionReceipt
 	anySpaceCalls  int
 	pendingScope   pluginrepo.Scope
@@ -42,12 +43,14 @@ type reviewFake struct {
 	latestPlugin   string
 
 	// Canned outputs.
-	stored      *model.PluginReviewRequest
-	listItems   []*model.PluginReviewRequest
-	listTotal   int64
-	approved    *model.Plugin
-	receipt     *model.CardActionReceipt
-	anySpaceReq *model.PluginReviewRequest
+	stored         *model.PluginReviewRequest
+	listItems      []*model.PluginReviewRequest
+	listTotal      int64
+	approved       *model.Plugin
+	cancelFrozen   json.RawMessage
+	cancelRetained map[string]struct{}
+	receipt        *model.CardActionReceipt
+	anySpaceReq    *model.PluginReviewRequest
 	// anySpaceSecond, when set, is returned by the SECOND and later AnySpace
 	// reads, so a test can model "the row changed under us" (a lost race).
 	anySpaceSecond *model.PluginReviewRequest
@@ -215,7 +218,12 @@ func (f *fakeStore) CancelReview(_ context.Context, s pluginrepo.Scope, reviewID
 	f.review.cancelScope = s
 	f.review.cancelReviewID = reviewID
 	f.review.cancelUID = callerUID
-	return nil, nil, f.review.cancelErr
+	f.review.cancelCalls++
+	if f.review.cancelErr == nil && f.review.stored != nil {
+		f.review.stored.Status = model.ReviewStatusCanceled
+		f.review.hasPending = false
+	}
+	return f.review.cancelFrozen, f.review.cancelRetained, f.review.cancelErr
 }
 
 func (f *fakeStore) GetReviewRequestAnySpace(_ context.Context, _ string) (*model.PluginReviewRequest, error) {

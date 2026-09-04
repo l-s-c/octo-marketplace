@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Mininglamp-OSS/octo-marketplace/internal/logging"
@@ -143,11 +144,8 @@ func (s *Service) SubmitReview(ctx context.Context, caller Caller, params Review
 	if err != nil || !policy.IsAutoApproveEnabled {
 		return stored, err
 	}
-	if _, err := s.repo.ApproveReview(ctx, scope(caller), pluginrepo.ApproveReviewParams{
-		ReviewID: stored.ID, ReviewerUID: caller.UID, ReviewerName: caller.Name,
-		DecisionSource: model.ReviewDecisionSourcePolicy, RequestID: caller.RequestID,
-	}); err != nil {
-		return nil, mapStoreError(err)
+	if _, err := s.autoApproveReview(ctx, caller, stored, params.ParseTaskID); err != nil {
+		return nil, err
 	}
 	approved, err := s.repo.GetReviewRequest(ctx, scope(caller), stored.ID, false)
 	if err != nil {
@@ -307,6 +305,49 @@ func (s *Service) submitReview(ctx context.Context, caller Caller, params Review
 		s.dispatchReviewCard(caller, stored, detail.Plugin)
 	}
 	return stored, nil
+}
+
+// autoApproveReview applies an auto-policy decision and compensates if the
+// second transaction fails. InsertReviewRequest and ApproveReview are separate
+// repository operations, so without this cancellation a transient approve
+// failure leaves a pending request for which no approval card was dispatched.
+// Canceling restores the single-pending slot and cleans up snapshot-only objects,
+// allowing the caller to retry the original operation.
+func (s *Service) autoApproveReview(ctx context.Context, caller Caller, review *model.PluginReviewRequest, parseTaskID string) (*model.Plugin, error) {
+	published, approveErr := s.repo.ApproveReview(ctx, scope(caller), pluginrepo.ApproveReviewParams{
+		ReviewID: review.ID, ReviewerUID: caller.UID, ReviewerName: caller.Name,
+		DecisionSource: model.ReviewDecisionSourcePolicy, RequestID: caller.RequestID,
+	})
+	if approveErr == nil {
+		return published, nil
+	}
+
+	compensationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	frozenKeys, retained, cancelErr := s.repo.CancelReview(compensationCtx, scope(caller), review.ID, caller.UID)
+	if cancelErr != nil {
+		// Compensation lost a decision race or the store is unavailable. Dispatch a
+		// card so a request that may still be pending is never left unnotified.
+		s.dispatchReviewCard(caller, review, nil)
+		return nil, fmt.Errorf("auto-approve review: %w (cancel compensation: %v)", mapStoreError(approveErr), mapStoreError(cancelErr))
+	}
+	// Unlike a user cancellation, this rollback represents a failed submit. A
+	// consumed parse task therefore needs releasing so the exact request is
+	// retryable after a transient approval failure. Do this before best-effort
+	// object cleanup so a slow storage backend cannot prevent task recovery.
+	parseTaskID = strings.TrimSpace(parseTaskID)
+	if parseTaskID != "" && s.parseTasks != nil {
+		if releaseErr := s.parseTasks.ReleaseConsumedParseTask(compensationCtx, parseTaskID); releaseErr != nil {
+			logging.Warn("review: failed to release parse task after auto-approve rollback",
+				zap.String("review_id", review.ID),
+				zap.String("parse_task_id", parseTaskID),
+				zap.Error(releaseErr))
+		}
+	}
+	// CancelReview returns the frozen and retained sidecars from its transaction;
+	// use the normal cancel/reject GC so shared and version-owned objects survive.
+	s.cleanupOrphanedReviewObjects(compensationCtx, frozenKeys, retained)
+	return nil, mapStoreError(approveErr)
 }
 
 // freezeSubmission builds the frozen snapshot a reviewer will decide on.
