@@ -581,6 +581,7 @@ type ratingUpdateResponse struct {
 // @Failure 401 {object} apiresponse.Error "AUTH_REQUIRED"
 // @Failure 403 {object} apiresponse.Error "FORBIDDEN"
 // @Failure 404 {object} apiresponse.Error "NOT_FOUND"
+// @Failure 409 {object} apiresponse.Error "CONFLICT"
 // @Failure 500 {object} apiresponse.Error "INTERNAL_ERROR"
 // @Router /admin/plugins/{plugin_id}/rating [patch]
 func (h *AdminHandler) UpdateRating(c *gin.Context) {

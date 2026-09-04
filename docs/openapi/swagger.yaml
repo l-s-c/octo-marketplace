@@ -1695,8 +1695,9 @@ components:
         rating:
           maximum: 5
           minimum: 1
-          type: integer
-          x-nullable: true
+          type:
+          - integer
+          - 'null'
         review_id:
           type: string
         space_id:
@@ -1775,8 +1776,9 @@ components:
         rating:
           maximum: 5
           minimum: 1
-          type: integer
-          x-nullable: true
+          type:
+          - integer
+          - 'null'
         review_id:
           type: string
         space_id:
@@ -1868,8 +1870,9 @@ components:
         rating:
           maximum: 5
           minimum: 1
-          type: integer
-          x-nullable: true
+          type:
+          - integer
+          - 'null'
       required:
       - rating
       type: object
@@ -1880,8 +1883,9 @@ components:
         rating:
           maximum: 5
           minimum: 1
-          type: integer
-          x-nullable: true
+          type:
+          - integer
+          - 'null'
       type: object
     internal_api_handler_plugin.relationRequest:
       properties:
@@ -3040,11 +3044,7 @@ paths:
         content:
           application/json:
             schema:
-              oneOf:
-              - type: object
-              - $ref: '#/components/schemas/internal_api_handler_plugin.ratingUpdateRequest'
-                description: Nullable administrator rating (1-5)
-                summary: body
+              $ref: '#/components/schemas/internal_api_handler_plugin.ratingUpdateRequest'
         description: Nullable administrator rating (1-5)
         required: true
       responses:
@@ -3078,6 +3078,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
           description: NOT_FOUND
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github_com_Mininglamp-OSS_octo-marketplace_internal_api_response.Error'
+          description: CONFLICT
         '500':
           content:
             application/json:
