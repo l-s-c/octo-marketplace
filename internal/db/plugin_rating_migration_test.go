@@ -1,6 +1,8 @@
 package db
 
 import (
+	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -14,20 +16,20 @@ func TestPluginRatingMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sql := string(raw)
+	sqlText := string(raw)
 	for _, want := range []string{
 		"-- +migrate Up", "information_schema.COLUMNS", "PREPARE add_plugin_rating", "'DO 0'",
-		"ADD COLUMN `rating` TINYINT UNSIGNED NULL", "CHECK (`rating` IS NULL OR `rating` BETWEEN 1 AND 5)",
-		"-- +migrate Down", "DROP CHECK `chk_plugins_rating_range`", "DROP COLUMN `rating`",
+		"ADD COLUMN `rating` TINYINT UNSIGNED NULL, ALGORITHM=INSTANT",
+		"-- +migrate Down", "DROP COLUMN `rating`",
 	} {
-		if !strings.Contains(sql, want) {
+		if !strings.Contains(sqlText, want) {
 			t.Errorf("migration missing %q", want)
 		}
 	}
-	upper := strings.ToUpper(sql)
-	for _, forbidden := range []string{" AFTER `", " FIRST"} {
+	upper := strings.ToUpper(sqlText)
+	for _, forbidden := range []string{" AFTER `", " FIRST", "ADD CONSTRAINT", " CHECK (", "DROP CHECK"} {
 		if strings.Contains(upper, forbidden) {
-			t.Errorf("migration must not position the rating column with %q", strings.TrimSpace(forbidden))
+			t.Errorf("instant rating migration must not contain %q", strings.TrimSpace(forbidden))
 		}
 	}
 }
@@ -39,32 +41,36 @@ func TestPluginRatingMigrationMySQL(t *testing.T) {
 		t.Fatalf("migrate Up: %v", err)
 	}
 
-	for _, tc := range []struct {
-		name   string
-		rating any
-		ok     bool
-	}{
-		{name: "null", rating: nil, ok: true},
-		{name: "minimum", rating: 1, ok: true},
-		{name: "maximum", rating: 5, ok: true},
-		{name: "zero", rating: 0},
-		{name: "six", rating: 6},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			id := "rating-" + tc.name
-			_, err := database.Exec(`INSERT INTO plugins
-				(plugin_id, plugin_name, plugin_type, tags_json, owner_uid, visibility,
-				 manifest_json, plugin_json, manifest_hash, plugin_hash, rating, created_at, updated_at)
-				VALUES (?, ?, 'skill', JSON_ARRAY(), 'user-1', 'private',
-				        JSON_OBJECT(), JSON_OBJECT(), REPEAT('a', 71), REPEAT('b', 71), ?, NOW(3), NOW(3))`,
-				id, id, tc.rating)
-			if tc.ok && err != nil {
-				t.Fatalf("insert rating %v: %v", tc.rating, err)
-			}
-			if !tc.ok && err == nil {
-				t.Fatalf("rating %v unexpectedly satisfied CHECK", tc.rating)
-			}
-		})
+	var dataType, columnType, nullable string
+	var defaultValue sql.NullString
+	if err := database.QueryRow(`SELECT DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT
+		FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'plugins' AND COLUMN_NAME = 'rating'`).
+		Scan(&dataType, &columnType, &nullable, &defaultValue); err != nil {
+		t.Fatalf("read rating column shape: %v", err)
+	}
+	if dataType != "tinyint" || columnType != "tinyint unsigned" || nullable != "YES" || defaultValue.Valid {
+		t.Errorf("rating column shape = data_type %q, column_type %q, nullable %q, default %#v; want tinyint unsigned NULL without default",
+			dataType, columnType, nullable, defaultValue)
+	}
+
+	for rating := 1; rating <= 5; rating++ {
+		id := fmt.Sprintf("rating-round-trip-%d", rating)
+		if _, err := database.Exec(`INSERT INTO plugins
+			(plugin_id, plugin_name, plugin_type, tags_json, owner_uid, visibility,
+			 manifest_json, plugin_json, manifest_hash, plugin_hash, rating, created_at, updated_at)
+			VALUES (?, ?, 'skill', JSON_ARRAY(), 'user-1', 'private',
+			        JSON_OBJECT(), JSON_OBJECT(), REPEAT('a', 71), REPEAT('b', 71), ?, NOW(3), NOW(3))`,
+			id, id, rating); err != nil {
+			t.Fatalf("insert rating %d: %v", rating, err)
+		}
+		var got int
+		if err := database.QueryRow("SELECT rating FROM plugins WHERE plugin_id = ?", id).Scan(&got); err != nil {
+			t.Fatalf("read rating %d: %v", rating, err)
+		}
+		if got != rating {
+			t.Errorf("rating round trip = %d, want %d", got, rating)
+		}
 	}
 
 	// Simulate DDL committed but sql-migrate bookkeeping missing: deleting only
@@ -74,5 +80,8 @@ func TestPluginRatingMigrationMySQL(t *testing.T) {
 	}
 	if _, err := migrate.Exec(database, "mysql", source, migrate.Up); err != nil {
 		t.Fatalf("replay guarded migration: %v", err)
+	}
+	if got := columnCount(t, database, "plugins", "rating"); got != 1 {
+		t.Fatalf("rating column count after replay = %d, want 1", got)
 	}
 }

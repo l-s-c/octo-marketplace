@@ -6,7 +6,7 @@ Add one nullable administrator-assigned 1–5 rating to every unified `plugins` 
 
 ## Load-bearing behavior
 
-- `plugins.rating` is nullable and constrained to the inclusive range 1–5.
+- `plugins.rating` is a nullable unsigned tinyint. The API/service contract constrains administrator-assigned values to the inclusive range 1–5; the database intentionally has no enforced range `CHECK` so adding the column remains an explicit `ALGORITHM=INSTANT` metadata-only migration.
 - `PATCH /api/v1/admin/plugins/{plugin_id}/rating` accepts a required JSON `rating` property whose value is `null` or an integer from 1 through 5.
 - The endpoint uses only the existing `RoleMarketAdmin` route gate and the existing cross-Space admin repository scope.
 - Rating updates append a plugin audit record in the same transaction using action `rate`; because rating is outside snapshots and hashes, the remark records the explicit `rating:<before>-><after>` transition.
@@ -21,7 +21,7 @@ Add one nullable administrator-assigned 1–5 rating to every unified `plugins` 
 
 ## Acceptance criteria
 
-- Migration adds and removes the constrained nullable column using the next repository migration ID.
+- Migration adds the nullable unsigned tinyint with an explicit `ALGORITHM=INSTANT`, no enforced database range `CHECK`, and a replay guard, and removes the column using the next repository migration ID.
 - Model, repository, service, handler, route, DTOs, and generated OpenAPI are aligned.
 - Repository, service, handler/router, DTO/OpenAPI, and migration behavior have focused tests.
 - Relevant Go tests and OpenAPI checks pass.
